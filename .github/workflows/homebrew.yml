@@ -1,0 +1,85 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Derive version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Wait for PyPI availability
+        run: |
+          echo "Waiting for hle-client==${VERSION} on PyPI..."
+          for i in $(seq 1 30); do
+            if pip index versions hle-client 2>/dev/null | grep -q "$VERSION"; then
+              echo "Package available on PyPI"
+              exit 0
+            fi
+            echo "Attempt $i/30 — waiting 20s..."
+            sleep 20
+          done
+          echo "Timed out waiting for PyPI"
+          exit 1
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: hle-world/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Update formula
+        run: |
+          pip install homebrew-pypi-poet "hle-client==${VERSION}"
+
+          # Generate resource stanzas
+          RESOURCES=$(poet hle-client 2>/dev/null | sed -n '/^  resource/,/^  end$/p')
+
+          # Get sdist SHA256
+          pip download "hle-client==${VERSION}" --no-deps --no-binary :all: -d /tmp/hle-sdist
+          SHA256=$(sha256sum /tmp/hle-sdist/*.tar.gz | cut -d' ' -f1)
+          SDIST_URL="https://files.pythonhosted.org/packages/source/h/hle-client/hle_client-${VERSION}.tar.gz"
+
+          mkdir -p Formula
+          cat > Formula/hle-client.rb << FORMULA
+          class HleClient < Formula
+            include Language::Python::Virtualenv
+
+            desc "Home Lab Everywhere — Expose homelab services with built-in SSO"
+            homepage "https://hle.world"
+            url "${SDIST_URL}"
+            sha256 "${SHA256}"
+            license "MIT"
+
+            depends_on "python@3.13"
+
+          ${RESOURCES}
+
+            def install
+              virtualenv_install_with_resources
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/hle --version")
+            end
+          end
+          FORMULA
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/hle-client.rb
+          git commit -m "Update hle-client to ${VERSION}"
+          git push
