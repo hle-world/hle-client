@@ -322,6 +322,20 @@ class Tunnel:
         open_req = WsStreamOpen.model_validate(msg.payload)
         stream_id = open_req.stream_id
 
+        # Guard against SSRF: reject non-relative paths from the relay.
+        if not open_req.path.startswith("/") or open_req.path.startswith("//"):
+            logger.error("Rejecting non-relative WS path: %s", open_req.path[:100])
+            close_msg = ProtocolMessage(
+                type=MessageType.WS_CLOSE,
+                tunnel_id=self._tunnel_id,
+                payload=WsStreamClose(
+                    stream_id=stream_id, code=1008, reason="invalid path"
+                ).model_dump(),
+            )
+            with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                await ws.send(close_msg.model_dump_json())
+            return
+
         # Build the local WS URL.
         local_base = self.config.service_url.replace("http://", "ws://").replace(
             "https://", "wss://"
