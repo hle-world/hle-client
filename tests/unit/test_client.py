@@ -127,6 +127,32 @@ class TestLocalProxyForwardHttp:
         with pytest.raises(RuntimeError, match="Proxy not started"):
             await proxy.forward_http(method="GET", path="/test", headers={})
 
+    async def test_rejects_absolute_url_ssrf(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        status, headers, body = await proxy.forward_http(
+            method="GET",
+            path="http://169.254.169.254/latest/meta-data/",
+            headers={},
+        )
+        assert status == 400
+        assert b"path must be relative" in body
+        await proxy.stop()
+
+    async def test_rejects_scheme_relative_url_ssrf(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        status, headers, body = await proxy.forward_http(
+            method="GET",
+            path="//evil.com/steal-data",
+            headers={},
+        )
+        assert status == 400
+        assert b"path must be relative" in body
+        await proxy.stop()
+
     async def test_successful_get(self):
         proxy = _proxy()
         await proxy.start()
@@ -571,6 +597,59 @@ class TestTunnelHandleHttpRequest:
         resp_msg = ProtocolMessage.model_validate_json(sent[0])
         assert resp_msg.payload["body"] is None
         await tunnel._proxy.stop()
+
+
+class TestTunnelSsrfProtection:
+    """Test SSRF guards on proxied paths."""
+
+    async def test_ws_open_rejects_absolute_url(self):
+        tunnel = _tunnel()
+        tunnel._tunnel_id = "t-ssrf"
+
+        mock_ws = AsyncMock()
+        sent: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        from hle_common.models import WsStreamOpen
+
+        open_payload = WsStreamOpen(
+            stream_id="s-evil",
+            path="http://169.254.169.254/latest/meta-data/",
+        )
+        msg = ProtocolMessage(
+            type=MessageType.WS_OPEN,
+            payload=open_payload.model_dump(),
+        )
+
+        await tunnel._handle_ws_open(mock_ws, msg)
+
+        # Should send a WS_CLOSE back, not open a connection.
+        assert len(sent) == 1
+        close_msg = ProtocolMessage.model_validate_json(sent[0])
+        assert close_msg.type == MessageType.WS_CLOSE
+        assert close_msg.payload["code"] == 1008
+
+    async def test_ws_open_rejects_scheme_relative_path(self):
+        tunnel = _tunnel()
+        tunnel._tunnel_id = "t-ssrf2"
+
+        mock_ws = AsyncMock()
+        sent: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        from hle_common.models import WsStreamOpen
+
+        open_payload = WsStreamOpen(stream_id="s-evil2", path="//evil.com/ws")
+        msg = ProtocolMessage(
+            type=MessageType.WS_OPEN,
+            payload=open_payload.model_dump(),
+        )
+
+        await tunnel._handle_ws_open(mock_ws, msg)
+
+        assert len(sent) == 1
+        close_msg = ProtocolMessage.model_validate_json(sent[0])
+        assert close_msg.type == MessageType.WS_CLOSE
 
 
 class TestTunnelHandleWsFrame:

@@ -84,6 +84,18 @@ class LocalProxy:
         if not self._http_client:
             raise RuntimeError("Proxy not started — call start() first")
 
+        # Guard against SSRF: the relay controls `path`, so reject anything
+        # that isn't a simple relative path.  An absolute URL (e.g.
+        # "http://169.254.169.254/...") would cause httpx to ignore base_url.
+        # Protocol-relative URLs ("//evil.com/...") are also dangerous.
+        if not path.startswith("/") or path.startswith("//"):
+            logger.error("Rejecting non-relative path: %s", path[:100])
+            return (
+                400,
+                {"content-type": "text/plain"},
+                b"Bad Request: path must be relative",
+            )
+
         url = path
         if query_string:
             url = f"{path}?{query_string}"
