@@ -1,9 +1,9 @@
 # HLE Client
 
-[![PyPI](https://img.shields.io/pypi/v/hle-client)](https://pypi.org/project/hle-client/)
+[![PyPI](https://img.shields.io/pypi/v/hle-client?v=2)](https://pypi.org/project/hle-client/)
 [![Python](https://img.shields.io/pypi/pyversions/hle-client)](https://pypi.org/project/hle-client/)
-[![License](https://img.shields.io/github/license/hle-world/hle-client)](LICENSE)
-[![CI](https://github.com/hle-world/hle-client/actions/workflows/test.yml/badge.svg)](https://github.com/hle-world/hle-client/actions/workflows/test.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![CI](https://github.com/hle-world/hle-client/actions/workflows/test.yml/badge.svg?v=2)](https://github.com/hle-world/hle-client/actions/workflows/test.yml)
 
 **Home Lab Everywhere** — Expose homelab services to the internet with built-in SSO authentication and WebSocket support.
 
