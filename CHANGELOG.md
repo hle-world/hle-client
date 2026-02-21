@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.2 — 2026-02-21
+
+Fix README badges: use static license badge (repo is private), bust GitHub camo cache for PyPI version badge.
+
 ## v1.1.1 — 2026-02-21
 
 Fix outdated version in README curl installer example (`0.4.0` → `1.1.1`).
