@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,9 +54,9 @@ def _load_api_key() -> str | None:
 
 
 def _save_api_key(api_key: str) -> None:
-    """Persist api_key to the config file."""
+    """Persist api_key to the config file with restrictive permissions."""
     try:
-        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         existing_lines: list[str] = []
         found = False
@@ -71,7 +72,9 @@ def _save_api_key(api_key: str) -> None:
         if not found:
             existing_lines.append(f'api_key = "{api_key}"\n')
 
-        with open(_CONFIG_FILE, "w") as f:
+        # Write with 0o600 (owner-only read/write) to protect the API key.
+        fd = os.open(_CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.writelines(existing_lines)
 
         # nosemgrep: python-logger-credential-disclosure

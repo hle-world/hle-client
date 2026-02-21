@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.2 — 2026-02-21
+
+- Fix API key config file permissions: `~/.config/hle/config.toml` now created with `0600` (owner-only), config directory with `0700`
+
 ## v1.0.1 — 2026-02-21
 
 Security hardening release.
