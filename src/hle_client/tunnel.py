@@ -96,6 +96,11 @@ class TunnelConfig:
     max_reconnect_delay: float = 60.0
 
 
+# Hard limits to protect against a malicious or compromised relay server.
+MAX_WS_STREAMS = 100
+MAX_SPEED_TEST_CHUNKS = 100  # ~6.4 MB at 64 KB/chunk
+
+
 @dataclass
 class Tunnel:
     """Manages a single tunnel connection to the relay server.
@@ -336,6 +341,25 @@ class Tunnel:
                 await ws.send(close_msg.model_dump_json())
             return
 
+        # Limit concurrent streams to prevent resource exhaustion.
+        async with self._ws_streams_lock:
+            if len(self._ws_streams) >= MAX_WS_STREAMS:
+                logger.warning(
+                    "WS stream limit reached (%d), rejecting stream_id=%s",
+                    MAX_WS_STREAMS,
+                    stream_id,
+                )
+                close_msg = ProtocolMessage(
+                    type=MessageType.WS_CLOSE,
+                    tunnel_id=self._tunnel_id,
+                    payload=WsStreamClose(
+                        stream_id=stream_id, code=1013, reason="stream limit reached"
+                    ).model_dump(),
+                )
+                with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                    await ws.send(close_msg.model_dump_json())
+                return
+
         # Build the local WS URL.
         local_base = self.config.service_url.replace("http://", "ws://").replace(
             "https://", "wss://"
@@ -476,6 +500,14 @@ class Tunnel:
     ) -> None:
         """Handle a speed test data message from the server."""
         data = SpeedTestData.model_validate(msg.payload)
+
+        if data.total_chunks > MAX_SPEED_TEST_CHUNKS:
+            logger.warning(
+                "Speed test rejected: total_chunks=%d exceeds limit of %d",
+                data.total_chunks,
+                MAX_SPEED_TEST_CHUNKS,
+            )
+            return
 
         if data.direction == "download":
             # Receiving download test chunks — track timing

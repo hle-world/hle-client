@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import click
 from rich.console import Console
@@ -78,12 +79,17 @@ def expose(
     )
     tunnel = Tunnel(config=config)
 
+    # Warn if the API key was passed as a CLI flag (visible in ps/proc).
+    if api_key and not os.environ.get("HLE_API_KEY"):
+        console.print(
+            "[yellow]Warning:[/yellow] API key passed via --api-key is visible in process "
+            "listings.\n         Use HLE_API_KEY env var or ~/.config/hle/config.toml instead."
+        )
+
     console.print(f"\n[bold]HLE[/bold] v{__version__}  Exposing [cyan]{service}[/cyan]")
     console.print(f"     Relay   [dim]{relay_host}:{relay_port}[/dim]")
     if service_label:
         console.print(f"     Label   [dim]{service_label}[/dim]")
-    if api_key:
-        console.print(f"     Key     [dim]{api_key[:8]}...[/dim]")
     console.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
     console.print()
 

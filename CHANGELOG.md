@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.1 — 2026-02-21
+
+Security hardening release.
+
+- Cap concurrent WebSocket streams at 100 to prevent resource exhaustion
+- Cap speed test chunks at 100 (~6.4 MB) to prevent bandwidth exhaustion
+- Warn when API key is passed via --api-key flag (visible in process listings)
+- Stop printing partial API key to console
+- Install script now prompts before modifying shell RC files
+- Install script verifies package version after installation
+
 ## v0.4.0 — 2026-02-19
 
 Initial public release of the HLE client, extracted from the monorepo as a standalone package.
