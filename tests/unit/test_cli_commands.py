@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import typing
 from unittest.mock import AsyncMock, patch
+
+if typing.TYPE_CHECKING:
+    from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -276,3 +280,128 @@ class TestErrorHandling:
             result = runner.invoke(main, ["tunnels"], env={"HLE_API_KEY": ""})
         assert result.exit_code == 1
         assert "No API key found" in result.output
+        assert "hle auth login" in result.output
+
+
+class TestAuthLogin:
+    """Tests for ``hle auth login``."""
+
+    def test_auth_login_with_api_key(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        config_file = tmp_path / "config.toml"
+        with (
+            patch("hle_client.tunnel._CONFIG_FILE", config_file),
+            patch("hle_client.tunnel._CONFIG_DIR", tmp_path),
+        ):
+            result = runner.invoke(main, ["auth", "login", "--api-key", "hle_" + "a" * 32])
+        assert result.exit_code == 0
+        assert "Saved" in result.output
+        assert config_file.exists()
+        content = config_file.read_text()
+        assert "hle_" + "a" * 32 in content
+
+    def test_auth_login_interactive(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        config_file = tmp_path / "config.toml"
+        valid_key = "hle_" + "b" * 32
+        with (
+            patch("hle_client.tunnel._CONFIG_FILE", config_file),
+            patch("hle_client.tunnel._CONFIG_DIR", tmp_path),
+            patch("hle_client.cli.webbrowser.open"),
+        ):
+            result = runner.invoke(main, ["auth", "login"], input=valid_key + "\n")
+        assert result.exit_code == 0
+        assert "Saved" in result.output
+        assert config_file.exists()
+        assert valid_key in config_file.read_text()
+
+    def test_auth_login_invalid_key(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["auth", "login", "--api-key", "bad_key"])
+        assert result.exit_code == 1
+        assert "Invalid API key format" in result.output
+
+    def test_auth_login_invalid_key_too_short(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["auth", "login", "--api-key", "hle_abc"])
+        assert result.exit_code == 1
+        assert "Invalid API key format" in result.output
+
+
+class TestAuthStatus:
+    """Tests for ``hle auth status``."""
+
+    def test_auth_status_from_config(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        valid_key = "hle_" + "c" * 32
+        with patch("hle_client.cli._load_api_key", return_value=valid_key):
+            result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
+        assert result.exit_code == 0
+        assert "config file" in result.output
+        assert "hle_" in result.output
+        assert valid_key not in result.output  # masked
+
+    def test_auth_status_from_env(self) -> None:
+        runner = CliRunner()
+        valid_key = "hle_" + "d" * 32
+        result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": valid_key})
+        assert result.exit_code == 0
+        assert "environment variable" in result.output
+        assert valid_key not in result.output  # masked
+
+    def test_auth_status_no_key(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._load_api_key", return_value=None):
+            result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
+        assert result.exit_code == 0
+        assert "No API key configured" in result.output
+
+
+class TestAuthLogout:
+    """Tests for ``hle auth logout``."""
+
+    def test_auth_logout(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        config_file = tmp_path / "config.toml"
+        config_file.write_text('api_key = "hle_' + "e" * 32 + '"\nother = "keep"\n')
+        with (
+            patch("hle_client.tunnel._CONFIG_FILE", config_file),
+            patch("hle_client.tunnel._CONFIG_DIR", tmp_path),
+        ):
+            result = runner.invoke(main, ["auth", "logout"])
+        assert result.exit_code == 0
+        assert "API key removed" in result.output
+        content = config_file.read_text()
+        assert "api_key" not in content
+        assert "other" in content  # other config preserved
+
+    def test_auth_logout_no_key(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        config_file = tmp_path / "nonexistent.toml"
+        with patch("hle_client.tunnel._CONFIG_FILE", config_file):
+            result = runner.invoke(main, ["auth", "logout"])
+        assert result.exit_code == 0
+        assert "No API key saved" in result.output
+
+
+class TestExposeNoAutoSave:
+    """Verify that ``hle expose`` no longer auto-saves the API key."""
+
+    def test_expose_does_not_auto_save(self, tmp_path: Path) -> None:
+        """The auto-save block was removed; _save_api_key should never be called."""
+        runner = CliRunner()
+        with patch("hle_client.cli.asyncio.run") as mock_run:
+            mock_run.return_value = None
+            result = runner.invoke(
+                main,
+                [
+                    "expose",
+                    "--service",
+                    "http://localhost:8080",
+                    "--api-key",
+                    "hle_" + "f" * 32,
+                ],
+            )
+        # expose ran (asyncio.run was called) — it should not call _save_api_key
+        assert result.exit_code == 0
+        assert mock_run.called

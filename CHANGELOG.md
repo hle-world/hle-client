@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.1.0 — 2026-02-21
+
+Add `hle auth` command for explicit API key management.
+
+- `hle auth login` — Opens dashboard in browser and prompts for API key paste (hidden input), or accepts `--api-key` flag for headless/CI use
+- `hle auth status` — Shows current API key source (env var, config file, or none) with masked key
+- `hle auth logout` — Removes saved API key from config file
+- `--api-key` flag on `hle expose` is now purely ephemeral (never auto-saved to config)
+- Updated error messages to suggest `hle auth login`
+
+<details>
+<summary>Technical details</summary>
+
+- Removed auto-save block from `tunnel.py:_connect_once()` — API keys are only persisted via `hle auth login`
+- Added `_remove_api_key()` to `tunnel.py` for config file cleanup
+- API key format validation: `hle_` prefix + 32 hex chars (36 total)
+- Interactive login uses `click.prompt(hide_input=True)` to prevent shoulder surfing
+
+</details>
+
 ## v1.0.2 — 2026-02-21
 
 - Fix API key config file permissions: `~/.config/hle/config.toml` now created with `0600` (owner-only), config directory with `0700`
