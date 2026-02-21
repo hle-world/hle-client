@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.1 — 2026-02-21
+
+Fix outdated version in README curl installer example (`0.4.0` → `1.1.1`).
+
 ## v1.1.0 — 2026-02-21
 
 Add `hle auth` command for explicit API key management.
