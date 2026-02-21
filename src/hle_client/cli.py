@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import webbrowser
 
 import click
 from rich.console import Console
 from rich.table import Table
 
 from hle_client import __version__
-from hle_client.tunnel import Tunnel, TunnelConfig, _load_api_key
+from hle_client.tunnel import Tunnel, TunnelConfig, _load_api_key, _remove_api_key, _save_api_key
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -25,8 +27,7 @@ def _resolve_api_key(api_key: str | None) -> str:
     resolved = api_key or _load_api_key()
     if not resolved:
         console.print(
-            "[red]No API key found.[/red] Provide --api-key, set HLE_API_KEY, "
-            "or save one to ~/.config/hle/config.toml"
+            "[red]No API key found.[/red] Run 'hle auth login', set HLE_API_KEY, or pass --api-key."
         )
         raise SystemExit(1)
     return resolved
@@ -97,6 +98,72 @@ def expose(
         asyncio.run(tunnel.connect())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# hle auth — manage API key authentication
+# ---------------------------------------------------------------------------
+
+_API_KEY_PATTERN = re.compile(r"^hle_[0-9a-f]{32}$")
+
+
+@main.group()
+def auth() -> None:
+    """Manage API key authentication."""
+
+
+@auth.command()
+@click.option(
+    "--api-key",
+    default=None,
+    help="API key to save (skips browser prompt)",
+)
+def login(api_key: str | None) -> None:
+    """Save an API key to ~/.config/hle/config.toml."""
+    if api_key is None:
+        console.print("Opening [cyan]https://hle.world/dashboard[/cyan] ...")
+        webbrowser.open("https://hle.world/dashboard")
+        console.print("Copy your API key from the dashboard and paste it here.\n")
+        api_key = click.prompt("API key", hide_input=True)
+
+    if not _API_KEY_PATTERN.match(api_key):
+        console.print(
+            "[red]Error:[/red] Invalid API key format. "
+            "Expected 'hle_' followed by 32 hex characters."
+        )
+        raise SystemExit(1)
+
+    _save_api_key(api_key)
+    console.print("[green]Saved[/green] to ~/.config/hle/config.toml")
+
+
+@auth.command("status")
+def auth_status() -> None:
+    """Show the current API key source and masked value."""
+    env_key = os.environ.get("HLE_API_KEY")
+    if env_key:
+        masked = f"{env_key[:4]}...{env_key[-4:]}" if len(env_key) > 8 else env_key
+        console.print("API key source: [cyan]HLE_API_KEY environment variable[/cyan]")
+        console.print(f"Key: [dim]{masked}[/dim]")
+        return
+
+    config_key = _load_api_key()
+    if config_key:
+        masked = f"{config_key[:4]}...{config_key[-4:]}" if len(config_key) > 8 else config_key
+        console.print("API key source: [cyan]config file (~/.config/hle/config.toml)[/cyan]")
+        console.print(f"Key: [dim]{masked}[/dim]")
+        return
+
+    console.print("[dim]No API key configured.[/dim]")
+
+
+@auth.command()
+def logout() -> None:
+    """Remove the saved API key from ~/.config/hle/config.toml."""
+    if _remove_api_key():
+        console.print("[green]API key removed[/green] from ~/.config/hle/config.toml")
+    else:
+        console.print("[dim]No API key saved in config file.[/dim]")
 
 
 @main.command()

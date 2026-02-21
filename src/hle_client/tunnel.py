@@ -84,6 +84,29 @@ def _save_api_key(api_key: str) -> None:
         logger.warning("Failed to save API key to %s", _CONFIG_FILE, exc_info=True)
 
 
+def _remove_api_key() -> bool:
+    """Remove api_key from the config file. Returns True if a key was removed."""
+    if not _CONFIG_FILE.exists():
+        return False
+    try:
+        with open(_CONFIG_FILE) as f:
+            lines = f.readlines()
+
+        new_lines = [line for line in lines if not line.startswith("api_key")]
+        if len(new_lines) == len(lines):
+            return False  # No api_key line found
+
+        fd = os.open(_CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.writelines(new_lines)
+
+        logger.info("API key removed from %s", _CONFIG_FILE)
+        return True
+    except Exception:
+        logger.warning("Failed to remove API key from %s", _CONFIG_FILE, exc_info=True)
+        return False
+
+
 @dataclass
 class TunnelConfig:
     """Configuration for a tunnel connection."""
@@ -196,8 +219,7 @@ class Tunnel:
         api_key = self.config.api_key or _load_api_key()
         if not api_key:
             raise ConnectionError(
-                "No API key found. Provide --api-key, set HLE_API_KEY, "
-                "or save one to ~/.config/hle/config.toml"
+                "No API key found. Run 'hle auth login', set HLE_API_KEY, or pass --api-key."
             )
 
         async with websockets.connect(relay_uri) as ws:
@@ -232,11 +254,6 @@ class Tunnel:
                 self._tunnel_id,
                 self._public_url,
             )
-
-            # Persist the API key for next reconnect.
-            if self.config.api_key is None:
-                _save_api_key(api_key)
-                self.config.api_key = api_key
 
             # --- Receive loop ---
             await self._receive_loop(ws)

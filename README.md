@@ -43,13 +43,19 @@ brew install hle-world/tap/hle-client
 
 1. **Sign up** at [hle.world](https://hle.world) and create an API key in the dashboard.
 
-2. **Expose a service:**
+2. **Save your API key:**
 
 ```bash
-hle expose --service http://localhost:8080 --api-key hle_your_key_here
+hle auth login
 ```
 
-The API key is saved to `~/.config/hle/config.toml` after first use, so you only need to provide it once.
+This opens the dashboard in your browser. Copy your key and paste it at the prompt. The key is saved to `~/.config/hle/config.toml`.
+
+3. **Expose a service:**
+
+```bash
+hle expose --service http://localhost:8080
+```
 
 ## CLI Usage
 
@@ -70,8 +76,17 @@ Options:
 - `--auth` — Auth mode: `sso` (default) or `none`
 - `--websocket/--no-websocket` — Enable/disable WebSocket proxying (default: enabled)
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
-- `--relay-host` — Relay server host (default: `hle.world`)
-- `--relay-port` — Relay server port (default: `443`)
+
+### `hle auth`
+
+Manage your API key.
+
+```bash
+hle auth login                              # Save key (opens dashboard)
+hle auth login --api-key hle_xxx            # Save key non-interactively
+hle auth status                             # Show current key source
+hle auth logout                             # Remove saved key
+```
 
 ### `hle tunnels`
 
