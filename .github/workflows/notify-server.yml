@@ -8,6 +8,8 @@ on:
 jobs:
   notify:
     runs-on: arc-runner-hle-client
+    container:
+      image: node:20-slim
     steps:
       - uses: peter-evans/repository-dispatch@v3
         with:

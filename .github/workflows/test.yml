@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: arc-runner-hle-client
+    container:
+      image: python:${{ matrix.python-version }}-slim
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -16,33 +18,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        run: pip install uv
 
       - name: Install dependencies
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
 
       - name: Lint
         run: |
-          source .venv/bin/activate
           ruff check src/ tests/
           ruff format --check src/ tests/
 
       - name: Test
-        run: |
-          source .venv/bin/activate
-          pytest tests/ -v
+        run: pytest tests/ -v
 
       - name: Verify imports
         run: |
-          source .venv/bin/activate
           python -c "from hle_client.cli import main; print('CLI import OK')"
           python -c "from hle_common.protocol import MessageType; print('Protocol import OK')"
           python -c "from hle_common.models import TunnelRegistration; print('Models import OK')"

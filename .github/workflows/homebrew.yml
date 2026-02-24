@@ -7,6 +7,8 @@ on:
 jobs:
   update-formula:
     runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
 
     steps:
       - name: Derive version from tag
@@ -28,16 +30,14 @@ jobs:
           echo "Timed out waiting for PyPI"
           exit 1
 
+      - name: Install git
+        run: apt-get update && apt-get install -y git
+
       - name: Checkout homebrew-tap
         uses: actions/checkout@v4
         with:
           repository: hle-world/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
 
       - name: Update formula
         run: |

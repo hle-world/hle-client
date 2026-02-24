@@ -11,45 +11,34 @@ permissions:
 jobs:
   test:
     runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        run: pip install uv
 
       - name: Install dependencies
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
+        run: uv pip install --system -e ".[dev]"
 
       - name: Lint
         run: |
-          source .venv/bin/activate
           ruff check src/ tests/
           ruff format --check src/ tests/
 
       - name: Test
-        run: |
-          source .venv/bin/activate
-          pytest tests/ -v
+        run: pytest tests/ -v
 
   publish:
     needs: test
     runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
     environment: pypi
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
 
       - name: Install build tools
         run: pip install build
