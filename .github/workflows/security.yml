@@ -78,11 +78,17 @@ jobs:
     name: TruffleHog (Secret Scanning)
     runs-on: arc-runner-hle-client
     container:
-      image: trufflesecurity/trufflehog:latest
+      image: python:3.13-slim
     steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y git
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Install TruffleHog
+        run: pip install trufflehog
 
       - name: TruffleHog scan
         run: trufflehog filesystem . --only-verified
