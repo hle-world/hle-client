@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-hle
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]

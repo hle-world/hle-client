@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.0 — 2026-02-24
+
+Add protocol versioning and CI improvements for two-repo architecture with `jspanos/hle` server.
+
+- Add `PROTOCOL_VERSION = "1.0"` to `hle_common/protocol.py` for wire-format version negotiation
+- Add `protocol_version` field to `TunnelRegistration` (optional, backward compatible with older servers)
+- Client sends `protocol_version` during tunnel registration handshake
+- Bump `hle_common` version to `0.2.0`
+- Add `security.yml` workflow (Bandit SAST, pip-audit, TruffleHog secret scanning)
+- Add `notify-server.yml` workflow (triggers server CI via `repository_dispatch` when `hle_common` changes)
+- Add `test_protocol.py` and `test_models.py` test suites for shared protocol/models
+- Switch all CI workflows from `ubuntu-latest` to `arc-runner-hle` self-hosted runners
+
 ## v1.1.2 — 2026-02-21
 
 Fix README badges: use static license badge (repo is private), bust GitHub camo cache for PyPI version badge.

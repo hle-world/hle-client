@@ -25,6 +25,7 @@ class TunnelRegistration(BaseModel):
     service_label: str | None = None  # user-chosen name, e.g. "ha", "jellyfin"
     api_key: str  # required — hle_<32 hex chars>
     client_version: str | None = None
+    protocol_version: str | None = None  # sent by clients >= 0.5.0
     websocket_enabled: bool = True
     auth_mode: str = "none"  # SSO not in POC scope
 

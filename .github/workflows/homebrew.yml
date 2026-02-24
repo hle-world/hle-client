@@ -6,7 +6,7 @@ on:
 
 jobs:
   update-formula:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-hle
 
     steps:
       - name: Derive version from tag
