@@ -28,7 +28,7 @@ from hle_common.models import (
     WsStreamFrame,
     WsStreamOpen,
 )
-from hle_common.protocol import MessageType, ProtocolMessage
+from hle_common.protocol import PROTOCOL_VERSION, MessageType, ProtocolMessage
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +231,7 @@ class Tunnel:
                 service_label=self.config.service_label,
                 api_key=api_key,
                 client_version=__version__,
+                protocol_version=PROTOCOL_VERSION,
                 websocket_enabled=self.config.websocket_enabled,
                 auth_mode=self.config.auth_mode,
             )

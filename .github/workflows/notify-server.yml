@@ -1,0 +1,16 @@
+name: Notify Server Repo
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/hle_common/**']
+
+jobs:
+  notify:
+    runs-on: arc-runner-hle
+    steps:
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.SERVER_REPO_PAT }}
+          repository: jspanos/hle
+          event-type: common-updated
