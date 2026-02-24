@@ -1,0 +1,100 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly security scan — Monday 06:00 UTC
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  bandit:
+    name: Bandit (Python SAST)
+    runs-on: arc-runner-hle
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit
+        run: |
+          bandit -r src/ \
+            -f json -o bandit-results.json \
+            --severity-level medium \
+            --confidence-level medium \
+            -s B101 \
+            || true
+
+      - name: Display results
+        if: always()
+        run: |
+          if [ -f bandit-results.json ]; then
+            python -c "
+          import json, sys
+          data = json.load(open('bandit-results.json'))
+          results = data.get('results', [])
+          if not results:
+              print('No issues found.')
+              sys.exit(0)
+          for r in results:
+              sev = r['issue_severity']
+              conf = r['issue_confidence']
+              print(f\"[{sev}/{conf}] {r['filename']}:{r['line_number']} -- {r['issue_text']}\")
+          print(f\"\n{len(results)} issue(s) found.\")
+          if any(r['issue_severity'] == 'HIGH' for r in results):
+              sys.exit(1)
+          "
+          fi
+
+  pip-audit:
+    name: pip-audit (Dependencies)
+    runs-on: arc-runner-hle
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+
+      - name: Install pip-audit
+        run: |
+          source .venv/bin/activate
+          pip install pip-audit
+
+      - name: Run pip-audit
+        run: |
+          source .venv/bin/activate
+          pip-audit --desc --fix --dry-run 2>&1 || true
+
+  secrets-scan:
+    name: TruffleHog (Secret Scanning)
+    runs-on: arc-runner-hle
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
