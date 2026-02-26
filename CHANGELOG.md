@@ -2,7 +2,9 @@
 
 ## v1.5.0 — 2026-02-26
 
-<!-- TODO: Fill in release notes before merging -->
+Fix auto-release pipeline so GitHub releases trigger PyPI publish.
+
+- **Fix release token:** Switch auto-release workflow from `GITHUB_TOKEN` to a PAT (`RELEASE_TOKEN`) so release events trigger the publish workflow. GitHub's anti-infinite-loop protection blocks `GITHUB_TOKEN`-created events from cascading.
 
 ## v1.4.0 — 2026-02-26
 
