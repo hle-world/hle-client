@@ -59,3 +59,16 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  sync-ha-addon:
+    name: Trigger ha-addon release
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to ha-addon
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HA_ADDON_DISPATCH_TOKEN }}
+          repository: hle-world/ha-addon
+          event-type: hle-client-release
+          client-payload: '{"version": "${{ github.event.release.tag_name }}"}'
