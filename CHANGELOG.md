@@ -1,17 +1,17 @@
 # Changelog
 
-## v1.2.0 — 2026-02-24
+## v1.2.0 — 2026-02-26
 
-Add protocol versioning and CI improvements for two-repo architecture with `jspanos/hle` server.
+Accept self-signed SSL certificates by default, simplify CLI by removing internal relay flags, and add protocol versioning.
 
+- **Self-signed SSL support:** SSL certificate verification is now disabled by default — homelab services (Proxmox, Unraid, TrueNAS, etc.) almost always use self-signed certs. Use `--verify-ssl` to opt in to strict checking.
+- **Better error messages:** `ConnectError` now distinguishes SSL failures from TCP connection refused, showing a clear hint instead of a misleading "connection refused" message.
+- **Remove `--relay-host` / `--relay-port`** from all CLI commands — HLE is a hosted service; the relay is always `hle.world`.
 - Add `PROTOCOL_VERSION = "1.0"` to `hle_common/protocol.py` for wire-format version negotiation
 - Add `protocol_version` field to `TunnelRegistration` (optional, backward compatible with older servers)
-- Client sends `protocol_version` during tunnel registration handshake
 - Bump `hle_common` version to `0.2.0`
 - Add `security.yml` workflow (Bandit SAST, pip-audit, TruffleHog secret scanning)
-- Add `notify-server.yml` workflow (triggers server CI via `repository_dispatch` when `hle_common` changes)
-- Add `test_protocol.py` and `test_models.py` test suites for shared protocol/models
-- Switch all CI workflows from `ubuntu-latest` to `arc-runner-hle` self-hosted runners
+- Switch all CI workflows to ARC self-hosted runners with job containers
 
 ## v1.1.2 — 2026-02-21
 
