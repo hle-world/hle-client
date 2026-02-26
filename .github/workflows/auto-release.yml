@@ -1,0 +1,90 @@
+name: Auto Release
+
+# When a release PR (from scripts/release.sh) is merged, automatically
+# create the GitHub release — which triggers PyPI publish + Homebrew update.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Only run when a release PR is merged (not just closed)
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'chore/release-')
+    runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
+    env:
+      # Use env var for the PR branch name (safe pattern for untrusted input)
+      PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+
+    steps:
+      - name: Install tools
+        run: apt-get update && apt-get install -y git curl
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract and validate version
+        run: |
+          # Extract version from branch name (chore/release-X.Y.Z)
+          VERSION="${PR_BRANCH#chore/release-}"
+
+          # Strict semver validation — reject anything that isn't digits and dots
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: Invalid version format: $VERSION"
+            exit 1
+          fi
+
+          # Cross-check against pyproject.toml
+          TOML_VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "$TOML_VERSION" != "$VERSION" ]; then
+            echo "Error: Branch version ($VERSION) != pyproject.toml ($TOML_VERSION)"
+            exit 1
+          fi
+
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "Verified version: ${VERSION}"
+
+      - name: Extract changelog and create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Extract changelog entry for this version
+          NOTES=$(sed -n "/^## v$VERSION/,/^## v/{ /^## v$VERSION/d; /^## v/d; p; }" CHANGELOG.md | sed '/^$/{ N; /^\n$/d; }')
+          if [ -z "$NOTES" ]; then
+            NOTES="Release v$VERSION"
+          fi
+
+          # Create release via API using Python for safe JSON encoding
+          python3 -c "
+          import json, os, urllib.request
+          version = os.environ['VERSION']
+          notes = '''$NOTES''' if '''$NOTES''' else f'Release v{version}'
+          data = json.dumps({
+              'tag_name': f'v{version}',
+              'name': f'v{version}',
+              'body': notes.strip(),
+              'target_commitish': 'main'
+          }).encode()
+          req = urllib.request.Request(
+              f'https://api.github.com/repos/{os.environ[\"REPO\"]}/releases',
+              data=data,
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {os.environ[\"GH_TOKEN\"]}',
+                  'Content-Type': 'application/json',
+              },
+          )
+          resp = urllib.request.urlopen(req)
+          result = json.loads(resp.read())
+          print(f'Release created: {result[\"html_url\"]}')
+          "

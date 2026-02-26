@@ -4,14 +4,15 @@
 # Usage:
 #   ./scripts/release.sh 1.3.0
 #   ./scripts/release.sh 1.3.0 --dry-run
+#   ./scripts/release.sh 1.3.0 --tag   (manual fallback if auto-release didn't trigger)
 #
 # What it does:
 #   1. Validates the version format
 #   2. Updates version in pyproject.toml, __init__.py, README.md, install.sh
 #   3. Adds a CHANGELOG.md entry (you fill in the details)
-#   4. Creates a release branch, commits, pushes, opens a PR
-#   5. After you merge the PR, run: ./scripts/release.sh 1.3.0 --tag
-#      to create the GitHub release (triggers PyPI publish + Homebrew update)
+#   4. Creates a chore/release-X.Y.Z branch, commits, pushes, opens a PR
+#   5. When the PR is merged, auto-release.yml creates the GitHub release
+#      which triggers PyPI publish + Homebrew update automatically
 #
 set -euo pipefail
 
@@ -38,7 +39,7 @@ if [[ -z "$VERSION" ]]; then
   echo "Examples:"
   echo "  $0 1.3.0           # Bump version, commit, push, open PR"
   echo "  $0 1.3.0 --dry-run # Show what would change without modifying files"
-  echo "  $0 1.3.0 --tag     # Create GitHub release (after PR is merged)"
+  echo "  $0 1.3.0 --tag     # Manual fallback: create GitHub release"
   exit 1
 fi
 
@@ -54,7 +55,7 @@ echo "New version:     $VERSION"
 echo ""
 
 # ---------------------------------------------------------------------------
-# --tag mode: create GitHub release from current main
+# --tag mode: manual fallback to create GitHub release
 # ---------------------------------------------------------------------------
 if $TAG_ONLY; then
   echo "Creating GitHub release v$VERSION..."
@@ -174,15 +175,12 @@ echo ""
 echo "Opening PR..."
 gh pr create \
   --title "Release v$VERSION" \
-  --body "Bump version to $VERSION and update all version references.
+  --body "Bump version to \`$VERSION\` and update all version references.
 
-**After merging**, create the release:
-\`\`\`bash
-./scripts/release.sh $VERSION --tag
-\`\`\`"
+When this PR is merged, a GitHub release will be created automatically,
+which triggers PyPI publish and Homebrew formula update."
 
 echo ""
 echo "Next steps:"
 echo "  1. Edit CHANGELOG.md in the PR to fill in release notes"
-echo "  2. Merge the PR"
-echo "  3. Run: ./scripts/release.sh $VERSION --tag"
+echo "  2. Merge the PR — release is created automatically"
