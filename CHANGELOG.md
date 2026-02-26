@@ -2,7 +2,12 @@
 
 ## v1.3.0 — 2026-02-26
 
-<!-- TODO: Fill in release notes before merging -->
+Fix PyPI publishing on ARC runners and add automated release tooling.
+
+- **Fix PyPI publish workflow:** Replace `pypa/gh-action-pypi-publish` Docker action with direct `twine` upload using OIDC token exchange (`python -m id`). Docker container actions don't work inside ARC runner container jobs.
+- **Fix ha-addon dispatch:** Replace `peter-evans/repository-dispatch` action with `curl` for ARC runner compatibility.
+- **Add `scripts/release.sh`:** Automates the full release workflow — bumps version in all files (`pyproject.toml`, `__init__.py`, `README.md`, `install.sh`), adds CHANGELOG stub, creates branch/PR, and creates GitHub release.
+- **Fix stale version references:** README.md and install.sh now show the current version instead of outdated `1.1.0` / `1.0.1`.
 
 ## v1.2.0 — 2026-02-26
 
