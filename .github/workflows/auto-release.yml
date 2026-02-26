@@ -55,7 +55,10 @@ jobs:
 
       - name: Extract changelog and create release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use a PAT instead of GITHUB_TOKEN so the release event
+          # triggers the publish workflow (GITHUB_TOKEN events are
+          # blocked from triggering other workflows).
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           # Extract changelog entry for this version
