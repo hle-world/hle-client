@@ -57,26 +57,28 @@ def main(debug: bool) -> None:
     help="API key (also reads HLE_API_KEY env var, then ~/.config/hle/config.toml)",
 )
 @click.option("--websocket/--no-websocket", default=True, help="Enable WebSocket proxying")
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
+@click.option(
+    "--verify-ssl",
+    is_flag=True,
+    default=False,
+    help="Enable SSL certificate verification (by default self-signed certs are accepted)",
+)
 def expose(
     service: str,
     auth: str,
     service_label: str | None,
     api_key: str | None,
     websocket: bool,
-    relay_host: str,
-    relay_port: int,
+    verify_ssl: bool,
 ) -> None:
     """Expose a local service to the internet."""
     config = TunnelConfig(
         service_url=service,
-        relay_host=relay_host,
-        relay_port=relay_port,
         auth_mode=auth,
         service_label=service_label,
         api_key=api_key,
         websocket_enabled=websocket,
+        verify_ssl=verify_ssl,
     )
     tunnel = Tunnel(config=config)
 
@@ -88,7 +90,7 @@ def expose(
         )
 
     console.print(f"\n[bold]HLE[/bold] v{__version__}  Exposing [cyan]{service}[/cyan]")
-    console.print(f"     Relay   [dim]{relay_host}:{relay_port}[/dim]")
+    console.print("     Relay   [dim]hle.world[/dim]")
     if service_label:
         console.print(f"     Label   [dim]{service_label}[/dim]")
     console.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
@@ -187,18 +189,14 @@ def webhook(path: str, forward_to: str) -> None:
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def tunnels(api_key: str | None, relay_host: str, relay_port: int) -> None:
+def tunnels(api_key: str | None) -> None:
     """List active tunnels for your account."""
     resolved_key = _resolve_api_key(api_key)
 
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             tunnel_list = await client.list_tunnels()
         except Exception as exc:
@@ -244,18 +242,14 @@ def access() -> None:
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def access_list(subdomain: str, api_key: str | None, relay_host: str, relay_port: int) -> None:
+def access_list(subdomain: str, api_key: str | None) -> None:
     """List access rules for a subdomain."""
     resolved_key = _resolve_api_key(api_key)
 
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             rules = await client.list_access_rules(subdomain)
         except Exception as exc:
@@ -299,15 +293,11 @@ def access_list(subdomain: str, api_key: str | None, relay_host: str, relay_port
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
 def access_add(
     subdomain: str,
     email: str,
     provider: str,
     api_key: str | None,
-    relay_host: str,
-    relay_port: int,
 ) -> None:
     """Add an email to a subdomain's access allow-list."""
     resolved_key = _resolve_api_key(api_key)
@@ -315,9 +305,7 @@ def access_add(
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             rule = await client.add_access_rule(subdomain, email, provider)
         except Exception as exc:
@@ -341,20 +329,14 @@ def access_add(
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def access_remove(
-    subdomain: str, rule_id: int, api_key: str | None, relay_host: str, relay_port: int
-) -> None:
+def access_remove(subdomain: str, rule_id: int, api_key: str | None) -> None:
     """Remove an access rule by ID."""
     resolved_key = _resolve_api_key(api_key)
 
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             await client.delete_access_rule(subdomain, rule_id)
         except Exception as exc:
@@ -384,9 +366,7 @@ def pin() -> None:
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def pin_set(subdomain: str, api_key: str | None, relay_host: str, relay_port: int) -> None:
+def pin_set(subdomain: str, api_key: str | None) -> None:
     """Set a PIN for a subdomain (prompts for 4-8 digit PIN)."""
     resolved_key = _resolve_api_key(api_key)
 
@@ -403,9 +383,7 @@ def pin_set(subdomain: str, api_key: str | None, relay_host: str, relay_port: in
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             await client.set_tunnel_pin(subdomain, pin_value)
         except Exception as exc:
@@ -425,18 +403,14 @@ def pin_set(subdomain: str, api_key: str | None, relay_host: str, relay_port: in
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def pin_remove(subdomain: str, api_key: str | None, relay_host: str, relay_port: int) -> None:
+def pin_remove(subdomain: str, api_key: str | None) -> None:
     """Remove the PIN for a subdomain."""
     resolved_key = _resolve_api_key(api_key)
 
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             await client.remove_tunnel_pin(subdomain)
         except Exception as exc:
@@ -456,18 +430,14 @@ def pin_remove(subdomain: str, api_key: str | None, relay_host: str, relay_port:
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def pin_status(subdomain: str, api_key: str | None, relay_host: str, relay_port: int) -> None:
+def pin_status(subdomain: str, api_key: str | None) -> None:
     """Show PIN status for a subdomain."""
     resolved_key = _resolve_api_key(api_key)
 
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             data = await client.get_tunnel_pin_status(subdomain)
         except Exception as exc:
@@ -512,16 +482,12 @@ def share() -> None:
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
 def share_create(
     subdomain: str,
     duration: str,
     label: str,
     max_uses: int | None,
     api_key: str | None,
-    relay_host: str,
-    relay_port: int,
 ) -> None:
     """Create a temporary share link for a tunnel."""
     resolved_key = _resolve_api_key(api_key)
@@ -529,9 +495,7 @@ def share_create(
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             result = await client.create_share_link(subdomain, duration, label, max_uses)
         except Exception as exc:
@@ -562,18 +526,14 @@ def share_create(
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def share_list(subdomain: str, api_key: str | None, relay_host: str, relay_port: int) -> None:
+def share_list(subdomain: str, api_key: str | None) -> None:
     """List share links for a tunnel."""
     resolved_key = _resolve_api_key(api_key)
 
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             links = await client.list_share_links(subdomain)
         except Exception as exc:
@@ -618,20 +578,14 @@ def share_list(subdomain: str, api_key: str | None, relay_host: str, relay_port:
     envvar="HLE_API_KEY",
     help="API key for authentication",
 )
-@click.option("--relay-host", default="hle.world", show_default=True, help="Relay server host")
-@click.option("--relay-port", default=443, show_default=True, type=int, help="Relay server port")
-def share_revoke(
-    subdomain: str, link_id: int, api_key: str | None, relay_host: str, relay_port: int
-) -> None:
+def share_revoke(subdomain: str, link_id: int, api_key: str | None) -> None:
     """Revoke a share link by ID."""
     resolved_key = _resolve_api_key(api_key)
 
     async def _run() -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
-        client = ApiClient(
-            ApiClientConfig(relay_host=relay_host, relay_port=relay_port, api_key=resolved_key)
-        )
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
         try:
             await client.delete_share_link(subdomain, link_id)
         except Exception as exc:

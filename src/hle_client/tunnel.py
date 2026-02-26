@@ -118,6 +118,7 @@ class TunnelConfig:
     service_label: str | None = None
     api_key: str | None = None
     websocket_enabled: bool = True
+    verify_ssl: bool = False
     reconnect_delay: float = 1.0
     max_reconnect_delay: float = 60.0
 
@@ -154,6 +155,7 @@ class Tunnel:
             ProxyConfig(
                 target_url=self.config.service_url,
                 websocket_enabled=self.config.websocket_enabled,
+                verify_ssl=self.config.verify_ssl,
             )
         )
 
