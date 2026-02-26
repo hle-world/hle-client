@@ -2,7 +2,9 @@
 
 ## v1.6.0 — 2026-02-26
 
-<!-- TODO: Fill in release notes before merging -->
+Forward the original `Host` header to local services instead of stripping it.
+
+- **Fix Host header forwarding:** The local proxy previously stripped the `Host` header, causing httpx to set it from the `base_url` (e.g. `homeassistant.local.hass.io:8123`). Services like Home Assistant (2023.6+) validate the `Host` header and reject requests that don't match their configured `external_url`. The original `Host` from the browser (e.g. `ha-ian.hle.world`) is now forwarded — matching standard reverse-proxy behaviour.
 
 ## v1.5.0 — 2026-02-26
 
