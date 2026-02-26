@@ -14,17 +14,16 @@ logger = logging.getLogger(__name__)
 class ApiClientConfig:
     """Configuration for the HLE API client."""
 
-    relay_host: str = "hle.world"
-    relay_port: int = 443
     api_key: str = ""
 
 
 class ApiClient:
     """HTTP client for the HLE server REST API using Bearer auth."""
 
+    _BASE_URL = "https://hle.world"
+
     def __init__(self, config: ApiClientConfig) -> None:
-        scheme = "https" if config.relay_port == 443 else "http"
-        self._base_url = f"{scheme}://{config.relay_host}:{config.relay_port}"
+        self._base_url = self._BASE_URL
         self._headers = {"Authorization": f"Bearer {config.api_key}"}
 
     async def list_tunnels(self) -> list[dict]:
