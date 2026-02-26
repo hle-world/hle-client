@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.4.0 — 2026-02-26
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.3.0 — 2026-02-26
 
 Fix PyPI publishing on ARC runners and add automated release tooling.
