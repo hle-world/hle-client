@@ -5,7 +5,6 @@ on:
     types: [published]
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -41,16 +40,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build and publish tools
-        run: pip install build twine id
+        run: pip install build twine
 
       - name: Build sdist and wheel
         run: python -m build
 
       - name: Publish to PyPI
-        run: |
-          # Exchange GitHub OIDC token for short-lived PyPI upload token
-          PYPI_TOKEN=$(python -m id pypi)
-          TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload dist/*
 
   sync-ha-addon:
     name: Trigger ha-addon release
