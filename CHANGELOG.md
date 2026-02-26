@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.0 — 2026-02-26
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.4.0 — 2026-02-26
 
 Automated release pipeline and PyPI publish fix.
