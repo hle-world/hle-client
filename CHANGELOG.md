@@ -2,7 +2,11 @@
 
 ## v1.4.0 — 2026-02-26
 
-<!-- TODO: Fill in release notes before merging -->
+Automated release pipeline and PyPI publish fix.
+
+- **Auto-release on PR merge:** Merging a `chore/release-*` PR now automatically creates the GitHub release (which triggers PyPI + Homebrew). No manual `--tag` step needed.
+- **Fix PyPI publish:** Switch from OIDC token exchange (broken on ARC runners) to `PYPI_API_TOKEN` secret for reliable uploads.
+- **Release script improvements:** `scripts/release.sh` updated to document the fully automated flow; `--tag` kept as manual fallback.
 
 ## v1.3.0 — 2026-02-26
 
