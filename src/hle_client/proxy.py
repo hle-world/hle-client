@@ -108,11 +108,18 @@ class LocalProxy:
         # content negotiation and auto-decompression itself; forwarding the
         # browser's accept-encoding would bypass httpx's decompression logic,
         # leaving gzip-compressed bodies in response.content.
+        #
+        # IMPORTANT: we preserve the original "host" header from the browser
+        # (e.g. "ha-ian.hle.world").  Services like Home Assistant validate the
+        # Host header (HA 2023.6+) and reject requests whose Host doesn't match
+        # their configured external_url.  The TCP connection still goes to the
+        # configured target_url, but the HTTP Host header reflects the public
+        # hostname — exactly what a standard reverse proxy does.
         forwarded_headers = {
             k: v
             for k, v in headers.items()
             if k.lower()
-            not in {"host", "transfer-encoding", "connection", "upgrade", "accept-encoding"}
+            not in {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
         }
 
         try:
