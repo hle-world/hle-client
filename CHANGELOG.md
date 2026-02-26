@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.0 — 2026-02-26
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.5.0 — 2026-02-26
 
 Fix auto-release pipeline so GitHub releases trigger PyPI publish.
