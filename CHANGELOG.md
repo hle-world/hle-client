@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.0 — 2026-02-26
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.2.0 — 2026-02-26
 
 Accept self-signed SSL certificates by default, simplify CLI by removing internal relay flags, and add protocol versioning.
