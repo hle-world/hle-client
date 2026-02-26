@@ -18,6 +18,7 @@ class ProxyConfig:
     websocket_enabled: bool = True
     timeout: float = 30.0
     max_retries: int = 3
+    verify_ssl: bool = False
 
 
 class LocalProxy:
@@ -34,10 +35,13 @@ class LocalProxy:
 
     async def start(self) -> None:
         """Initialize the proxy and HTTP client."""
+        if not self.config.verify_ssl:
+            logger.debug("SSL verification disabled for %s", self.config.target_url)
         self._http_client = httpx.AsyncClient(
             base_url=self.config.target_url,
             timeout=self.config.timeout,
             follow_redirects=False,
+            verify=self.config.verify_ssl,
             limits=httpx.Limits(
                 max_connections=200,
                 max_keepalive_connections=50,
@@ -128,7 +132,21 @@ class LocalProxy:
                 not in {"content-encoding", "content-length", "transfer-encoding", "connection"}
             }
             return response.status_code, resp_headers, response.content
-        except httpx.ConnectError:
+        except httpx.ConnectError as exc:
+            exc_str = str(exc).lower()
+            if "ssl" in exc_str or "certificate" in exc_str or "tls" in exc_str:
+                logger.error(
+                    "SSL certificate error connecting to %s %s — "
+                    "if the service uses a self-signed cert, use --no-verify-ssl",
+                    method,
+                    url,
+                )
+                return (
+                    502,
+                    {"content-type": "text/plain"},
+                    b"Bad Gateway: SSL certificate verification failed "
+                    b"(use --no-verify-ssl for self-signed certificates)",
+                )
             logger.error("Connection refused forwarding %s %s to local service", method, url)
             return (
                 502,

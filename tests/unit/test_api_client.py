@@ -13,25 +13,17 @@ from hle_client.api import ApiClient, ApiClientConfig
 class TestApiClientConfig:
     def test_defaults(self) -> None:
         config = ApiClientConfig()
-        assert config.relay_host == "hle.world"
-        assert config.relay_port == 443
         assert config.api_key == ""
 
-    def test_custom_values(self) -> None:
-        config = ApiClientConfig(relay_host="localhost", relay_port=8000, api_key="hle_abc")
-        assert config.relay_host == "localhost"
-        assert config.relay_port == 8000
+    def test_custom_api_key(self) -> None:
+        config = ApiClientConfig(api_key="hle_abc")
         assert config.api_key == "hle_abc"
 
 
-class TestApiClientScheme:
-    def test_https_for_port_443(self) -> None:
-        client = ApiClient(ApiClientConfig(relay_port=443, api_key="hle_test"))
-        assert client._base_url.startswith("https://")
-
-    def test_http_for_other_ports(self) -> None:
-        client = ApiClient(ApiClientConfig(relay_port=8000, api_key="hle_test"))
-        assert client._base_url.startswith("http://")
+class TestApiClientInit:
+    def test_base_url_is_hle_world(self) -> None:
+        client = ApiClient(ApiClientConfig(api_key="hle_test"))
+        assert client._base_url == "https://hle.world"
 
     def test_authorization_header(self) -> None:
         client = ApiClient(ApiClientConfig(api_key="hle_mykey123"))
@@ -41,15 +33,13 @@ class TestApiClientScheme:
 class TestApiClientMethods:
     @pytest.fixture
     def client(self) -> ApiClient:
-        return ApiClient(
-            ApiClientConfig(relay_host="localhost", relay_port=8000, api_key="hle_testkey")
-        )
+        return ApiClient(ApiClientConfig(api_key="hle_testkey"))
 
     async def test_list_tunnels(self, client: ApiClient) -> None:
         mock_response = httpx.Response(
             200,
             json=[{"subdomain": "app-x7k", "service_url": "http://localhost:8080"}],
-            request=httpx.Request("GET", "http://localhost:8000/api/tunnels"),
+            request=httpx.Request("GET", "https://hle.world/api/tunnels"),
         )
         with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response):
             result = await client.list_tunnels()
@@ -60,7 +50,7 @@ class TestApiClientMethods:
         mock_response = httpx.Response(
             200,
             json=[{"id": 1, "allowed_email": "a@b.com", "provider": "any"}],
-            request=httpx.Request("GET", "http://localhost:8000/api/tunnels/app-x7k/access"),
+            request=httpx.Request("GET", "https://hle.world/api/tunnels/app-x7k/access"),
         )
         with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response):
             result = await client.list_access_rules("app-x7k")
@@ -71,7 +61,7 @@ class TestApiClientMethods:
         mock_response = httpx.Response(
             200,
             json={"id": 2, "allowed_email": "new@b.com", "provider": "github"},
-            request=httpx.Request("POST", "http://localhost:8000/api/tunnels/app-x7k/access"),
+            request=httpx.Request("POST", "https://hle.world/api/tunnels/app-x7k/access"),
         )
         with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response):
             result = await client.add_access_rule("app-x7k", "new@b.com", "github")
@@ -82,7 +72,7 @@ class TestApiClientMethods:
         mock_response = httpx.Response(
             200,
             json={"message": "ok"},
-            request=httpx.Request("DELETE", "http://localhost:8000/api/tunnels/app-x7k/access/1"),
+            request=httpx.Request("DELETE", "https://hle.world/api/tunnels/app-x7k/access/1"),
         )
         with patch("httpx.AsyncClient.delete", new_callable=AsyncMock, return_value=mock_response):
             result = await client.delete_access_rule("app-x7k", 1)
@@ -92,7 +82,7 @@ class TestApiClientMethods:
         mock_response = httpx.Response(
             401,
             text="Not authenticated",
-            request=httpx.Request("GET", "http://localhost:8000/api/tunnels"),
+            request=httpx.Request("GET", "https://hle.world/api/tunnels"),
         )
         with (
             patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response),
@@ -104,7 +94,7 @@ class TestApiClientMethods:
         mock_response = httpx.Response(
             403,
             text="You do not own this subdomain",
-            request=httpx.Request("GET", "http://localhost:8000/api/tunnels/other-abc/access"),
+            request=httpx.Request("GET", "https://hle.world/api/tunnels/other-abc/access"),
         )
         with (
             patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response),
@@ -116,7 +106,7 @@ class TestApiClientMethods:
         mock_response = httpx.Response(
             404,
             text="Access rule not found",
-            request=httpx.Request("DELETE", "http://localhost:8000/api/tunnels/app-x7k/access/999"),
+            request=httpx.Request("DELETE", "https://hle.world/api/tunnels/app-x7k/access/999"),
         )
         with (
             patch("httpx.AsyncClient.delete", new_callable=AsyncMock, return_value=mock_response),

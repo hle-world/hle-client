@@ -276,7 +276,7 @@ class TestErrorHandling:
 
     def test_no_api_key(self) -> None:
         runner = CliRunner()
-        with patch("hle_client.tunnel._load_api_key", return_value=None):
+        with patch("hle_client.cli._load_api_key", return_value=None):
             result = runner.invoke(main, ["tunnels"], env={"HLE_API_KEY": ""})
         assert result.exit_code == 1
         assert "No API key found" in result.output
