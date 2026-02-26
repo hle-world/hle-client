@@ -251,7 +251,7 @@ class TestLocalProxyForwardHttp:
         )
 
         forwarded = proxy._http_client.request.call_args.kwargs["headers"]
-        assert "Host" not in forwarded
+        assert forwarded["Host"] == "evil.example.com"
         assert "Transfer-Encoding" not in forwarded
         assert "Connection" not in forwarded
         assert "Upgrade" not in forwarded

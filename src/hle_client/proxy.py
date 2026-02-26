@@ -118,8 +118,7 @@ class LocalProxy:
         forwarded_headers = {
             k: v
             for k, v in headers.items()
-            if k.lower()
-            not in {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
+            if k.lower() not in {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
         }
 
         try:
