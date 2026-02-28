@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.7.1 — 2026-02-28
+
+Add CLI warnings when auth methods conflict.
+
+- `hle basic-auth set` warns if the tunnel already has a PIN or email rules configured (they will be bypassed)
+- `hle pin set` warns if Basic Auth is currently active (PIN won't be checked)
+- `hle access add` warns if Basic Auth is currently active (email rules won't be checked)
+- All warnings prompt for confirmation before proceeding; network errors during the check are silently ignored
+
+<details>
+<summary>Technical details</summary>
+
+- Two async helpers `_warn_if_basic_auth_active` and `_warn_if_pin_or_rules_exist` added to cli.py
+- Helpers call the respective status/list endpoints before the primary action, consuming no additional round-trips since clients already have the API connection open
+- `SystemExit` is re-raised so "Continue? N" exits cleanly with code 0
+- Test updated to mock `get_tunnel_pin_status` and `list_access_rules` returning no-conflict state
+
+</details>
+
 ## v1.7.0 — 2026-02-28
 
 <!-- TODO: Fill in release notes before merging -->
