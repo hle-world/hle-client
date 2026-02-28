@@ -421,7 +421,6 @@ class Tunnel:
 
         # Inject upstream Basic Auth if configured (same as HTTP path).
         if self.config.upstream_basic_auth is not None:
-            import base64
             uname, upass = self.config.upstream_basic_auth
             token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
             clean_headers["authorization"] = f"Basic {token}"
