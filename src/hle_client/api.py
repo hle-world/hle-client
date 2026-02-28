@@ -137,3 +137,36 @@ class ApiClient:
             )
             resp.raise_for_status()
             return resp.json()
+
+    # -- Basic Auth ----------------------------------------------------------
+
+    async def get_tunnel_basic_auth_status(self, subdomain: str) -> dict:
+        """Get Basic Auth status for a subdomain."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{self._base_url}/api/tunnels/{subdomain}/basic-auth",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def set_tunnel_basic_auth(self, subdomain: str, username: str, password: str) -> dict:
+        """Set or replace Basic Auth credentials for a subdomain."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.put(
+                f"{self._base_url}/api/tunnels/{subdomain}/basic-auth",
+                headers=self._headers,
+                json={"username": username, "password": password},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def remove_tunnel_basic_auth(self, subdomain: str) -> dict:
+        """Remove Basic Auth for a subdomain."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(
+                f"{self._base_url}/api/tunnels/{subdomain}/basic-auth",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            return resp.json()

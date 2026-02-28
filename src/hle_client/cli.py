@@ -63,6 +63,13 @@ def main(debug: bool) -> None:
     default=False,
     help="Enable SSL certificate verification (by default self-signed certs are accepted)",
 )
+@click.option(
+    "--upstream-basic-auth",
+    "upstream_basic_auth",
+    default=None,
+    metavar="USER:PASS",
+    help="Inject Basic Auth into every request to the local service. Format: USER:PASS",
+)
 def expose(
     service: str,
     auth: str,
@@ -70,8 +77,18 @@ def expose(
     api_key: str | None,
     websocket: bool,
     verify_ssl: bool,
+    upstream_basic_auth: str | None,
 ) -> None:
     """Expose a local service to the internet."""
+    # Parse --upstream-basic-auth USER:PASS
+    upstream_auth_tuple: tuple[str, str] | None = None
+    if upstream_basic_auth:
+        if ":" not in upstream_basic_auth:
+            console.print("[red]Error:[/red] --upstream-basic-auth must be in USER:PASS format.")
+            raise SystemExit(1)
+        u, _, p = upstream_basic_auth.partition(":")
+        upstream_auth_tuple = (u, p)
+
     config = TunnelConfig(
         service_url=service,
         auth_mode=auth,
@@ -79,6 +96,7 @@ def expose(
         api_key=api_key,
         websocket_enabled=websocket,
         verify_ssl=verify_ssl,
+        upstream_basic_auth=upstream_auth_tuple,
     )
     tunnel = Tunnel(config=config)
 
@@ -593,6 +611,124 @@ def share_revoke(subdomain: str, link_id: int, api_key: str | None) -> None:
             return
 
         console.print(f"[green]Revoked[/green] share link {link_id} from {subdomain}")
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# hle basic-auth — manage tunnel HTTP Basic Auth
+# ---------------------------------------------------------------------------
+
+
+@main.group("basic-auth")
+def basic_auth() -> None:
+    """Manage tunnel HTTP Basic Auth access control."""
+
+
+@basic_auth.command("set")
+@click.argument("subdomain")
+@click.option(
+    "--api-key",
+    default=None,
+    envvar="HLE_API_KEY",
+    help="API key for authentication",
+)
+def basic_auth_set(subdomain: str, api_key: str | None) -> None:
+    """Set HTTP Basic Auth credentials for a subdomain."""
+    resolved_key = _resolve_api_key(api_key)
+
+    username = click.prompt("Username")
+    if not username.strip():
+        console.print("[red]Error:[/red] Username cannot be empty.")
+        raise SystemExit(1)
+    if ":" in username:
+        console.print("[red]Error:[/red] Username must not contain ':'.")
+        raise SystemExit(1)
+
+    password = click.prompt("Password (min 8 chars)", hide_input=True)
+    if len(password) < 8:
+        console.print("[red]Error:[/red] Password must be at least 8 characters.")
+        raise SystemExit(1)
+
+    password_confirm = click.prompt("Confirm password", hide_input=True)
+    if password != password_confirm:
+        console.print("[red]Error:[/red] Passwords do not match.")
+        raise SystemExit(1)
+
+    async def _run() -> None:
+        from hle_client.api import ApiClient, ApiClientConfig
+
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
+        try:
+            await client.set_tunnel_basic_auth(subdomain, username.strip(), password)
+        except Exception as exc:
+            _handle_api_error(exc)
+            return
+
+        console.print(f"[green]Basic Auth set[/green] for {subdomain} (user: {username.strip()})")
+
+    asyncio.run(_run())
+
+
+@basic_auth.command("remove")
+@click.argument("subdomain")
+@click.option(
+    "--api-key",
+    default=None,
+    envvar="HLE_API_KEY",
+    help="API key for authentication",
+)
+def basic_auth_remove(subdomain: str, api_key: str | None) -> None:
+    """Remove HTTP Basic Auth from a subdomain."""
+    resolved_key = _resolve_api_key(api_key)
+
+    async def _run() -> None:
+        from hle_client.api import ApiClient, ApiClientConfig
+
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
+        try:
+            await client.remove_tunnel_basic_auth(subdomain)
+        except Exception as exc:
+            _handle_api_error(exc)
+            return
+
+        console.print(f"[green]Basic Auth removed[/green] from {subdomain}")
+
+    asyncio.run(_run())
+
+
+@basic_auth.command("status")
+@click.argument("subdomain")
+@click.option(
+    "--api-key",
+    default=None,
+    envvar="HLE_API_KEY",
+    help="API key for authentication",
+)
+def basic_auth_status(subdomain: str, api_key: str | None) -> None:
+    """Show HTTP Basic Auth status for a subdomain."""
+    resolved_key = _resolve_api_key(api_key)
+
+    async def _run() -> None:
+        from hle_client.api import ApiClient, ApiClientConfig
+
+        client = ApiClient(ApiClientConfig(api_key=resolved_key))
+        try:
+            data = await client.get_tunnel_basic_auth_status(subdomain)
+        except Exception as exc:
+            _handle_api_error(exc)
+            return
+
+        if data.get("enabled"):
+            updated = data.get("updated_at", "")
+            console.print(
+                f"[cyan]{subdomain}[/cyan]: Basic Auth is [green]active[/green] "
+                f"(user: [bold]{data.get('username', '')}[/bold])"
+            )
+            if updated:
+                console.print(f"  Last updated: [dim]{updated}[/dim]")
+        else:
+            console.print(f"[cyan]{subdomain}[/cyan]: [dim]No Basic Auth set[/dim]")
 
     asyncio.run(_run())
 

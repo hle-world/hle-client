@@ -229,6 +229,114 @@ class TestShareRevokeCommand:
         assert "Revoked" in result.output
 
 
+class TestBasicAuthSetCommand:
+    def test_basic_auth_set_success(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
+            mock_client = AsyncMock()
+            mock_client.set_tunnel_basic_auth = AsyncMock(return_value={"message": "ok"})
+            with patch("hle_client.api.ApiClient", return_value=mock_client):
+                result = runner.invoke(
+                    main,
+                    ["basic-auth", "set", "app-x7k", "--api-key", "hle_" + "a" * 32],
+                    input="admin\nsecret123\nsecret123\n",
+                )
+        assert result.exit_code == 0
+        assert "Basic Auth set" in result.output
+        assert "admin" in result.output
+
+    def test_basic_auth_set_password_mismatch(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
+            result = runner.invoke(
+                main,
+                ["basic-auth", "set", "app-x7k", "--api-key", "hle_" + "a" * 32],
+                input="admin\nsecret123\nwrongpass\n",
+            )
+        assert result.exit_code == 1
+        assert "do not match" in result.output
+
+    def test_basic_auth_set_short_password(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
+            result = runner.invoke(
+                main,
+                ["basic-auth", "set", "app-x7k", "--api-key", "hle_" + "a" * 32],
+                input="admin\nshort\nshort\n",
+            )
+        assert result.exit_code == 1
+        assert "8 characters" in result.output
+
+    def test_basic_auth_set_username_with_colon(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
+            result = runner.invoke(
+                main,
+                ["basic-auth", "set", "app-x7k", "--api-key", "hle_" + "a" * 32],
+                input="user:name\n",
+            )
+        assert result.exit_code == 1
+        assert "':'" in result.output
+
+
+class TestBasicAuthStatusCommand:
+    def test_basic_auth_status_active(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
+            mock_client = AsyncMock()
+            mock_client.get_tunnel_basic_auth_status = AsyncMock(
+                return_value={
+                    "enabled": True,
+                    "subdomain": "app-x7k",
+                    "username": "admin",
+                    "updated_at": "2026-02-28T12:00:00",
+                }
+            )
+            with patch("hle_client.api.ApiClient", return_value=mock_client):
+                result = runner.invoke(
+                    main,
+                    ["basic-auth", "status", "app-x7k", "--api-key", "hle_" + "a" * 32],
+                )
+        assert result.exit_code == 0
+        assert "active" in result.output
+        assert "admin" in result.output
+
+    def test_basic_auth_status_not_set(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
+            mock_client = AsyncMock()
+            mock_client.get_tunnel_basic_auth_status = AsyncMock(
+                return_value={
+                    "enabled": False,
+                    "subdomain": "app-x7k",
+                    "username": None,
+                    "updated_at": None,
+                }
+            )
+            with patch("hle_client.api.ApiClient", return_value=mock_client):
+                result = runner.invoke(
+                    main,
+                    ["basic-auth", "status", "app-x7k", "--api-key", "hle_" + "a" * 32],
+                )
+        assert result.exit_code == 0
+        assert "No Basic Auth" in result.output
+
+
+class TestBasicAuthRemoveCommand:
+    def test_basic_auth_remove_success(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
+            mock_client = AsyncMock()
+            mock_client.remove_tunnel_basic_auth = AsyncMock(return_value={"message": "ok"})
+            with patch("hle_client.api.ApiClient", return_value=mock_client):
+                result = runner.invoke(
+                    main,
+                    ["basic-auth", "remove", "app-x7k", "--api-key", "hle_" + "a" * 32],
+                )
+        assert result.exit_code == 0
+        assert "removed" in result.output
+
+
 class TestErrorHandling:
     def test_error_401(self) -> None:
         import httpx
