@@ -235,6 +235,8 @@ class TestBasicAuthSetCommand:
         with patch("hle_client.cli._resolve_api_key", return_value="hle_" + "a" * 32):
             mock_client = AsyncMock()
             mock_client.set_tunnel_basic_auth = AsyncMock(return_value={"message": "ok"})
+            mock_client.get_tunnel_pin_status = AsyncMock(return_value={"has_pin": False})
+            mock_client.list_access_rules = AsyncMock(return_value=[])
             with patch("hle_client.api.ApiClient", return_value=mock_client):
                 result = runner.invoke(
                     main,

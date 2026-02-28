@@ -243,6 +243,60 @@ def tunnels(api_key: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auth conflict helpers — warn when methods would override each other
+# ---------------------------------------------------------------------------
+
+
+async def _warn_if_basic_auth_active(client: object, subdomain: str) -> None:
+    """Warn the user if Basic Auth is active (it will override PIN/email rules)."""
+    try:
+        data = await client.get_tunnel_basic_auth_status(subdomain)
+        if data.get("enabled"):
+            console.print(
+                f"[yellow]Warning:[/yellow] Basic Auth is currently active on "
+                f"[cyan]{subdomain}[/cyan].\n"
+                "  Email rules and PIN are bypassed while it's active.\n"
+                "  Remove Basic Auth first ([dim]hle basic-auth remove "
+                f"{subdomain}[/dim]) to re-enable SSO/PIN access control."
+            )
+            if not click.confirm("  Continue anyway?", default=False):
+                raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass  # If the status check fails (network error etc.), proceed without warning
+
+
+async def _warn_if_pin_or_rules_exist(client: object, subdomain: str) -> None:
+    """Warn the user if PIN or email rules exist (Basic Auth will override them)."""
+    conflicts: list[str] = []
+    try:
+        pin = await client.get_tunnel_pin_status(subdomain)
+        if pin.get("has_pin"):
+            conflicts.append("an active PIN")
+    except Exception:
+        pass
+    try:
+        rules = await client.list_access_rules(subdomain)
+        if rules:
+            n = len(rules)
+            conflicts.append(f"{n} email rule{'s' if n > 1 else ''}")
+    except Exception:
+        pass
+    if conflicts:
+        conflict_str = " and ".join(conflicts)
+        console.print(
+            f"[yellow]Warning:[/yellow] [cyan]{subdomain}[/cyan] already has "
+            f"{conflict_str}.\n"
+            "  Enabling Basic Auth will [bold]override[/bold] "
+            f"{'them' if len(conflicts) > 1 else 'it'} — visitors will only be "
+            "able to authenticate with the Basic Auth username/password."
+        )
+        if not click.confirm("  Continue?", default=False):
+            raise SystemExit(0)
+
+
+# ---------------------------------------------------------------------------
 # hle access — manage tunnel access rules
 # ---------------------------------------------------------------------------
 
@@ -324,6 +378,7 @@ def access_add(
         from hle_client.api import ApiClient, ApiClientConfig
 
         client = ApiClient(ApiClientConfig(api_key=resolved_key))
+        await _warn_if_basic_auth_active(client, subdomain)
         try:
             rule = await client.add_access_rule(subdomain, email, provider)
         except Exception as exc:
@@ -402,6 +457,7 @@ def pin_set(subdomain: str, api_key: str | None) -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
         client = ApiClient(ApiClientConfig(api_key=resolved_key))
+        await _warn_if_basic_auth_active(client, subdomain)
         try:
             await client.set_tunnel_pin(subdomain, pin_value)
         except Exception as exc:
@@ -659,6 +715,7 @@ def basic_auth_set(subdomain: str, api_key: str | None) -> None:
         from hle_client.api import ApiClient, ApiClientConfig
 
         client = ApiClient(ApiClientConfig(api_key=resolved_key))
+        await _warn_if_pin_or_rules_exist(client, subdomain)
         try:
             await client.set_tunnel_basic_auth(subdomain, username.strip(), password)
         except Exception as exc:
