@@ -2,6 +2,10 @@
 
 ## v1.7.0 — 2026-02-28
 
+<!-- TODO: Fill in release notes before merging -->
+
+## v1.7.0 — 2026-02-28
+
 Add HTTP Basic Auth support — both for protecting tunnel URLs and for forwarding credentials to local services.
 
 - **`hle basic-auth set <subdomain>`** — Set username/password on a tunnel (prompts securely, validates length and no `:` in username)
