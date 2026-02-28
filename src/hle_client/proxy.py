@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -19,6 +20,8 @@ class ProxyConfig:
     timeout: float = 30.0
     max_retries: int = 3
     verify_ssl: bool = False
+    upstream_basic_auth: tuple[str, str] | None = field(default=None)
+    """Optional (username, password) to inject as Authorization: Basic toward the local service."""
 
 
 class LocalProxy:
@@ -120,6 +123,15 @@ class LocalProxy:
             for k, v in headers.items()
             if k.lower() not in {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
         }
+
+        # Inject Basic Auth toward the upstream local service if configured.
+        # This overrides any Authorization header that came from the browser,
+        # which is intentional: the tunnel may protect the public URL with its
+        # own auth while the local service requires separate credentials.
+        if self.config.upstream_basic_auth is not None:
+            uname, upass = self.config.upstream_basic_auth
+            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
+            forwarded_headers["authorization"] = f"Basic {token}"
 
         try:
             response = await self._http_client.request(

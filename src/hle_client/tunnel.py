@@ -121,6 +121,8 @@ class TunnelConfig:
     verify_ssl: bool = False
     reconnect_delay: float = 1.0
     max_reconnect_delay: float = 60.0
+    upstream_basic_auth: tuple[str, str] | None = None
+    """Optional (username, password) injected as Authorization: Basic toward the local service."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -156,6 +158,7 @@ class Tunnel:
                 target_url=self.config.service_url,
                 websocket_enabled=self.config.websocket_enabled,
                 verify_ssl=self.config.verify_ssl,
+                upstream_basic_auth=self.config.upstream_basic_auth,
             )
         )
 
@@ -415,6 +418,12 @@ class Tunnel:
         for k in list(clean_headers):
             if k.lower() == "origin":
                 clean_headers[k] = local_origin
+
+        # Inject upstream Basic Auth if configured (same as HTTP path).
+        if self.config.upstream_basic_auth is not None:
+            uname, upass = self.config.upstream_basic_auth
+            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
+            clean_headers["authorization"] = f"Basic {token}"
 
         try:
             local_ws = await websockets.connect(

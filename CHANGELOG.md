@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.7.0 — 2026-02-28
+
+Add HTTP Basic Auth support — both for protecting tunnel URLs and for forwarding credentials to local services.
+
+- **`hle basic-auth set <subdomain>`** — Set username/password on a tunnel (prompts securely, validates length and no `:` in username)
+- **`hle basic-auth status <subdomain>`** — Show whether Basic Auth is active and the configured username
+- **`hle basic-auth remove <subdomain>`** — Remove Basic Auth from a tunnel
+- **`hle expose --upstream-basic-auth USER:PASS`** — Inject `Authorization: Basic` into every request forwarded to the local service (e.g. for Home Assistant requiring credentials)
+- 7 new CLI unit tests covering set/status/remove including validation edge cases
+
+<details>
+<summary>Technical details</summary>
+
+- `api.py`: Added `get_tunnel_basic_auth_status`, `set_tunnel_basic_auth`, `remove_tunnel_basic_auth` to `ApiClient`
+- `proxy.py`: `ProxyConfig.upstream_basic_auth: tuple[str, str] | None` — if set, overrides any `Authorization` header from the browser before forwarding to the local service
+- `tunnel.py`: `TunnelConfig.upstream_basic_auth` threaded through to `ProxyConfig` and also injected in the WebSocket connection path
+- CLI command group registered as `hle basic-auth` (with hyphen) matching the `hle pin` / `hle access` / `hle share` pattern
+
+</details>
+
 ## v1.6.0 — 2026-02-26
 
 Forward the original `Host` header to local services instead of stripping it.
