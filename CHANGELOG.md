@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.8.0 — 2026-02-28
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.7.1 — 2026-02-28
 
 Add CLI warnings when auth methods conflict.
