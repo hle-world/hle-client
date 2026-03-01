@@ -42,6 +42,9 @@ class LocalProxy:
     def __init__(self, config: ProxyConfig) -> None:
         self.config = config
         self._http_client: httpx.AsyncClient | None = None
+        # Sticky Host header detection: None = not yet determined,
+        # True = forward browser Host, False = strip Host (use target).
+        self._detected_forward_host: bool | None = None
 
     async def start(self) -> None:
         """Initialize the proxy and HTTP client."""
@@ -67,15 +70,25 @@ class LocalProxy:
             self._http_client = None
         logger.info("Local proxy stopped")
 
+    @property
+    def _should_forward_host(self) -> bool:
+        """Whether to forward the browser's Host header."""
+        if self.config.forward_host:
+            return True
+        if self._detected_forward_host is not None:
+            return self._detected_forward_host
+        return False
+
     def _build_forwarded_headers(
         self,
         headers: dict[str, str],
         *,
-        include_host: bool = False,
+        include_host: bool | None = None,
     ) -> dict[str, str]:
         """Build headers to forward, stripping hop-by-hop and optionally Host."""
+        forward_host = include_host if include_host is not None else self._should_forward_host
         skip = {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
-        if not (self.config.forward_host or include_host):
+        if not forward_host:
             skip.add("host")
         result = {k: v for k, v in headers.items() if k.lower() not in skip}
 
@@ -143,13 +156,13 @@ class LocalProxy:
                 content=body,
             )
 
-            # Auto-detect Host header mismatch: if the target returns 502
-            # and we stripped the Host, retry with the original Host forwarded.
-            # Virtual-host reverse proxies (Traefik, nginx) return 502 when
-            # they don't recognize the Host.  Skip retry if --forward-host is
-            # already set or if there's no browser Host to forward.
+            # Sticky Host header auto-detection: on the first request,
+            # if the target returns 502, retry with the browser's Host
+            # header forwarded.  Whichever approach succeeds is locked in
+            # for all subsequent requests (no per-request retry overhead).
             if (
                 response.status_code == 502
+                and self._detected_forward_host is None
                 and not self.config.forward_host
                 and "host" in {k.lower() for k in headers}
             ):
@@ -168,14 +181,23 @@ class LocalProxy:
                     content=body,
                 )
                 if retry_resp.status_code != 502:
+                    self._detected_forward_host = True
                     logger.info(
-                        "Retry with forwarded Host succeeded (status %d). "
-                        "Hint: use --forward-host to skip auto-detection.",
+                        "Forwarding browser Host header resolved 502 "
+                        "(status %d) — locked in for this session.",
                         retry_resp.status_code,
                     )
                     response = retry_resp
                 else:
-                    logger.debug("Retry with forwarded Host also returned 502")
+                    self._detected_forward_host = False
+                    logger.info(
+                        "Retry with forwarded Host also returned 502 "
+                        "— stripping Host locked in for this session."
+                    )
+            elif self._detected_forward_host is None and not self.config.forward_host:
+                # First successful request — lock in "strip Host" mode.
+                self._detected_forward_host = False
+                logger.debug("Host header stripping confirmed working")
 
             resp_headers = {
                 k: v
