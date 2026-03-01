@@ -18,6 +18,10 @@ import websockets.exceptions
 from hle_client import __version__
 from hle_client.proxy import LocalProxy, ProxyConfig
 from hle_common.models import (
+    CAPABILITY_CHUNKED_RESPONSE,
+    HttpResponseChunk,
+    HttpResponseEnd,
+    HttpResponseStart,
     ProxiedHttpRequest,
     ProxiedHttpResponse,
     SpeedTestData,
@@ -161,6 +165,7 @@ class Tunnel:
                 upstream_basic_auth=self.config.upstream_basic_auth,
             )
         )
+        self._server_caps: list[str] = []
 
     # ------------------------------------------------------------------
     # Public interface
@@ -239,6 +244,7 @@ class Tunnel:
                 protocol_version=PROTOCOL_VERSION,
                 websocket_enabled=self.config.websocket_enabled,
                 auth_mode=self.config.auth_mode,
+                capabilities=[CAPABILITY_CHUNKED_RESPONSE],
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,
@@ -255,6 +261,7 @@ class Tunnel:
             ack_data = TunnelRegistrationResponse.model_validate(ack_msg.payload)
             self._tunnel_id = ack_data.tunnel_id
             self._public_url = ack_data.public_url
+            self._server_caps = getattr(ack_data, "server_capabilities", []) or []
             logger.info(
                 "Tunnel registered: id=%s  url=%s",
                 self._tunnel_id,
@@ -303,9 +310,19 @@ class Tunnel:
         msg: ProtocolMessage,
     ) -> None:
         """Forward an HTTP request to the local service and return the response."""
+        if CAPABILITY_CHUNKED_RESPONSE in self._server_caps:
+            await self._handle_http_request_chunked(ws, msg)
+        else:
+            await self._handle_http_request_buffered(ws, msg)
+
+    async def _handle_http_request_buffered(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+        msg: ProtocolMessage,
+    ) -> None:
+        """Forward HTTP request using the original single-message response path."""
         req = ProxiedHttpRequest.model_validate(msg.payload)
 
-        # Decode base64-encoded body (if present).
         body: bytes | None = None
         if req.body is not None:
             body = base64.b64decode(req.body)
@@ -318,7 +335,6 @@ class Tunnel:
             query_string=req.query_string,
         )
 
-        # Encode response body as base64 for transmission.
         encoded_body: str | None = None
         if resp_body is not None:
             encoded_body = base64.b64encode(resp_body).decode("ascii")
@@ -339,6 +355,89 @@ class Tunnel:
             await ws.send(response_msg.model_dump_json())
         except websockets.exceptions.ConnectionClosed:
             logger.debug("Connection closed while sending HTTP response for %s", req.request_id)
+
+    async def _handle_http_request_chunked(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+        msg: ProtocolMessage,
+    ) -> None:
+        """Forward HTTP request using chunked streaming response."""
+        req = ProxiedHttpRequest.model_validate(msg.payload)
+
+        body: bytes | None = None
+        if req.body is not None:
+            body = base64.b64decode(req.body)
+
+        chunk_index = 0
+
+        try:
+            async for status_code, resp_headers, chunk in self._proxy.stream_http(
+                method=req.method,
+                path=req.path,
+                headers=req.headers,
+                body=body,
+                query_string=req.query_string,
+            ):
+                if status_code is not None:
+                    # First yield: send START
+                    start = HttpResponseStart(
+                        request_id=req.request_id,
+                        status_code=status_code,
+                        headers=resp_headers or {},
+                    )
+                    start_msg = ProtocolMessage(
+                        type=MessageType.HTTP_RESPONSE_START,
+                        tunnel_id=self._tunnel_id,
+                        request_id=req.request_id,
+                        payload=start.model_dump(),
+                    )
+                    await ws.send(start_msg.model_dump_json())
+                elif chunk is not None:
+                    # Body chunk
+                    encoded = base64.b64encode(chunk).decode("ascii")
+                    ch = HttpResponseChunk(
+                        request_id=req.request_id,
+                        chunk_index=chunk_index,
+                        data=encoded,
+                    )
+                    chunk_msg = ProtocolMessage(
+                        type=MessageType.HTTP_RESPONSE_CHUNK,
+                        tunnel_id=self._tunnel_id,
+                        request_id=req.request_id,
+                        payload=ch.model_dump(),
+                    )
+                    await ws.send(chunk_msg.model_dump_json())
+                    chunk_index += 1
+
+            # Send END
+            end = HttpResponseEnd(request_id=req.request_id)
+            end_msg = ProtocolMessage(
+                type=MessageType.HTTP_RESPONSE_END,
+                tunnel_id=self._tunnel_id,
+                request_id=req.request_id,
+                payload=end.model_dump(),
+            )
+            await ws.send(end_msg.model_dump_json())
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug(
+                "Connection closed while sending chunked response for %s",
+                req.request_id,
+            )
+        except Exception:
+            logger.exception("Error in chunked response for %s", req.request_id)
+            # Try to send error END so server doesn't hang
+            with contextlib.suppress(Exception):
+                end = HttpResponseEnd(
+                    request_id=req.request_id,
+                    error="Client error during chunked response",
+                )
+                end_msg = ProtocolMessage(
+                    type=MessageType.HTTP_RESPONSE_END,
+                    tunnel_id=self._tunnel_id,
+                    request_id=req.request_id,
+                    payload=end.model_dump(),
+                )
+                await ws.send(end_msg.model_dump_json())
 
     # ------------------------------------------------------------------
     # WebSocket stream handling
