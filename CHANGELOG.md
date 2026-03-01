@@ -1,8 +1,32 @@
 # Changelog
 
+## v1.9.0 — 2026-03-01
+
+Chunked HTTP response streaming — fixes 504 Gateway Timeout for video streaming and large file downloads.
+
+- Stream large HTTP responses in 512KB chunks over the WebSocket tunnel instead of buffering the entire body in memory
+- Bump wire protocol to 1.1 with 3 new message types: `HTTP_RESPONSE_START`, `HTTP_RESPONSE_CHUNK`, `HTTP_RESPONSE_END`
+- Capability negotiation (`chunked_response`) ensures full backward compatibility with older servers
+- New `stream_http()` async generator on `LocalProxy` using `httpx.stream()` with configurable chunk size (`HLE_HTTP_CHUNK_SIZE` env var, default 512KB)
+- Inject upstream Basic Auth credentials on streaming path (consistency with buffered path)
+
+<details>
+<summary>Technical details</summary>
+
+- `hle_common/protocol.py`: `PROTOCOL_VERSION` bumped from `"1.0"` to `"1.1"`, 3 new `MessageType` values
+- `hle_common/models.py`: `CAPABILITY_CHUNKED_RESPONSE` constant, `capabilities` on `TunnelRegistration`, `server_capabilities` on `TunnelRegistrationResponse`, `HttpResponseStart`, `HttpResponseChunk`, `HttpResponseEnd` models
+- `hle_client/proxy.py`: `stream_http()` async generator — first yield is `(status, headers, None)`, subsequent yields are `(None, None, chunk_bytes)`
+- `hle_client/tunnel.py`: `_handle_http_request` branches to chunked path when server advertises `chunked_response`; sends START/CHUNK/END messages over the WebSocket
+- 512KB binary → ~700KB base64 → well under WebSocket 2MB default `max_size`
+
+</details>
+
 ## v1.8.0 — 2026-02-28
 
-<!-- TODO: Fill in release notes before merging -->
+Upstream Basic Auth support and CLI auth conflict warnings.
+
+- Add `--upstream-basic-auth USER:PASS` flag to inject HTTP Basic Auth toward the local service
+- CLI warns when auth methods conflict (e.g. setting Basic Auth when PIN is active)
 
 ## v1.7.1 — 2026-02-28
 
