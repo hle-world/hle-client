@@ -251,7 +251,8 @@ class TestLocalProxyForwardHttp:
         )
 
         forwarded = proxy._http_client.request.call_args.kwargs["headers"]
-        assert forwarded["Host"] == "evil.example.com"
+        # Host is stripped by default so httpx sets it from base_url
+        assert "Host" not in forwarded
         assert "Transfer-Encoding" not in forwarded
         assert "Connection" not in forwarded
         assert "Upgrade" not in forwarded
