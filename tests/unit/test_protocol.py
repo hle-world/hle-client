@@ -18,7 +18,7 @@ from hle_common.protocol import (
 
 class TestProtocolVersion:
     def test_protocol_version_exists(self):
-        assert PROTOCOL_VERSION == "1.0"
+        assert PROTOCOL_VERSION == "1.1"
 
     def test_protocol_version_is_string(self):
         assert isinstance(PROTOCOL_VERSION, str)
@@ -43,6 +43,9 @@ class TestMessageType:
             "tunnel_register",
             "http_request",
             "http_response",
+            "http_response_start",
+            "http_response_chunk",
+            "http_response_end",
             "ws_open",
             "ws_close",
             "ws_frame",

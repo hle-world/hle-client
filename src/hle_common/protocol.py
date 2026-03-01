@@ -10,7 +10,7 @@ from pydantic import BaseModel
 # Protocol version — bump on wire-format changes.
 # Major bump (1.0 → 2.0): breaking change, server must support both during deprecation.
 # Minor bump (1.0 → 1.1): new optional fields/message types, old clients unaffected.
-PROTOCOL_VERSION = "1.0"
+PROTOCOL_VERSION = "1.1"
 
 
 class MessageType(StrEnum):
@@ -29,6 +29,11 @@ class MessageType(StrEnum):
     # Traffic proxying
     HTTP_REQUEST = "http_request"
     HTTP_RESPONSE = "http_response"
+
+    # Chunked HTTP response (for large bodies like video streaming)
+    HTTP_RESPONSE_START = "http_response_start"
+    HTTP_RESPONSE_CHUNK = "http_response_chunk"
+    HTTP_RESPONSE_END = "http_response_end"
 
     # WebSocket proxying
     WS_OPEN = "ws_open"
