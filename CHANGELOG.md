@@ -2,7 +2,20 @@
 
 ## v1.11.0 — 2026-03-01
 
-<!-- TODO: Fill in release notes before merging -->
+Sticky Host header auto-detection — detect once, apply for the session.
+
+- **Sticky detection:** Instead of retrying with/without Host on every 502 response, detect the correct behavior on the first request and lock it in for the entire session. Zero retry overhead after the first request.
+- Logs which mode was selected at INFO level: `"Forwarding browser Host header resolved 502 — locked in for this session"` or `"Host header stripping confirmed working"`
+
+<details>
+<summary>Technical details</summary>
+
+- `proxy.py`: `_detected_forward_host: bool | None` on `LocalProxy` — `None` = undetermined, `True` = forward Host, `False` = strip Host
+- `_should_forward_host` property checks `--forward-host` flag first, then sticky detection, then defaults to strip
+- `_build_forwarded_headers()` accepts `include_host: bool | None` override for the retry path
+- First non-502 response locks in "strip Host"; first 502 triggers retry, outcome locks in the winner
+
+</details>
 
 ## v1.10.0 — 2026-03-01
 
