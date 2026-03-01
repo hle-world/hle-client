@@ -2,7 +2,22 @@
 
 ## v1.10.0 — 2026-03-01
 
-<!-- TODO: Fill in release notes before merging -->
+Fix Host header handling for services behind reverse proxies (Traefik, nginx, Caddy).
+
+- **Fix 502 errors for proxied services:** Strip the browser's Host header by default so httpx sets it from the target URL. Services behind virtual-host reverse proxies route by Host and returned 502 when they saw the HLE public hostname (e.g. `j-ian.hle.world`) instead of the target hostname.
+- **Auto-detection:** If the target returns 502, automatically retry with the browser's original Host header forwarded. Logs the detection and result at INFO level.
+- **New `--forward-host` flag:** Explicitly forward the browser's Host header to the local service. Use for services like Home Assistant that validate the Host header against `external_url`. Skips auto-detection when set.
+
+<details>
+<summary>Technical details</summary>
+
+- `proxy.py`: New `_build_forwarded_headers()` helper centralizes header filtering and Basic Auth injection for both `forward_http()` and `stream_http()`
+- `proxy.py`: `forward_http()` auto-retries on 502 with Host included, logs outcome
+- `proxy.py`: `ProxyConfig.forward_host: bool` controls behavior
+- `tunnel.py`: `TunnelConfig.forward_host: bool` threaded through to `ProxyConfig`
+- `cli.py`: `--forward-host` flag on `hle expose`
+
+</details>
 
 ## v1.9.0 — 2026-03-01
 
