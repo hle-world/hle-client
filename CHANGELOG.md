@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.11.0 — 2026-03-01
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.10.0 — 2026-03-01
 
 Fix Host header handling for services behind reverse proxies (Traefik, nginx, Caddy).
