@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.0 — 2026-03-01
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.9.0 — 2026-03-01
 
 Chunked HTTP response streaming — fixes 504 Gateway Timeout for video streaming and large file downloads.
