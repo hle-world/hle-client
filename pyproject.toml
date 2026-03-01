@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hle-client"
-version = "1.8.0"
+version = "1.9.0"
 description = "Home Lab Everywhere — Expose homelab services to the internet with built-in SSO"
 readme = "README.md"
 license = "MIT"
