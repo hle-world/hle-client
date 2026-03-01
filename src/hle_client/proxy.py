@@ -27,6 +27,8 @@ class ProxyConfig:
     verify_ssl: bool = False
     upstream_basic_auth: tuple[str, str] | None = field(default=None)
     """Optional (username, password) to inject as Authorization: Basic toward the local service."""
+    forward_host: bool = False
+    """Forward the browser's Host header instead of using the target hostname."""
 
 
 class LocalProxy:
@@ -64,6 +66,25 @@ class LocalProxy:
             await self._http_client.aclose()
             self._http_client = None
         logger.info("Local proxy stopped")
+
+    def _build_forwarded_headers(
+        self,
+        headers: dict[str, str],
+        *,
+        include_host: bool = False,
+    ) -> dict[str, str]:
+        """Build headers to forward, stripping hop-by-hop and optionally Host."""
+        skip = {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
+        if not (self.config.forward_host or include_host):
+            skip.add("host")
+        result = {k: v for k, v in headers.items() if k.lower() not in skip}
+
+        if self.config.upstream_basic_auth is not None:
+            uname, upass = self.config.upstream_basic_auth
+            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
+            result["authorization"] = f"Basic {token}"
+
+        return result
 
     async def forward_http(
         self,
@@ -112,31 +133,7 @@ class LocalProxy:
         if query_string:
             url = f"{path}?{query_string}"
 
-        # Strip hop-by-hop headers and accept-encoding.  We let httpx handle
-        # content negotiation and auto-decompression itself; forwarding the
-        # browser's accept-encoding would bypass httpx's decompression logic,
-        # leaving gzip-compressed bodies in response.content.
-        #
-        # IMPORTANT: we preserve the original "host" header from the browser
-        # (e.g. "ha-ian.hle.world").  Services like Home Assistant validate the
-        # Host header (HA 2023.6+) and reject requests whose Host doesn't match
-        # their configured external_url.  The TCP connection still goes to the
-        # configured target_url, but the HTTP Host header reflects the public
-        # hostname — exactly what a standard reverse proxy does.
-        forwarded_headers = {
-            k: v
-            for k, v in headers.items()
-            if k.lower() not in {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
-        }
-
-        # Inject Basic Auth toward the upstream local service if configured.
-        # This overrides any Authorization header that came from the browser,
-        # which is intentional: the tunnel may protect the public URL with its
-        # own auth while the local service requires separate credentials.
-        if self.config.upstream_basic_auth is not None:
-            uname, upass = self.config.upstream_basic_auth
-            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
-            forwarded_headers["authorization"] = f"Basic {token}"
+        forwarded_headers = self._build_forwarded_headers(headers)
 
         try:
             response = await self._http_client.request(
@@ -145,9 +142,41 @@ class LocalProxy:
                 headers=forwarded_headers,
                 content=body,
             )
-            # httpx auto-decompresses gzip/deflate/br, so the body in
-            # response.content is already decompressed.  Strip content-encoding
-            # (and other hop-by-hop) so downstream doesn't try to decompress again.
+
+            # Auto-detect Host header mismatch: if the target returns 502
+            # and we stripped the Host, retry with the original Host forwarded.
+            # Virtual-host reverse proxies (Traefik, nginx) return 502 when
+            # they don't recognize the Host.  Skip retry if --forward-host is
+            # already set or if there's no browser Host to forward.
+            if (
+                response.status_code == 502
+                and not self.config.forward_host
+                and "host" in {k.lower() for k in headers}
+            ):
+                browser_host = next(v for k, v in headers.items() if k.lower() == "host")
+                logger.info(
+                    "Got 502 from target — retrying %s %s with original Host: %s",
+                    method,
+                    url,
+                    browser_host,
+                )
+                retry_headers = self._build_forwarded_headers(headers, include_host=True)
+                retry_resp = await self._http_client.request(
+                    method=method,
+                    url=url,
+                    headers=retry_headers,
+                    content=body,
+                )
+                if retry_resp.status_code != 502:
+                    logger.info(
+                        "Retry with forwarded Host succeeded (status %d). "
+                        "Hint: use --forward-host to skip auto-detection.",
+                        retry_resp.status_code,
+                    )
+                    response = retry_resp
+                else:
+                    logger.debug("Retry with forwarded Host also returned 502")
+
             resp_headers = {
                 k: v
                 for k, v in response.headers.items()
@@ -217,17 +246,7 @@ class LocalProxy:
         if query_string:
             url = f"{path}?{query_string}"
 
-        forwarded_headers = {
-            k: v
-            for k, v in headers.items()
-            if k.lower() not in {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
-        }
-
-        # Inject Basic Auth for streaming path too.
-        if self.config.upstream_basic_auth is not None:
-            uname, upass = self.config.upstream_basic_auth
-            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
-            forwarded_headers["authorization"] = f"Basic {token}"
+        forwarded_headers = self._build_forwarded_headers(headers)
 
         chunk_size = int(os.environ.get("HLE_HTTP_CHUNK_SIZE", "524288"))
 
