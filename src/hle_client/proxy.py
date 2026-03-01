@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 import httpx
 
@@ -181,3 +186,98 @@ class LocalProxy:
         except httpx.HTTPError as exc:
             logger.error("HTTP error forwarding %s %s: %s", method, url, exc)
             return 502, {"content-type": "text/plain"}, b"Bad Gateway: unexpected error"
+
+    async def stream_http(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes | None = None,
+        query_string: str = "",
+    ) -> AsyncIterator[tuple[int | None, dict[str, str] | None, bytes | None]]:
+        """Stream an HTTP response from the local service in chunks.
+
+        Yields
+        ------
+        First yield:
+            ``(status_code, response_headers, None)`` — metadata only.
+        Subsequent yields:
+            ``(None, None, chunk_bytes)`` — body segments.
+        """
+        if not self._http_client:
+            raise RuntimeError("Proxy not started — call start() first")
+
+        if not path.startswith("/") or path.startswith("//"):
+            logger.error("Rejecting non-relative path: %s", path[:100])
+            yield (400, {"content-type": "text/plain"}, None)
+            yield (None, None, b"Bad Request: path must be relative")
+            return
+
+        url = path
+        if query_string:
+            url = f"{path}?{query_string}"
+
+        forwarded_headers = {
+            k: v
+            for k, v in headers.items()
+            if k.lower() not in {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
+        }
+
+        # Inject Basic Auth for streaming path too.
+        if self.config.upstream_basic_auth is not None:
+            uname, upass = self.config.upstream_basic_auth
+            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
+            forwarded_headers["authorization"] = f"Basic {token}"
+
+        chunk_size = int(os.environ.get("HLE_HTTP_CHUNK_SIZE", "524288"))
+
+        try:
+            async with self._http_client.stream(
+                method=method,
+                url=url,
+                headers=forwarded_headers,
+                content=body,
+            ) as response:
+                resp_headers = {
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower()
+                    not in {
+                        "content-encoding",
+                        "content-length",
+                        "transfer-encoding",
+                        "connection",
+                    }
+                }
+                yield (response.status_code, resp_headers, None)
+
+                async for chunk in response.aiter_bytes(chunk_size):
+                    yield (None, None, chunk)
+        except httpx.ConnectError as exc:
+            exc_str = str(exc).lower()
+            if "ssl" in exc_str or "certificate" in exc_str or "tls" in exc_str:
+                logger.error(
+                    "SSL certificate error connecting to %s %s — "
+                    "if the service uses a self-signed cert, use --no-verify-ssl",
+                    method,
+                    url,
+                )
+                yield (502, {"content-type": "text/plain"}, None)
+                yield (
+                    None,
+                    None,
+                    b"Bad Gateway: SSL certificate verification failed "
+                    b"(use --no-verify-ssl for self-signed certificates)",
+                )
+                return
+            logger.error("Connection refused forwarding %s %s to local service", method, url)
+            yield (502, {"content-type": "text/plain"}, None)
+            yield (None, None, b"Bad Gateway: local service connection refused")
+        except httpx.TimeoutException:
+            logger.error("Timeout forwarding %s %s to local service", method, url)
+            yield (504, {"content-type": "text/plain"}, None)
+            yield (None, None, b"Gateway Timeout: local service did not respond")
+        except httpx.HTTPError as exc:
+            logger.error("HTTP error forwarding %s %s: %s", method, url, exc)
+            yield (502, {"content-type": "text/plain"}, None)
+            yield (None, None, b"Bad Gateway: unexpected error")

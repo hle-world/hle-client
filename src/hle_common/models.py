@@ -14,6 +14,9 @@ from pydantic import BaseModel, field_validator
 # Tunnel registration (client -> server -> client)
 # ---------------------------------------------------------------------------
 
+# Capability tokens exchanged during tunnel handshake
+CAPABILITY_CHUNKED_RESPONSE = "chunked_response"
+
 # Validation patterns
 _SERVICE_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
@@ -28,6 +31,7 @@ class TunnelRegistration(BaseModel):
     protocol_version: str | None = None  # sent by clients >= 0.5.0
     websocket_enabled: bool = True
     auth_mode: str = "none"  # SSO not in POC scope
+    capabilities: list[str] = []  # e.g. ["chunked_response"]
 
     @field_validator("service_label")
     @classmethod
@@ -52,6 +56,7 @@ class TunnelRegistrationResponse(BaseModel):
     websocket_enabled: bool
     user_code: str
     service_label: str
+    server_capabilities: list[str] = []  # e.g. ["chunked_response"]
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +82,29 @@ class ProxiedHttpResponse(BaseModel):
     status_code: int
     headers: dict[str, str]
     body: str | None = None  # base64 encoded
+
+
+class HttpResponseStart(BaseModel):
+    """First frame of a chunked HTTP response — headers and status, no body."""
+
+    request_id: str
+    status_code: int
+    headers: dict[str, str]
+
+
+class HttpResponseChunk(BaseModel):
+    """One body segment of a chunked HTTP response."""
+
+    request_id: str
+    chunk_index: int  # 0-based, for ordering / debug
+    data: str  # base64-encoded bytes
+
+
+class HttpResponseEnd(BaseModel):
+    """Terminal frame signalling the chunked response is complete."""
+
+    request_id: str
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
