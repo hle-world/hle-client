@@ -1,7 +1,7 @@
 #!/bin/sh
 # HLE Client installer
 # Usage: curl -fsSL https://get.hle.world | sh
-#        curl -fsSL https://get.hle.world | sh -s -- --version 1.8.0
+#        curl -fsSL https://get.hle.world | sh -s -- --version 1.9.0
 set -e
 
 PACKAGE="hle-client"
