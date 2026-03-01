@@ -70,6 +70,13 @@ def main(debug: bool) -> None:
     metavar="USER:PASS",
     help="Inject Basic Auth into every request to the local service. Format: USER:PASS",
 )
+@click.option(
+    "--forward-host",
+    is_flag=True,
+    default=False,
+    help="Forward the browser's Host header to the local service "
+    "(for services that validate Host).",
+)
 def expose(
     service: str,
     auth: str,
@@ -78,6 +85,7 @@ def expose(
     websocket: bool,
     verify_ssl: bool,
     upstream_basic_auth: str | None,
+    forward_host: bool,
 ) -> None:
     """Expose a local service to the internet."""
     # Parse --upstream-basic-auth USER:PASS
@@ -97,6 +105,7 @@ def expose(
         websocket_enabled=websocket,
         verify_ssl=verify_ssl,
         upstream_basic_auth=upstream_auth_tuple,
+        forward_host=forward_host,
     )
     tunnel = Tunnel(config=config)
 
