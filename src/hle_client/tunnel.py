@@ -127,6 +127,8 @@ class TunnelConfig:
     max_reconnect_delay: float = 60.0
     upstream_basic_auth: tuple[str, str] | None = None
     """Optional (username, password) injected as Authorization: Basic toward the local service."""
+    forward_host: bool = False
+    """Forward the browser's Host header instead of using the target hostname."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -163,6 +165,7 @@ class Tunnel:
                 websocket_enabled=self.config.websocket_enabled,
                 verify_ssl=self.config.verify_ssl,
                 upstream_basic_auth=self.config.upstream_basic_auth,
+                forward_host=self.config.forward_host,
             )
         )
         self._server_caps: list[str] = []
