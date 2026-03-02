@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.12.0 — 2026-03-02
+
+Relay discovery handshake — prepare for future multi-server support.
+
+- **Relay discovery:** Client now calls `GET /api/v1/connect` before establishing the WebSocket tunnel. The server can return the optimal relay URL based on geolocation, latency, load balancing, or per-user policy. Falls back gracefully to `hle.world` when the endpoint is unavailable.
+- **New shared model:** `RelayDiscoveryResponse` in `hle_common` with `relay_url`, `relay_region`, `ttl`, `fallback_urls`, and `metadata` fields. Only `relay_url` is required.
+- **Type safety:** Fixed all 43 pre-existing mypy errors across `api.py`, `tunnel.py`, and `cli.py` — proper dict type parameters, updated websockets v16 types, corrected function signatures.
+
 ## v1.11.0 — 2026-03-01
 
 Sticky Host header auto-detection — detect once, apply for the session.
