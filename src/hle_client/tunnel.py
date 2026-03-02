@@ -10,9 +10,14 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
 import websockets
+import websockets.asyncio.client
 import websockets.exceptions
 
 from hle_client import __version__
@@ -35,6 +40,8 @@ from hle_common.models import (
 from hle_common.protocol import PROTOCOL_VERSION, MessageType, ProtocolMessage
 
 logger = logging.getLogger(__name__)
+
+_ClientConn = websockets.asyncio.client.ClientConnection
 
 # Default config directory for persisting settings.
 _CONFIG_DIR = Path.home() / ".config" / "hle"
@@ -151,12 +158,10 @@ class Tunnel:
     _tunnel_id: str | None = field(default=None, init=False, repr=False)
     _public_url: str | None = field(default=None, init=False, repr=False)
     _proxy: LocalProxy = field(init=False, repr=False)
-    _ws: websockets.WebSocketClientProtocol | None = field(default=None, init=False, repr=False)
-    _ws_streams: dict[str, websockets.WebSocketClientProtocol] = field(
-        default_factory=dict, init=False, repr=False
-    )
+    _ws: _ClientConn | None = field(default=None, init=False, repr=False)
+    _ws_streams: dict[str, _ClientConn] = field(default_factory=dict, init=False, repr=False)
     _ws_streams_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _tasks: set[asyncio.Task] = field(default_factory=set, init=False, repr=False)  # type: ignore[type-arg]
+    _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._proxy = LocalProxy(
@@ -222,18 +227,45 @@ class Tunnel:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    async def _connect_once(self) -> None:
-        """Single connection attempt: register, then enter the receive loop."""
-        scheme = "wss" if self.config.relay_port == 443 else "ws"
-        relay_uri = f"{scheme}://{self.config.relay_host}:{self.config.relay_port}/_hle/tunnel"
-        logger.info("Connecting to relay at %s", relay_uri)
+    async def _discover_relay_uri(self, api_key: str) -> str:
+        """Resolve the relay WebSocket URI via the discovery endpoint.
 
-        # Resolve API key: CLI flag > env var > config file
+        Falls back to building the URI from ``self.config`` defaults when
+        the discovery endpoint is unavailable (e.g. the server hasn't
+        implemented it yet).
+        """
+        from hle_client.api import ApiClient, ApiClientConfig
+
+        try:
+            client = ApiClient(ApiClientConfig(api_key=api_key))
+            discovery = await client.discover_relay()
+        except Exception:
+            discovery = None
+
+        if discovery is not None:
+            logger.info(
+                "Relay discovery: url=%s region=%s ttl=%ds",
+                discovery.relay_url,
+                discovery.relay_region,
+                discovery.ttl,
+            )
+            return discovery.relay_url
+
+        # Fallback: build URL from config defaults (current behaviour)
+        scheme = "wss" if self.config.relay_port == 443 else "ws"
+        return f"{scheme}://{self.config.relay_host}:{self.config.relay_port}/_hle/tunnel"
+
+    async def _connect_once(self) -> None:
+        """Single connection attempt: discover relay, register, then enter the receive loop."""
+        # Resolve API key early — needed for both discovery and registration
         api_key = self.config.api_key or _load_api_key()
         if not api_key:
             raise ConnectionError(
                 "No API key found. Run 'hle auth login', set HLE_API_KEY, or pass --api-key."
             )
+
+        relay_uri = await self._discover_relay_uri(api_key)
+        logger.info("Connecting to relay at %s", relay_uri)
 
         async with websockets.connect(relay_uri) as ws:
             self._ws = ws
@@ -274,7 +306,7 @@ class Tunnel:
             # --- Receive loop ---
             await self._receive_loop(ws)
 
-    async def _receive_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+    async def _receive_loop(self, ws: _ClientConn) -> None:
         """Process incoming messages from the relay server."""
         async for raw in ws:
             try:
@@ -309,7 +341,7 @@ class Tunnel:
 
     async def _handle_http_request(
         self,
-        ws: websockets.WebSocketClientProtocol,
+        ws: _ClientConn,
         msg: ProtocolMessage,
     ) -> None:
         """Forward an HTTP request to the local service and return the response."""
@@ -320,7 +352,7 @@ class Tunnel:
 
     async def _handle_http_request_buffered(
         self,
-        ws: websockets.WebSocketClientProtocol,
+        ws: _ClientConn,
         msg: ProtocolMessage,
     ) -> None:
         """Forward HTTP request using the original single-message response path."""
@@ -361,7 +393,7 @@ class Tunnel:
 
     async def _handle_http_request_chunked(
         self,
-        ws: websockets.WebSocketClientProtocol,
+        ws: _ClientConn,
         msg: ProtocolMessage,
     ) -> None:
         """Forward HTTP request using chunked streaming response."""
@@ -448,7 +480,7 @@ class Tunnel:
 
     async def _handle_ws_open(
         self,
-        ws: websockets.WebSocketClientProtocol,
+        ws: _ClientConn,
         msg: ProtocolMessage,
     ) -> None:
         """Open a WebSocket connection to the local service and bridge frames."""
@@ -555,15 +587,19 @@ class Tunnel:
 
     async def _ws_local_reader(
         self,
-        relay_ws: websockets.WebSocketClientProtocol,
-        local_ws: websockets.WebSocketClientProtocol,
+        relay_ws: _ClientConn,
+        local_ws: _ClientConn,
         stream_id: str,
     ) -> None:
         """Read frames from a local WS and forward them to the relay."""
         try:
             async for frame_data in local_ws:
-                is_binary = isinstance(frame_data, bytes)
-                data_str = base64.b64encode(frame_data).decode("ascii") if is_binary else frame_data
+                if isinstance(frame_data, bytes):
+                    data_str = base64.b64encode(frame_data).decode("ascii")
+                    is_binary = True
+                else:
+                    data_str = frame_data
+                    is_binary = False
 
                 frame_payload = WsStreamFrame(
                     stream_id=stream_id,
@@ -629,7 +665,7 @@ class Tunnel:
 
     async def _handle_speed_test_data(
         self,
-        ws: websockets.WebSocketClientProtocol,
+        ws: _ClientConn,
         msg: ProtocolMessage,
     ) -> None:
         """Handle a speed test data message from the server."""
@@ -646,7 +682,7 @@ class Tunnel:
         if data.direction == "download":
             # Receiving download test chunks — track timing
             if not hasattr(self, "_speed_test_state"):
-                self._speed_test_state: dict = {}
+                self._speed_test_state: dict[str, dict[str, Any]] = {}
 
             if data.test_id not in self._speed_test_state:
                 self._speed_test_state[data.test_id] = {
@@ -709,9 +745,9 @@ class Tunnel:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _spawn(self, coro: object) -> None:
+    def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
         """Schedule a coroutine as a fire-and-forget task, tracked for cleanup."""
-        task = asyncio.ensure_future(coro)  # type: ignore[arg-type]
+        task = asyncio.ensure_future(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
