@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.12.0 — 2026-03-02
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.11.0 — 2026-03-01
 
 Sticky Host header auto-detection — detect once, apply for the session.
