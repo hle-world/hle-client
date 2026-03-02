@@ -38,6 +38,7 @@ jobs:
         with:
           repository: hle-world/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
 
       - name: Update formula
         run: |
@@ -51,8 +52,8 @@ jobs:
           SHA256=$(sha256sum /tmp/hle-sdist/*.tar.gz | cut -d' ' -f1)
           SDIST_URL="https://files.pythonhosted.org/packages/source/h/hle-client/hle_client-${VERSION}.tar.gz"
 
-          mkdir -p Formula
-          cat > Formula/hle-client.rb << FORMULA
+          mkdir -p homebrew-tap/Formula
+          cat > homebrew-tap/Formula/hle-client.rb << FORMULA
           class HleClient < Formula
             include Language::Python::Virtualenv
 
@@ -77,6 +78,7 @@ jobs:
           FORMULA
 
       - name: Commit and push
+        working-directory: homebrew-tap
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
