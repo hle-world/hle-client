@@ -59,6 +59,21 @@ class TunnelRegistrationResponse(BaseModel):
     server_capabilities: list[str] = []  # e.g. ["chunked_response"]
 
 
+class RelayDiscoveryResponse(BaseModel):
+    """Server response from the relay discovery endpoint (GET /api/v1/connect).
+
+    Tells the client which relay server to connect to.  Only ``relay_url`` is
+    required; every other field has a sensible default so the server can start
+    simple and add routing metadata over time.
+    """
+
+    relay_url: str  # e.g. "wss://us-east.hle.world:443/_hle/tunnel"
+    relay_region: str = ""  # informational, e.g. "us-east-1"
+    ttl: int = 300  # seconds the assignment is considered valid
+    fallback_urls: list[str] = []  # backup relay URLs for future failover
+    metadata: dict[str, str] = {}  # reserved for future use
+
+
 # ---------------------------------------------------------------------------
 # HTTP proxying (server <-> client, carried inside ProtocolMessage.payload)
 # ---------------------------------------------------------------------------

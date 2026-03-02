@@ -7,6 +7,7 @@ import pytest
 from hle_common.models import (
     ProxiedHttpRequest,
     ProxiedHttpResponse,
+    RelayDiscoveryResponse,
     SpeedTestData,
     SpeedTestResult,
     TunnelRegistration,
@@ -90,6 +91,32 @@ class TestTunnelRegistrationResponse:
         assert resp.tunnel_id == "t-resp-1"
         assert resp.subdomain == "resptest.abc"
         assert resp.websocket_enabled is True
+
+
+class TestRelayDiscoveryResponse:
+    def test_defaults(self):
+        resp = RelayDiscoveryResponse(relay_url="wss://us-east.hle.world:443/_hle/tunnel")
+        assert resp.relay_url == "wss://us-east.hle.world:443/_hle/tunnel"
+        assert resp.relay_region == ""
+        assert resp.ttl == 300
+        assert resp.fallback_urls == []
+        assert resp.metadata == {}
+
+    def test_requires_relay_url(self):
+        with pytest.raises(ValueError):
+            RelayDiscoveryResponse()
+
+    def test_roundtrip(self):
+        original = RelayDiscoveryResponse(
+            relay_url="wss://eu-west.hle.world:443/_hle/tunnel",
+            relay_region="eu-west-1",
+            ttl=600,
+            fallback_urls=["wss://us-east.hle.world:443/_hle/tunnel"],
+            metadata={"routing": "geo"},
+        )
+        data = original.model_dump()
+        restored = RelayDiscoveryResponse(**data)
+        assert restored == original
 
 
 class TestProxiedHttpRequest:

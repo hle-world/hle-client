@@ -7,10 +7,14 @@ import logging
 import os
 import re
 import webbrowser
+from typing import TYPE_CHECKING
 
 import click
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from hle_client.api import ApiClient
 
 from hle_client import __version__
 from hle_client.tunnel import Tunnel, TunnelConfig, _load_api_key, _remove_api_key, _save_api_key
@@ -256,7 +260,7 @@ def tunnels(api_key: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _warn_if_basic_auth_active(client: object, subdomain: str) -> None:
+async def _warn_if_basic_auth_active(client: ApiClient, subdomain: str) -> None:
     """Warn the user if Basic Auth is active (it will override PIN/email rules)."""
     try:
         data = await client.get_tunnel_basic_auth_status(subdomain)
@@ -276,7 +280,7 @@ async def _warn_if_basic_auth_active(client: object, subdomain: str) -> None:
         pass  # If the status check fails (network error etc.), proceed without warning
 
 
-async def _warn_if_pin_or_rules_exist(client: object, subdomain: str) -> None:
+async def _warn_if_pin_or_rules_exist(client: ApiClient, subdomain: str) -> None:
     """Warn the user if PIN or email rules exist (Basic Auth will override them)."""
     conflicts: list[str] = []
     try:
