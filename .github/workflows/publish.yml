@@ -65,7 +65,7 @@ jobs:
 
       - name: Dispatch to ha-addon
         env:
-          HA_ADDON_TOKEN: ${{ secrets.HA_ADDON_DISPATCH_TOKEN }}
+          HA_ADDON_TOKEN: ${{ secrets.HLE_PAT }}
         run: |
           curl -X POST \
             -H "Accept: application/vnd.github+json" \
@@ -87,7 +87,7 @@ jobs:
 
       - name: Dispatch to hle-docker
         env:
-          HLE_DOCKER_TOKEN: ${{ secrets.HLE_DOCKER_DISPATCH_TOKEN }}
+          HLE_DOCKER_TOKEN: ${{ secrets.HLE_PAT }}
         run: |
           curl -X POST \
             -H "Accept: application/vnd.github+json" \
