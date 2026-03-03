@@ -40,42 +40,112 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Update formula
+      - name: Generate formula
         run: |
-          pip install homebrew-pypi-poet "hle-client==${VERSION}"
+          pip install "hle-client==${VERSION}"
 
-          # Generate resource stanzas
-          RESOURCES=$(poet hle-client 2>/dev/null | sed -n '/^  resource/,/^  end$/p')
+          python3 << 'PYEOF'
+          import json, urllib.request, importlib.metadata, textwrap
 
-          # Get sdist SHA256
-          pip download "hle-client==${VERSION}" --no-deps --no-binary :all: -d /tmp/hle-sdist
-          SHA256=$(sha256sum /tmp/hle-sdist/*.tar.gz | cut -d' ' -f1)
-          SDIST_URL="https://files.pythonhosted.org/packages/source/h/hle-client/hle_client-${VERSION}.tar.gz"
+          version = __import__("os").environ["VERSION"]
 
-          mkdir -p homebrew-tap/Formula
-          cat > homebrew-tap/Formula/hle-client.rb << FORMULA
+          # Packages handled by Homebrew formula deps (Rust-based, not built from source)
+          FORMULA_DEPS = {"cryptography", "cffi", "pycparser", "pydantic", "pydantic-core"}
+
+          # Get all installed packages that hle-client depends on (transitively)
+          def get_all_deps(pkg_name):
+              """Collect transitive runtime dependencies via installed metadata."""
+              visited = set()
+              queue = [pkg_name]
+              while queue:
+                  name = queue.pop(0)
+                  if name.lower() in visited:
+                      continue
+                  visited.add(name.lower())
+                  try:
+                      dist = importlib.metadata.distribution(name)
+                  except importlib.metadata.PackageNotFoundError:
+                      continue
+                  for req_str in (dist.requires or []):
+                      # Skip extras-only deps (e.g. 'foo ; extra == "dev"')
+                      if "extra ==" in req_str:
+                          continue
+                      dep_name = req_str.split(";")[0].split("[")[0].split("<")[0].split(">")[0].split("=")[0].split("!")[0].split("~")[0].strip()
+                      if dep_name:
+                          queue.append(dep_name)
+              visited.discard(pkg_name.lower())
+              return visited
+
+          deps = get_all_deps("hle-client")
+
+          # Build resource stanzas from PyPI JSON API
+          resources = []
+          for dep in sorted(deps):
+              if dep in FORMULA_DEPS or dep.replace("-", "_") in FORMULA_DEPS:
+                  continue
+              # Normalize for PyPI API
+              api_name = dep.replace("_", "-")
+              try:
+                  installed_version = importlib.metadata.version(dep)
+              except importlib.metadata.PackageNotFoundError:
+                  continue
+              url = f"https://pypi.org/pypi/{api_name}/{installed_version}/json"
+              try:
+                  with urllib.request.urlopen(url, timeout=10) as resp:
+                      data = json.loads(resp.read())
+              except Exception as e:
+                  print(f"WARNING: Could not fetch {url}: {e}")
+                  continue
+              sdists = [u for u in data["urls"] if u["packagetype"] == "sdist"]
+              if not sdists:
+                  print(f"WARNING: No sdist for {api_name}=={installed_version}")
+                  continue
+              sdist = sdists[0]
+              resources.append(
+                  f'  resource "{api_name}" do\n'
+                  f'    url "{sdist["url"]}"\n'
+                  f'    sha256 "{sdist["digests"]["sha256"]}"\n'
+                  f'  end'
+              )
+
+          # Get hle-client sdist URL and SHA
+          hle_url = f"https://pypi.org/pypi/hle-client/{version}/json"
+          with urllib.request.urlopen(hle_url, timeout=10) as resp:
+              hle_data = json.loads(resp.read())
+          hle_sdist = [u for u in hle_data["urls"] if u["packagetype"] == "sdist"][0]
+
+          formula = textwrap.dedent(f"""\
           class HleClient < Formula
             include Language::Python::Virtualenv
 
             desc "Home Lab Everywhere — Expose homelab services with built-in SSO"
             homepage "https://hle.world"
-            url "${SDIST_URL}"
-            sha256 "${SHA256}"
+            url "{hle_sdist['url']}"
+            sha256 "{hle_sdist['digests']['sha256']}"
             license "MIT"
 
             depends_on "python@3.13"
+            depends_on "cffi"
+            depends_on "cryptography"
+            depends_on "pydantic"
 
-          ${RESOURCES}
+          {chr(10).join(resources)}
 
             def install
               virtualenv_install_with_resources
             end
 
             test do
-              assert_match version.to_s, shell_output("#{bin}/hle --version")
+              assert_match version.to_s, shell_output("#{{bin}}/hle --version")
             end
           end
-          FORMULA
+          """)
+
+          import pathlib
+          pathlib.Path("homebrew-tap/Formula").mkdir(parents=True, exist_ok=True)
+          pathlib.Path("homebrew-tap/Formula/hle-client.rb").write_text(formula)
+          print("Formula generated successfully")
+          PYEOF
 
       - name: Commit and push
         run: |
