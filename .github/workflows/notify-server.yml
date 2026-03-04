@@ -11,7 +11,7 @@ jobs:
     container:
       image: node:20-slim
     steps:
-      - uses: peter-evans/repository-dispatch@v3
+      - uses: peter-evans/repository-dispatch@02f2c3d7ac648d2a1d64fcdda7c4c7f787c6cdb6
         with:
           token: ${{ secrets.SERVER_REPO_PAT }}
           repository: jspanos/hle
