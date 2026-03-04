@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.13.1 — 2026-03-04
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.12.0 — 2026-03-02
 
 Relay discovery handshake — prepare for future multi-server support.
