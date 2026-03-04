@@ -76,15 +76,19 @@ jobs:
 
   secrets-scan:
     name: TruffleHog (Secret Scanning)
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
     steps:
+      - name: Install git and curl
+        run: apt-get update && apt-get install -y git curl
+
       - uses: actions/checkout@v4.1.7
         with:
           fetch-depth: 0
 
-      - uses: trufflesecurity/trufflehog@c3e599b7163e8198a55467f3133db0e7b2a492cb
-        with:
-          path: ./
-          base: ${{ github.event.pull_request.base.sha || github.event.before }}
-          head: HEAD
-          extra_args: --only-verified
+      - name: Install TruffleHog
+        run: curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: TruffleHog scan
+        run: trufflehog filesystem . --only-verified
