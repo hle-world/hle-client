@@ -68,12 +68,15 @@ hle expose --service http://localhost:8080              # Basic usage
 hle expose --service http://localhost:8080 --label ha   # Custom subdomain label
 hle expose --service http://localhost:3000 --auth none  # Disable SSO
 hle expose --service http://localhost:8080 --no-websocket  # Disable WS proxying
+hle expose --service http://localhost:8080 --allow user@gmail.com  # Allow a specific user
+hle expose --service http://localhost:8080 --allow google:user@gmail.com --allow github:dev@co.com
 ```
 
 Options:
 - `--service` — Local service URL (required)
 - `--label` — Service label for the subdomain (e.g. `ha` → `ha-x7k.hle.world`)
 - `--auth` — Auth mode: `sso` (default) or `none`
+- `--allow` — Allow an email to access the tunnel (repeatable). Format: `email` or `provider:email`
 - `--websocket/--no-websocket` — Enable/disable WebSocket proxying (default: enabled)
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
 

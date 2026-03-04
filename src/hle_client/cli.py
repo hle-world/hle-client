@@ -50,6 +50,18 @@ def main(debug: bool) -> None:
     )
 
 
+_VALID_AUTH_PROVIDERS = {"any", "google", "github", "hle"}
+
+
+def _parse_auth_spec(spec: str) -> tuple[str, str]:
+    """Parse ``[provider:]email`` into ``(provider, email)``."""
+    if ":" in spec:
+        prefix, _, rest = spec.partition(":")
+        if prefix in _VALID_AUTH_PROVIDERS:
+            return prefix, rest
+    return "any", spec
+
+
 @main.command()
 @click.option("--service", required=True, help="Local service URL (e.g. http://localhost:8080)")
 @click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
@@ -81,6 +93,15 @@ def main(debug: bool) -> None:
     help="Forward the browser's Host header to the local service "
     "(for services that validate Host).",
 )
+@click.option(
+    "--allow",
+    "allow",
+    multiple=True,
+    metavar="[PROVIDER:]EMAIL",
+    help="Allow an email to access this tunnel via SSO. "
+    "Format: 'email' or 'provider:email'. "
+    "Providers: any (default), google, github, hle. Repeatable.",
+)
 def expose(
     service: str,
     auth: str,
@@ -90,6 +111,7 @@ def expose(
     verify_ssl: bool,
     upstream_basic_auth: str | None,
     forward_host: bool,
+    allow: tuple[str, ...],
 ) -> None:
     """Expose a local service to the internet."""
     # Parse --upstream-basic-auth USER:PASS
@@ -111,7 +133,38 @@ def expose(
         upstream_basic_auth=upstream_auth_tuple,
         forward_host=forward_host,
     )
-    tunnel = Tunnel(config=config)
+
+    # Build post-registration callback for --allow rules
+    auth_specs = [_parse_auth_spec(s) for s in allow]
+    on_registered_cb = None
+    if auth_specs:
+
+        async def _add_auth_callback(subdomain: str) -> None:
+            import httpx
+
+            from hle_client.api import ApiClient, ApiClientConfig
+
+            resolved_key = api_key or _load_api_key()
+            if not resolved_key:
+                console.print("[yellow]Warning:[/yellow] No API key — skipping auth rules")
+                return
+            client = ApiClient(ApiClientConfig(api_key=resolved_key))
+            for prov, email in auth_specs:
+                try:
+                    await client.add_access_rule(subdomain, email, prov)
+                    console.print(f"     Auth   [green]+[/green] {email} [dim]({prov})[/dim]")
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 409:
+                        console.print(f"     Auth   [dim]· {email} ({prov}) already exists[/dim]")
+                    else:
+                        console.print(
+                            f"     Auth   [yellow]! {email} failed: "
+                            f"{exc.response.status_code}[/yellow]"
+                        )
+
+        on_registered_cb = _add_auth_callback
+
+    tunnel = Tunnel(config=config, on_registered=on_registered_cb)
 
     # Warn if the API key was passed as a CLI flag (visible in ps/proc).
     if api_key and not os.environ.get("HLE_API_KEY"):
