@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+# Pre-commit hook: run ruff lint + format check on staged Python files.
+# Install: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or:      git config core.hooksPath scripts
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM -- '*.py')
+if [ -z "$STAGED" ]; then
+    exit 0
+fi
+
+echo "pre-commit: running ruff check..."
+ruff check $STAGED
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Lint errors found. Fix with: ruff check --fix src/ tests/"
+    exit 1
+fi
+
+echo "pre-commit: running ruff format --check..."
+ruff format --check $STAGED
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Format errors found. Fix with: ruff format src/ tests/"
+    exit 1
+fi

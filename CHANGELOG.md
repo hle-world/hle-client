@@ -2,7 +2,19 @@
 
 ## v1.13.1 — 2026-03-04
 
-<!-- TODO: Fill in release notes before merging -->
+Fix tunnel limit/auth error UX and CI reliability.
+
+- **Fatal tunnel errors:** Tunnel limit (4003) and invalid API key (4001) now show a clear error message and exit immediately instead of retrying forever
+- **CI secret fixes:** Workflow files referenced non-existent `HLE_PAT` secret — reverted to actual per-workflow secret names (`RELEASE_TOKEN`, `HOMEBREW_TAP_TOKEN`, `HA_ADDON_DISPATCH_TOKEN`, `HLE_DOCKER_DISPATCH_TOKEN`)
+- **Pre-commit hook:** Added `scripts/pre-commit` (ruff check + format) to catch lint errors before they reach CI
+- **Lint fix:** `raise SystemExit(1) from None` for ruff B904 compliance
+
+## v1.13.0 — 2026-03-03
+
+Documentation cross-check and missing CLI flags.
+
+- **Docs:** Added missing `--verify-ssl`, `--forward-host` flags and `hle auth login/status/logout` commands to website docs
+- **README:** Added `--verify-ssl`, `--upstream-basic-auth`, `--forward-host`, `hle basic-auth`, and `--label` for share create
 
 ## v1.12.0 — 2026-03-02
 
