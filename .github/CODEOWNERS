@@ -1,0 +1,6 @@
+# Workflow security — require owner review for CI/CD changes
+/.github/workflows/ @hle-world/owners
+
+# Release scripts and automation — require review
+pyproject.toml @hle-world/owners
+setup.py @hle-world/owners
