@@ -58,7 +58,7 @@ jobs:
           # Use a PAT instead of GITHUB_TOKEN so the release event
           # triggers the publish workflow (GITHUB_TOKEN events are
           # blocked from triggering other workflows).
-          GH_TOKEN: ${{ secrets.HLE_PAT }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           # Extract changelog entry for this version
