@@ -13,7 +13,7 @@ jobs:
     container:
       image: python:3.13-slim
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@692973e3d937d1afb5f8355e64d32566a30ded47
 
       - name: Install uv
         run: pip install uv
@@ -37,7 +37,7 @@ jobs:
     environment: pypi
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@692973e3d937d1afb5f8355e64d32566a30ded47
 
       - name: Install build and publish tools
         run: pip install build twine

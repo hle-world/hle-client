@@ -34,7 +34,7 @@ jobs:
         run: apt-get update && apt-get install -y git
 
       - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937d1afb5f8355e64d32566a30ded47
         with:
           repository: hle-world/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
