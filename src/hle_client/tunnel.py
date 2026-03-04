@@ -39,6 +39,10 @@ from hle_common.models import (
 )
 from hle_common.protocol import PROTOCOL_VERSION, MessageType, ProtocolMessage
 
+
+class TunnelFatalError(Exception):
+    """Raised for non-retryable server rejections (tunnel limit, auth failure)."""
+
 logger = logging.getLogger(__name__)
 
 _ClientConn = websockets.asyncio.client.ClientConnection
@@ -195,6 +199,22 @@ class Tunnel:
                 websockets.exceptions.WebSocketException,
                 ConnectionError,
             ) as exc:
+                if (
+                    isinstance(exc, websockets.exceptions.ConnectionClosed)
+                    and exc.rcvd is not None
+                ):
+                    code = exc.rcvd.code
+                    if code == 4003:
+                        raise TunnelFatalError(
+                            "Tunnel limit reached. Your plan does not allow more "
+                            "active tunnels.\n"
+                            "Stop another tunnel or upgrade at https://hle.world/dashboard"
+                        ) from exc
+                    if code == 4001:
+                        raise TunnelFatalError(
+                            "Authentication failed. Your API key is invalid or revoked.\n"
+                            "Run 'hle auth login' to save a new key."
+                        ) from exc
                 logger.warning("Connection lost: %s", exc)
             except asyncio.CancelledError:
                 logger.info("Tunnel cancelled")
