@@ -17,7 +17,14 @@ if TYPE_CHECKING:
     from hle_client.api import ApiClient
 
 from hle_client import __version__
-from hle_client.tunnel import Tunnel, TunnelConfig, _load_api_key, _remove_api_key, _save_api_key
+from hle_client.tunnel import (
+    Tunnel,
+    TunnelConfig,
+    TunnelFatalError,
+    _load_api_key,
+    _remove_api_key,
+    _save_api_key,
+)
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -184,6 +191,9 @@ def expose(
         asyncio.run(tunnel.connect())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
+    except TunnelFatalError as exc:
+        console.print(f"\n[red]Error:[/red] {exc}")
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
