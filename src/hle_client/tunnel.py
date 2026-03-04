@@ -43,6 +43,7 @@ from hle_common.protocol import PROTOCOL_VERSION, MessageType, ProtocolMessage
 class TunnelFatalError(Exception):
     """Raised for non-retryable server rejections (tunnel limit, auth failure)."""
 
+
 logger = logging.getLogger(__name__)
 
 _ClientConn = websockets.asyncio.client.ClientConnection
@@ -199,10 +200,7 @@ class Tunnel:
                 websockets.exceptions.WebSocketException,
                 ConnectionError,
             ) as exc:
-                if (
-                    isinstance(exc, websockets.exceptions.ConnectionClosed)
-                    and exc.rcvd is not None
-                ):
+                if isinstance(exc, websockets.exceptions.ConnectionClosed) and exc.rcvd is not None:
                     code = exc.rcvd.code
                     if code == 4003:
                         raise TunnelFatalError(
