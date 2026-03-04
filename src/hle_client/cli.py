@@ -193,7 +193,7 @@ def expose(
         console.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
         console.print(f"\n[red]Error:[/red] {exc}")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
 
 # ---------------------------------------------------------------------------
