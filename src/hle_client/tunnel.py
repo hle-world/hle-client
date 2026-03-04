@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
 import websockets
 import websockets.asyncio.client
@@ -154,7 +154,9 @@ class Tunnel:
     """
 
     config: TunnelConfig
+    on_registered: Callable[[str], Awaitable[None]] | None = field(default=None, repr=False)
     _running: bool = field(default=False, init=False, repr=False)
+    _post_register_done: bool = field(default=False, init=False, repr=False)
     _tunnel_id: str | None = field(default=None, init=False, repr=False)
     _public_url: str | None = field(default=None, init=False, repr=False)
     _proxy: LocalProxy = field(init=False, repr=False)
@@ -302,6 +304,14 @@ class Tunnel:
                 self._tunnel_id,
                 self._public_url,
             )
+
+            # Fire post-registration callback (once) for --add-auth etc.
+            if self.on_registered and not self._post_register_done:
+                self._post_register_done = True
+                parsed_host = urlparse(self._public_url).hostname or ""
+                subdomain = parsed_host.split(".")[0]
+                if subdomain:
+                    await self.on_registered(subdomain)
 
             # --- Receive loop ---
             await self._receive_loop(ws)
