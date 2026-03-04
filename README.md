@@ -78,6 +78,9 @@ Options:
 - `--auth` — Auth mode: `sso` (default) or `none`
 - `--allow` — Allow an email to access the tunnel (repeatable). Format: `email` or `provider:email`
 - `--websocket/--no-websocket` — Enable/disable WebSocket proxying (default: enabled)
+- `--verify-ssl` — Enable SSL certificate verification for the local service (default: off, accepts self-signed)
+- `--upstream-basic-auth USER:PASS` — Inject Basic Auth into requests forwarded to the local service
+- `--forward-host` — Forward the browser's Host header to the local service
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
 
 ### `hle auth`
@@ -128,8 +131,19 @@ Create and manage temporary share links.
 hle share create myapp-x7k                         # 24h link (default)
 hle share create myapp-x7k --duration 1h           # 1-hour link
 hle share create myapp-x7k --max-uses 5            # Limited uses
+hle share create myapp-x7k --label "demo"          # Label for reference
 hle share list myapp-x7k                           # List share links
 hle share revoke myapp-x7k 42                      # Revoke a link
+```
+
+### `hle basic-auth`
+
+Manage HTTP Basic Auth access control for tunnels.
+
+```bash
+hle basic-auth set myapp-x7k       # Set credentials (prompts for username & password)
+hle basic-auth status myapp-x7k    # Check Basic Auth status
+hle basic-auth remove myapp-x7k    # Remove Basic Auth
 ```
 
 ### Global Options
