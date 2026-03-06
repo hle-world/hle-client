@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.14.0 — 2026-03-06
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.13.1 — 2026-03-04
 
 Fix tunnel limit/auth error UX and CI reliability.
