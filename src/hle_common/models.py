@@ -164,6 +164,7 @@ class SpeedTestData(BaseModel):
     chunk_index: int
     total_chunks: int
     data: str  # base64-encoded random payload
+    chunk_size_bytes: int | None = None  # hint for upload start signal
 
 
 class SpeedTestResult(BaseModel):
