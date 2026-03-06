@@ -43,6 +43,14 @@ jobs:
             exit 1
           fi
 
+          # hle-client must always use patch version 0
+          PATCH="${VERSION##*.}"
+          if [ "$PATCH" != "0" ]; then
+            echo "Error: hle-client versions must end in .0 (got $VERSION)"
+            echo "Patch versions are reserved for ha-addon and hle-docker."
+            exit 1
+          fi
+
           # Cross-check against pyproject.toml
           TOML_VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
           if [ "$TOML_VERSION" != "$VERSION" ]; then
