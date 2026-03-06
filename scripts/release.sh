@@ -49,6 +49,15 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
+# hle-client must always use patch version 0 — patch numbers are reserved
+# for peripheral repos (ha-addon, hle-docker) to use for their own fixes.
+PATCH="${VERSION##*.}"
+if [[ "$PATCH" != "0" ]]; then
+  echo "Error: hle-client versions must end in .0 (e.g. 1.14.0), got: $VERSION"
+  echo "Patch versions are reserved for ha-addon and hle-docker."
+  exit 1
+fi
+
 CURRENT_VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
 echo "Current version: $CURRENT_VERSION"
 echo "New version:     $VERSION"
