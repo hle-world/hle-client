@@ -721,7 +721,8 @@ class Tunnel:
             # Upload start signal — generate and send chunks
             import os as _os
 
-            chunk_data = base64.b64encode(_os.urandom(65536)).decode("ascii")
+            upload_chunk_size = data.chunk_size_bytes or 65536
+            chunk_data = base64.b64encode(_os.urandom(upload_chunk_size)).decode("ascii")
             for i in range(data.total_chunks):
                 chunk = SpeedTestData(
                     test_id=data.test_id,
