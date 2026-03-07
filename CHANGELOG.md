@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.15.0 — 2026-03-07
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.14.0 — 2026-03-06
 
 <!-- TODO: Fill in release notes before merging -->
