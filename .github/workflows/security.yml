@@ -71,6 +71,9 @@ jobs:
       - name: Install pip-audit
         run: pip install pip-audit
 
+      - name: Upgrade pip
+        run: pip install --upgrade pip
+
       - name: Run pip-audit
         run: pip-audit --desc --fix --dry-run 2>&1
 
