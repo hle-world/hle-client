@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.17.0 — 2026-03-07
+
+Webhook forwarding support — expose webhook endpoints through HLE tunnels without authentication.
+
+- **`hle webhook` command:** New CLI command with `--path` and `--forward-to` options for forwarding webhooks to local services
+- **Path filtering:** Client-side path prefix enforcement with segment boundary checks and `posixpath.normpath` to prevent traversal attacks
+- **No-auth mode:** Webhook tunnels bypass authentication, designed for external services (GitHub, Stripe, etc.) that can't provide credentials
+- **Validation:** Rejects empty, root, traversal, and oversized (>255 char) webhook paths at both model and CLI level
+
 ## v1.16.0 — 2026-03-07
 
 Security hardening, custom zone support, and operator integration.
