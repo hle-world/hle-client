@@ -1,8 +1,18 @@
 # Changelog
 
+## v1.15.0 — 2026-03-07
+
+Auto-sanitize service labels and add HTTP_REQUEST_CANCEL protocol support.
+
+- **Label auto-sanitization:** Invalid characters in `--label` (underscores, uppercase, spaces) are now auto-corrected instead of rejected with a validation error
+- **HTTP_REQUEST_CANCEL:** Client now handles server cancel messages for orphaned chunked streams — stops streaming when the browser disconnects mid-request
+- **Protocol v1.2:** New `HTTP_REQUEST_CANCEL` message type added (backward compatible — old servers simply don't send it)
+
 ## v1.14.0 — 2026-03-06
 
-<!-- TODO: Fill in release notes before merging -->
+Speed test upload parity and chunk size tracking.
+
+- **Upload speed test:** Added `chunk_size_bytes` to `SpeedTestData` for accurate upload throughput measurement
 
 ## v1.13.1 — 2026-03-04
 
