@@ -141,6 +141,8 @@ class TunnelConfig:
     """Optional (username, password) injected as Authorization: Basic toward the local service."""
     forward_host: bool = False
     """Forward the browser's Host header instead of using the target hostname."""
+    managed_by: str | None = None
+    """Identifies the managing system (e.g. "hle-operator") — disables dashboard edits."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -303,6 +305,7 @@ class Tunnel:
                 websocket_enabled=self.config.websocket_enabled,
                 auth_mode=self.config.auth_mode,
                 capabilities=[CAPABILITY_CHUNKED_RESPONSE],
+                managed_by=self.config.managed_by,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,

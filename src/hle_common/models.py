@@ -32,6 +32,7 @@ class TunnelRegistration(BaseModel):
     websocket_enabled: bool = True
     auth_mode: str = "none"  # SSO not in POC scope
     capabilities: list[str] = []  # e.g. ["chunked_response"]
+    managed_by: str | None = None  # e.g. "hle-operator" — locks dashboard edits
 
     @field_validator("service_label")
     @classmethod
