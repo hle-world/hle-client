@@ -69,21 +69,23 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          # Extract changelog entry for this version
+          # Extract changelog entry for this version and pass via env var
+          # (never interpolate file content into code strings — injection risk)
           NOTES=$(sed -n "/^## v$VERSION/,/^## v/{ /^## v$VERSION/d; /^## v/d; p; }" CHANGELOG.md | sed '/^$/{ N; /^\n$/d; }')
           if [ -z "$NOTES" ]; then
             NOTES="Release v$VERSION"
           fi
+          export NOTES
 
-          # Create release via API using Python for safe JSON encoding
+          # Create release via API using Python — reads NOTES from env var safely
           python3 -c "
           import json, os, urllib.request
           version = os.environ['VERSION']
-          notes = '''$NOTES''' if '''$NOTES''' else f'Release v{version}'
+          notes = os.environ.get('NOTES', '').strip() or f'Release v{version}'
           data = json.dumps({
               'tag_name': f'v{version}',
               'name': f'v{version}',
-              'body': notes.strip(),
+              'body': notes,
               'target_commitish': 'main'
           }).encode()
           req = urllib.request.Request(

@@ -4,6 +4,8 @@ on:
   release:
     types: [published]
 
+permissions: {}
+
 jobs:
   update-formula:
     runs-on: arc-runner-hle-client
@@ -40,11 +42,16 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
+      - name: Install uv
+        run: pip install uv
+
       - name: Generate formula
         run: |
-          pip install "hle-client==${VERSION}"
+          # Install into a temporary venv to extract metadata without polluting the runner
+          uv venv /tmp/formula-venv
+          uv pip install --python /tmp/formula-venv/bin/python "hle-client==${VERSION}"
 
-          python3 << 'PYEOF'
+          /tmp/formula-venv/bin/python << 'PYEOF'
           import json, urllib.request, importlib.metadata, textwrap
 
           version = __import__("os").environ["VERSION"]

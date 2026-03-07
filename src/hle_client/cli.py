@@ -878,7 +878,8 @@ def _handle_api_error(exc: Exception) -> None:
             404: "Resource not found.",
             409: "Email already in access list.",
         }
-        msg = messages.get(status, f"Server error ({status}): {exc.response.text}")
+        body = exc.response.text[:200] if exc.response.text else ""
+        msg = messages.get(status, f"Server error ({status}): {body}")
         console.print(f"[red]Error:[/red] {msg}")
     elif isinstance(exc, httpx.ConnectError):
         console.print("[red]Error:[/red] Could not connect to relay server.")

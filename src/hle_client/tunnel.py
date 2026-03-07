@@ -7,6 +7,7 @@ import base64
 import contextlib
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,7 +80,7 @@ def _save_api_key(api_key: str) -> None:
         if _CONFIG_FILE.exists():
             with open(_CONFIG_FILE) as f:
                 for line in f:
-                    if line.startswith("api_key"):
+                    if line.startswith("api_key ") or line.startswith("api_key="):
                         existing_lines.append(f'api_key = "{api_key}"\n')
                         found = True
                     else:
@@ -108,7 +109,11 @@ def _remove_api_key() -> bool:
         with open(_CONFIG_FILE) as f:
             lines = f.readlines()
 
-        new_lines = [line for line in lines if not line.startswith("api_key")]
+        new_lines = [
+            line
+            for line in lines
+            if not (line.startswith("api_key ") or line.startswith("api_key="))
+        ]
         if len(new_lines) == len(lines):
             return False  # No api_key line found
 
@@ -146,6 +151,24 @@ class TunnelConfig:
 # Hard limits to protect against a malicious or compromised relay server.
 MAX_WS_STREAMS = 100
 MAX_SPEED_TEST_CHUNKS = 100  # ~6.4 MB at 64 KB/chunk
+MAX_SPEED_TEST_CHUNK_SIZE = 1_048_576  # 1 MB — cap server-requested chunk size
+
+# Headers to strip from relayed WebSocket handshakes (hop-by-hop / WS-specific).
+_WS_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "host",
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-accept",
+        "sec-websocket-protocol",
+        "transfer-encoding",
+        "content-length",
+        "keep-alive",
+    }
+)
 
 
 @dataclass
@@ -250,6 +273,9 @@ class Tunnel:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
+    # Allowed relay hostnames — discovery URLs must match one of these.
+    _RELAY_HOST_ALLOWLIST = re.compile(r"^([a-z0-9-]+\.)*hle\.world$")
+
     async def _discover_relay_uri(self, api_key: str) -> str:
         """Resolve the relay WebSocket URI via the discovery endpoint.
 
@@ -266,17 +292,29 @@ class Tunnel:
             discovery = None
 
         if discovery is not None:
-            logger.info(
-                "Relay discovery: url=%s region=%s ttl=%ds",
-                discovery.relay_url,
-                discovery.relay_region,
-                discovery.ttl,
-            )
-            return discovery.relay_url
+            # Validate the discovered URL: must be wss:// to a known host.
+            parsed = urlparse(discovery.relay_url)
+            if parsed.scheme != "wss":
+                logger.warning(
+                    "Relay discovery returned non-wss scheme (%s), ignoring",
+                    parsed.scheme,
+                )
+            elif not parsed.hostname or not self._RELAY_HOST_ALLOWLIST.match(parsed.hostname):
+                logger.warning(
+                    "Relay discovery returned untrusted host (%s), ignoring",
+                    parsed.hostname,
+                )
+            else:
+                logger.info(
+                    "Relay discovery: url=%s region=%s ttl=%ds",
+                    discovery.relay_url,
+                    discovery.relay_region,
+                    discovery.ttl,
+                )
+                return discovery.relay_url
 
-        # Fallback: build URL from config defaults (current behaviour)
-        scheme = "wss" if self.config.relay_port == 443 else "ws"
-        return f"{scheme}://{self.config.relay_host}:{self.config.relay_port}/_hle/tunnel"
+        # Fallback: build URL from config defaults (always wss)
+        return f"wss://{self.config.relay_host}:{self.config.relay_port}/_hle/tunnel"
 
     async def _connect_once(self) -> None:
         """Single connection attempt: discover relay, register, then enter the receive loop."""
@@ -310,8 +348,8 @@ class Tunnel:
             )
             await ws.send(register_msg.model_dump_json())
 
-            # Wait for acknowledgement
-            ack_raw = await ws.recv()
+            # Wait for acknowledgement (30s timeout to avoid hanging on buggy relay)
+            ack_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
             ack_msg = ProtocolMessage.model_validate_json(ack_raw)
             if ack_msg.type != MessageType.TUNNEL_ACK:
                 raise ConnectionError(f"Expected TUNNEL_ACK, received {ack_msg.type}")
@@ -586,21 +624,10 @@ class Tunnel:
 
         # Strip WebSocket handshake and hop-by-hop headers — these belong to
         # the browser↔relay connection, not the client↔local service connection.
-        _ws_hop_by_hop = {
-            "host",
-            "upgrade",
-            "connection",
-            "sec-websocket-key",
-            "sec-websocket-version",
-            "sec-websocket-extensions",
-            "sec-websocket-accept",
-            "sec-websocket-protocol",
-            "transfer-encoding",
-            "content-length",
-            "keep-alive",
-        }
         clean_headers = {
-            k: v for k, v in (open_req.headers or {}).items() if k.lower() not in _ws_hop_by_hop
+            k: v
+            for k, v in (open_req.headers or {}).items()
+            if k.lower() not in _WS_HOP_BY_HOP_HEADERS
         }
 
         # Rewrite Origin to match the local service so the upstream server
@@ -617,10 +644,20 @@ class Tunnel:
             token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
             clean_headers["authorization"] = f"Basic {token}"
 
+        # Match HTTP proxy TLS behaviour: skip verification when verify_ssl=False
+        import ssl
+
+        ws_ssl: ssl.SSLContext | None = None
+        if local_ws_url.startswith("wss://") and not self.config.verify_ssl:
+            ws_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ws_ssl.check_hostname = False
+            ws_ssl.verify_mode = ssl.CERT_NONE
+
         try:
             local_ws = await websockets.connect(
                 local_ws_url,
                 additional_headers=clean_headers,
+                ssl=ws_ssl,
             )
         except Exception:
             logger.exception("Failed to open local WS connection to %s", local_ws_url)
@@ -750,7 +787,8 @@ class Tunnel:
                 }
 
             state = self._speed_test_state[data.test_id]
-            state["bytes"] += len(data.data)
+            # Count decoded bytes, not base64 string length (base64 inflates ~33%)
+            state["bytes"] += len(data.data) * 3 // 4
             state["chunks"] += 1
 
             if state["chunks"] >= data.total_chunks:
@@ -777,10 +815,8 @@ class Tunnel:
 
         elif data.direction == "upload" and data.chunk_index == -1:
             # Upload start signal — generate and send chunks
-            import os as _os
-
-            upload_chunk_size = data.chunk_size_bytes or 65536
-            chunk_data = base64.b64encode(_os.urandom(upload_chunk_size)).decode("ascii")
+            upload_chunk_size = min(data.chunk_size_bytes or 65536, MAX_SPEED_TEST_CHUNK_SIZE)
+            chunk_data = base64.b64encode(os.urandom(upload_chunk_size)).decode("ascii")
             for i in range(data.total_chunks):
                 chunk = SpeedTestData(
                     test_id=data.test_id,

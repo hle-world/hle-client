@@ -66,52 +66,6 @@ class ProtocolMessage(BaseModel):
     payload: dict[str, Any] | None = None
 
 
-class TunnelOpenRequest(BaseModel):
-    """Request to open a new tunnel."""
-
-    service_url: str
-    auth_mode: str = "sso"
-    domain: str | None = None
-    websocket_enabled: bool = True
-
-
-class TunnelOpenResponse(BaseModel):
-    """Response confirming a tunnel has been opened."""
-
-    tunnel_id: str
-    subdomain: str
-    public_url: str
-
-
-class HttpRequest(BaseModel):
-    """HTTP request forwarded through the tunnel."""
-
-    request_id: str
-    method: str
-    path: str
-    headers: dict[str, str]
-    body: str | None = None
-    query_string: str = ""
-
-
-class HttpResponse(BaseModel):
-    """HTTP response sent back through the tunnel."""
-
-    request_id: str
-    status_code: int
-    headers: dict[str, str]
-    body: str | None = None
-
-
-class WsFrame(BaseModel):
-    """WebSocket frame forwarded through the tunnel."""
-
-    stream_id: str
-    data: str
-    is_binary: bool = False
-    path: str = ""
-
-
 class ErrorPayload(BaseModel):
     """Error payload included in ERROR messages."""
 
