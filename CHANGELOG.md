@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.16.0 — 2026-03-07
+
+Security hardening, custom zone support, and operator integration.
+
+- **Security audit remediation:** 4MB WebSocket message limit, hardened CI pipelines (pip-audit fix, TruffleHog pinning), removed obsolete protocol test fixtures
+- **Custom zones:** Enterprise delegated subdomain support — tunnels can register under custom DNS zones (e.g. `app.example.com`) with zone config persistence in `config.toml`
+- **Managed tunnels:** `managed_by` field on `TunnelRegistration` for operator-managed tunnels (locks dashboard edits when set)
+- **Operator notifications:** `notify-operator.yml` workflow dispatches to `hle-operator` on new client releases
+
 ## v1.15.0 — 2026-03-07
 
 Auto-sanitize service labels and add HTTP_REQUEST_CANCEL protocol support.
