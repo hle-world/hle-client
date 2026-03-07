@@ -22,8 +22,11 @@ from hle_client.tunnel import (
     TunnelConfig,
     TunnelFatalError,
     _load_api_key,
+    _load_zone,
     _remove_api_key,
+    _remove_zone,
     _save_api_key,
+    _save_zone,
 )
 
 console = Console()
@@ -109,6 +112,13 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     "Format: 'email' or 'provider:email'. "
     "Providers: any (default), google, github, hle. Repeatable.",
 )
+@click.option(
+    "--zone",
+    default=None,
+    envvar="HLE_ZONE",
+    help="Custom zone domain for enterprise tunnel routing (e.g. project1.t00t.us). "
+    "Falls back to ~/.config/hle/config.toml if not set.",
+)
 def expose(
     service: str,
     auth: str,
@@ -119,8 +129,12 @@ def expose(
     upstream_basic_auth: str | None,
     forward_host: bool,
     allow: tuple[str, ...],
+    zone: str | None,
 ) -> None:
     """Expose a local service to the internet."""
+    # Resolve zone: --zone flag > HLE_ZONE env > config.toml
+    resolved_zone = zone or _load_zone()
+
     # Parse --upstream-basic-auth USER:PASS
     upstream_auth_tuple: tuple[str, str] | None = None
     if upstream_basic_auth:
@@ -139,6 +153,7 @@ def expose(
         verify_ssl=verify_ssl,
         upstream_basic_auth=upstream_auth_tuple,
         forward_host=forward_host,
+        zone=resolved_zone,
     )
 
     # Build post-registration callback for --allow rules
@@ -184,6 +199,8 @@ def expose(
     console.print("     Relay   [dim]hle.world[/dim]")
     if service_label:
         console.print(f"     Label   [dim]{service_label}[/dim]")
+    if resolved_zone:
+        console.print(f"     Zone    [dim]{resolved_zone}[/dim]")
     console.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
     console.print()
 
@@ -260,6 +277,55 @@ def logout() -> None:
         console.print("[green]API key removed[/green] from ~/.config/hle/config.toml")
     else:
         console.print("[dim]No API key saved in config file.[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# hle zone — manage default custom zone
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def zone() -> None:
+    """Manage default custom zone for enterprise tunnel routing."""
+
+
+@zone.command("set")
+@click.argument("zone_domain")
+def zone_set(zone_domain: str) -> None:
+    """Set the default zone (saved to ~/.config/hle/config.toml).
+
+    This zone is used automatically by 'hle expose' when --zone is not passed.
+    """
+    _save_zone(zone_domain)
+    console.print(f"[green]Default zone set:[/green] {zone_domain}")
+    console.print("[dim]All tunnels will use this zone unless --zone overrides it.[/dim]")
+
+
+@zone.command("status")
+def zone_status() -> None:
+    """Show the current default zone."""
+    env_zone = os.environ.get("HLE_ZONE")
+    if env_zone:
+        console.print("Zone source: [cyan]HLE_ZONE environment variable[/cyan]")
+        console.print(f"Zone: [dim]{env_zone}[/dim]")
+        return
+
+    config_zone = _load_zone()
+    if config_zone:
+        console.print("Zone source: [cyan]config file (~/.config/hle/config.toml)[/cyan]")
+        console.print(f"Zone: [dim]{config_zone}[/dim]")
+        return
+
+    console.print("[dim]No default zone configured.[/dim]")
+
+
+@zone.command("clear")
+def zone_clear() -> None:
+    """Remove the default zone from ~/.config/hle/config.toml."""
+    if _remove_zone():
+        console.print("[green]Default zone removed[/green] from ~/.config/hle/config.toml")
+    else:
+        console.print("[dim]No default zone saved in config file.[/dim]")
 
 
 @main.command()
