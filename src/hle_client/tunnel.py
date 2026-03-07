@@ -216,6 +216,8 @@ class TunnelConfig:
     """Custom zone domain for enterprise tunnel routing (e.g. 'project1.t00t.us')."""
     managed_by: str | None = None
     """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
+    webhook_path: str | None = None
+    """When set, only forward requests matching this path prefix (webhook mode)."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -414,6 +416,7 @@ class Tunnel:
                 capabilities=[CAPABILITY_CHUNKED_RESPONSE],
                 zone=self.config.zone,
                 managed_by=self.config.managed_by,
+                webhook_path=self.config.webhook_path,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,
@@ -493,6 +496,34 @@ class Tunnel:
         msg: ProtocolMessage,
     ) -> None:
         """Forward an HTTP request to the local service and return the response."""
+        # Webhook mode: reject requests that don't match the registered path prefix
+        if self.config.webhook_path:
+            import posixpath
+
+            req_path = posixpath.normpath((msg.payload or {}).get("path", ""))
+            prefix = self.config.webhook_path.rstrip("/")
+            # Match exact path or path with trailing segments (segment boundary)
+            if not (req_path == prefix or req_path.startswith(prefix + "/")):
+                req = ProxiedHttpRequest.model_validate(msg.payload)
+                response = ProxiedHttpResponse(
+                    request_id=req.request_id,
+                    status_code=404,
+                    headers={"content-type": "application/json"},
+                    body=base64.b64encode(
+                        b'{"error":"Not found","detail":"This webhook endpoint only accepts '
+                        b'requests on the registered path."}'
+                    ).decode("ascii"),
+                )
+                resp_msg = ProtocolMessage(
+                    type=MessageType.HTTP_RESPONSE,
+                    tunnel_id=self._tunnel_id,
+                    request_id=req.request_id,
+                    payload=response.model_dump(),
+                )
+                with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                    await ws.send(resp_msg.model_dump_json())
+                return
+
         if CAPABILITY_CHUNKED_RESPONSE in self._server_caps:
             await self._handle_http_request_chunked(ws, msg)
         else:

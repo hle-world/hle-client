@@ -331,10 +331,81 @@ def zone_clear() -> None:
 @main.command()
 @click.option("--path", required=True, help="Webhook path (e.g. /webhook/github)")
 @click.option("--forward-to", required=True, help="Local URL to forward webhooks to")
-def webhook(path: str, forward_to: str) -> None:
-    """Forward incoming webhooks to a local service."""
-    click.echo(f"Forwarding webhooks {path} -> {forward_to}")
-    # TODO: implement webhook forwarding
+@click.option("--label", "service_label", default=None, help="Custom tunnel label (default: auto)")
+@click.option(
+    "--api-key",
+    envvar="HLE_API_KEY",
+    default=None,
+    help="API key. Falls back to ~/.config/hle/config.toml if not set.",
+)
+@click.option("--zone", default=None, help="Custom zone domain for routing.")
+def webhook(
+    path: str,
+    forward_to: str,
+    service_label: str | None,
+    api_key: str | None,
+    zone: str | None,
+) -> None:
+    """Forward incoming webhooks to a local service.
+
+    Creates a tunnel that only accepts requests matching --path and forwards
+    them to --forward-to. The tunnel's access gate (SSO/PIN) is disabled so
+    external services (GitHub, Stripe, etc.) can deliver webhooks without
+    authentication.
+
+    Example:
+
+        hle webhook --path /hook/github --forward-to http://localhost:3000/webhook
+    """
+    import posixpath
+
+    # Validate and normalize path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    path = posixpath.normpath(path)
+    if not path or path == "/":
+        console.print("[red]Error:[/red] --path must be a non-root path (e.g. /webhook/github)")
+        raise SystemExit(1)
+    if ".." in path.split("/"):
+        console.print("[red]Error:[/red] --path must not contain '..' segments")
+        raise SystemExit(1)
+
+    resolved_zone = zone or _load_zone()
+
+    config = TunnelConfig(
+        service_url=forward_to,
+        auth_mode="none",  # no SSO gate for webhooks
+        service_label=service_label or f"wh-{path.strip('/').replace('/', '-')[:20]}",
+        api_key=api_key,
+        websocket_enabled=False,
+        verify_ssl=False,
+        zone=resolved_zone,
+        webhook_path=path,
+    )
+
+    tunnel = Tunnel(config=config)
+
+    if api_key and not os.environ.get("HLE_API_KEY"):
+        console.print(
+            "[yellow]Warning:[/yellow] API key passed via --api-key is visible in process "
+            "listings.\n         Use HLE_API_KEY env var or ~/.config/hle/config.toml instead."
+        )
+
+    console.print(f"\n[bold]HLE[/bold] v{__version__}  Webhook forwarder")
+    console.print(f"     Path    [cyan]{path}[/cyan]")
+    console.print(f"     Forward [cyan]{forward_to}[/cyan]")
+    console.print("     Relay   [dim]hle.world[/dim]")
+    if resolved_zone:
+        console.print(f"     Zone    [dim]{resolved_zone}[/dim]")
+    console.print()
+
+    try:
+        asyncio.run(tunnel.connect())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Shutting down ...[/yellow]")
+    except TunnelFatalError as exc:
+        console.print(f"\n[red]Error:[/red] {exc}")
+        raise SystemExit(1) from None
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,25 @@ class TunnelRegistration(BaseModel):
     capabilities: list[str] = []  # e.g. ["chunked_response"]
     zone: str | None = None  # custom zone domain for enterprise routing
     managed_by: str | None = None  # e.g. "hle-operator" for K8s operator tunnels
+    webhook_path: str | None = None  # e.g. "/webhook/github" — restricts to this path prefix
+
+    @field_validator("webhook_path")
+    @classmethod
+    def validate_webhook_path(cls, v: str | None) -> str | None:
+        if v is not None:
+            if not v or v == "/":
+                raise ValueError("webhook_path must be a non-root absolute path")
+            if not v.startswith("/"):
+                raise ValueError("webhook_path must start with /")
+            # Normalize and reject traversal
+            import posixpath
+
+            normalized = posixpath.normpath(v)
+            if normalized != v.rstrip("/"):
+                raise ValueError("webhook_path must not contain '..' or redundant separators")
+            if len(v) > 255:
+                raise ValueError("webhook_path too long (max 255)")
+        return v
 
     @field_validator("service_label")
     @classmethod
