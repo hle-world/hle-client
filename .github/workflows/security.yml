@@ -49,7 +49,7 @@ jobs:
               conf = r['issue_confidence']
               print(f\"[{sev}/{conf}] {r['filename']}:{r['line_number']} -- {r['issue_text']}\")
           print(f\"\n{len(results)} issue(s) found.\")
-          if any(r['issue_severity'] == 'HIGH' for r in results):
+          if any(r['issue_severity'] in ('HIGH', 'MEDIUM') for r in results):
               sys.exit(1)
           "
           fi
