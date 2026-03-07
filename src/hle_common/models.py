@@ -65,6 +65,7 @@ class TunnelRegistrationResponse(BaseModel):
     user_code: str
     service_label: str
     server_capabilities: list[str] = []  # e.g. ["chunked_response"]
+    zone: str | None = None  # custom zone domain if tunnel uses one
 
 
 class RelayDiscoveryResponse(BaseModel):
