@@ -169,6 +169,9 @@ class Tunnel:
     _ws_streams: dict[str, _ClientConn] = field(default_factory=dict, init=False, repr=False)
     _ws_streams_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _active_chunked: dict[str, asyncio.Task[None]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._proxy = LocalProxy(
@@ -360,6 +363,12 @@ class Tunnel:
                     await ws.send(pong.model_dump_json())
                 case MessageType.SPEED_TEST_DATA:
                     self._spawn(self._handle_speed_test_data(ws, msg))
+                case MessageType.HTTP_REQUEST_CANCEL:
+                    request_id = (msg.payload or {}).get("request_id")
+                    if request_id:
+                        task = self._active_chunked.pop(request_id, None)
+                        if task and not task.done():
+                            task.cancel()
                 case _:
                     logger.debug("Unhandled message type: %s", msg.type)
 
@@ -427,6 +436,11 @@ class Tunnel:
         """Forward HTTP request using chunked streaming response."""
         req = ProxiedHttpRequest.model_validate(msg.payload)
 
+        # Register this task so the server can cancel it via HTTP_REQUEST_CANCEL.
+        current = asyncio.current_task()
+        if current is not None:
+            self._active_chunked[req.request_id] = current
+
         body: bytes | None = None
         if req.body is not None:
             body = base64.b64decode(req.body)
@@ -481,6 +495,20 @@ class Tunnel:
                 payload=end.model_dump(),
             )
             await ws.send(end_msg.model_dump_json())
+        except asyncio.CancelledError:
+            logger.debug("Chunked stream cancelled by server for %s", req.request_id)
+            with contextlib.suppress(Exception):
+                end = HttpResponseEnd(
+                    request_id=req.request_id,
+                    error="cancelled",
+                )
+                end_msg = ProtocolMessage(
+                    type=MessageType.HTTP_RESPONSE_END,
+                    tunnel_id=self._tunnel_id,
+                    request_id=req.request_id,
+                    payload=end.model_dump(),
+                )
+                await ws.send(end_msg.model_dump_json())
         except websockets.exceptions.ConnectionClosed:
             logger.debug(
                 "Connection closed while sending chunked response for %s",
@@ -501,6 +529,8 @@ class Tunnel:
                     payload=end.model_dump(),
                 )
                 await ws.send(end_msg.model_dump_json())
+        finally:
+            self._active_chunked.pop(req.request_id, None)
 
     # ------------------------------------------------------------------
     # WebSocket stream handling
