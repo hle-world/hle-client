@@ -31,6 +31,15 @@ class TestTunnelRegistration:
         assert reg.protocol_version is None
         assert reg.websocket_enabled is True
         assert reg.auth_mode == "none"
+        assert reg.managed_by is None
+
+    def test_tunnel_registration_with_managed_by(self):
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_abc123",
+            managed_by="hle-operator",
+        )
+        assert reg.managed_by == "hle-operator"
 
     def test_tunnel_registration_with_protocol_version(self):
         reg = TunnelRegistration(
