@@ -57,25 +57,47 @@ class TestTunnelRegistration:
         with pytest.raises(ValueError):
             TunnelRegistration(service_url="http://localhost:5000")
 
-    def test_tunnel_registration_service_label_validation(self):
-        with pytest.raises(ValueError, match="service_label"):
-            TunnelRegistration(
-                service_url="http://localhost:5000",
-                api_key="hle_key",
-                service_label="-bad",
-            )
-        with pytest.raises(ValueError, match="service_label"):
-            TunnelRegistration(
-                service_url="http://localhost:5000",
-                api_key="hle_key",
-                service_label="bad-",
-            )
-        with pytest.raises(ValueError, match="service_label"):
-            TunnelRegistration(
-                service_url="http://localhost:5000",
-                api_key="hle_key",
-                service_label="BAD",
-            )
+    def test_tunnel_registration_service_label_sanitization(self):
+        """Labels are auto-sanitized instead of rejected."""
+        # Underscores → hyphens
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_key",
+            service_label="ha_office",
+        )
+        assert reg.service_label == "ha-office"
+
+        # Uppercase → lowercase
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_key",
+            service_label="BAD",
+        )
+        assert reg.service_label == "bad"
+
+        # Leading/trailing hyphens stripped
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_key",
+            service_label="-bad-",
+        )
+        assert reg.service_label == "bad"
+
+        # Spaces → hyphens
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_key",
+            service_label="my app",
+        )
+        assert reg.service_label == "my-app"
+
+        # All-invalid chars → None (server auto-generates)
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_key",
+            service_label="!!!",
+        )
+        assert reg.service_label is None
 
 
 class TestTunnelRegistrationResponse:

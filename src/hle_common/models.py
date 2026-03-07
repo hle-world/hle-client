@@ -37,13 +37,19 @@ class TunnelRegistration(BaseModel):
     @classmethod
     def validate_service_label(cls, v: str | None) -> str | None:
         if v is not None:
+            # Auto-sanitize: lowercase, replace common separators with
+            # hyphens, strip invalid characters, collapse runs.
+            v = v.lower()
+            v = re.sub(r"[_ .]+", "-", v)
+            v = re.sub(r"[^a-z0-9-]", "", v)
+            v = re.sub(r"-{2,}", "-", v)
+            v = v.strip("-")
+            if not v:
+                return None
             if len(v) > 63:
-                raise ValueError("service_label must be at most 63 characters")
+                v = v[:63].rstrip("-")
             if not _SERVICE_LABEL_RE.match(v):
-                raise ValueError(
-                    "service_label must be a valid DNS label "
-                    "(lowercase alphanumeric and hyphens, cannot start/end with hyphen)"
-                )
+                return None
         return v
 
 
