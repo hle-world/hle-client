@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.17.0 — 2026-03-07
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.16.0 — 2026-03-07
 
 Security hardening, custom zone support, and operator integration.
