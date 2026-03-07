@@ -207,6 +207,10 @@ class TunnelConfig:
     """Optional (username, password) injected as Authorization: Basic toward the local service."""
     forward_host: bool = False
     """Forward the browser's Host header instead of using the target hostname."""
+    zone: str | None = None
+    """Custom zone domain for enterprise tunnel routing (e.g. 'project1.t00t.us')."""
+    managed_by: str | None = None
+    """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -369,6 +373,8 @@ class Tunnel:
                 websocket_enabled=self.config.websocket_enabled,
                 auth_mode=self.config.auth_mode,
                 capabilities=[CAPABILITY_CHUNKED_RESPONSE],
+                zone=self.config.zone,
+                managed_by=self.config.managed_by,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,
