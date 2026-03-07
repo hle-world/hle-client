@@ -149,6 +149,7 @@ class TunnelConfig:
 
 
 # Hard limits to protect against a malicious or compromised relay server.
+WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB — control-plane WebSocket message limit
 MAX_WS_STREAMS = 100
 MAX_SPEED_TEST_CHUNKS = 100  # ~6.4 MB at 64 KB/chunk
 MAX_SPEED_TEST_CHUNK_SIZE = 1_048_576  # 1 MB — cap server-requested chunk size
@@ -328,7 +329,7 @@ class Tunnel:
         relay_uri = await self._discover_relay_uri(api_key)
         logger.info("Connecting to relay at %s", relay_uri)
 
-        async with websockets.connect(relay_uri) as ws:
+        async with websockets.connect(relay_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
             self._ws = ws
 
             # --- Registration handshake ---
