@@ -73,6 +73,28 @@ jobs:
             https://api.github.com/repos/hle-world/ha-addon/dispatches \
             -d "{\"event_type\":\"hle-client-release\",\"client_payload\":{\"version\":\"${RELEASE_TAG}\"}}"
 
+  notify-operator:
+    name: Notify hle-operator
+    needs: publish
+    runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Install curl
+        run: apt-get update && apt-get install -y curl
+
+      - name: Dispatch to hle-operator
+        env:
+          DISPATCH_TOKEN: ${{ secrets.HLE_DOCKER_DISPATCH_TOKEN }}
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            https://api.github.com/repos/hle-world/hle-operator/dispatches \
+            -d "{\"event_type\":\"hle-client-release\",\"client_payload\":{\"version\":\"${RELEASE_TAG}\"}}"
+
   sync-hle-docker:
     name: Trigger hle-docker release
     needs: publish
