@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.16.0 — 2026-03-07
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.15.0 — 2026-03-07
 
 Auto-sanitize service labels and add HTTP_REQUEST_CANCEL protocol support.
