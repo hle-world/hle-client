@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from hle_common.models import RelayDiscoveryResponse
 
 logger = logging.getLogger(__name__)
+
+_SUBDOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+
+def _safe_subdomain(subdomain: str) -> str:
+    """Validate and URL-encode a subdomain to prevent path traversal."""
+    if not _SUBDOMAIN_RE.match(subdomain):
+        raise ValueError(f"Invalid subdomain format: {subdomain!r}")
+    return quote(subdomain, safe="")
 
 
 @dataclass
@@ -21,13 +32,34 @@ class ApiClientConfig:
 
 
 class ApiClient:
-    """HTTP client for the HLE server REST API using Bearer auth."""
+    """HTTP client for the HLE server REST API using Bearer auth.
+
+    Can be used as an async context manager to reuse the underlying connection
+    pool across multiple requests, or instantiated directly (each call creates
+    a short-lived client).
+    """
 
     _BASE_URL = "https://hle.world"
 
     def __init__(self, config: ApiClientConfig) -> None:
         self._base_url = self._BASE_URL
         self._headers = {"Authorization": f"Bearer {config.api_key}"}
+        self._shared_client: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> ApiClient:
+        self._shared_client = httpx.AsyncClient(timeout=10.0)
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        if self._shared_client:
+            await self._shared_client.aclose()
+            self._shared_client = None
+
+    def _client_ctx(self) -> httpx.AsyncClient:
+        """Return the shared client or create a one-shot client."""
+        if self._shared_client is not None:
+            return self._shared_client
+        return httpx.AsyncClient(timeout=10.0)
 
     async def discover_relay(self) -> RelayDiscoveryResponse | None:
         """Call the discovery endpoint to find the optimal relay server.
@@ -65,7 +97,7 @@ class ApiClient:
         """List access rules for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self._base_url}/api/tunnels/{subdomain}/access",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/access",
                 headers=self._headers,
             )
             resp.raise_for_status()
@@ -78,7 +110,7 @@ class ApiClient:
         """Add an email to a subdomain's access allow-list."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self._base_url}/api/tunnels/{subdomain}/access",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/access",
                 headers=self._headers,
                 json={"email": email, "provider": provider},
             )
@@ -90,7 +122,7 @@ class ApiClient:
         """Remove an access rule by ID."""
         async with httpx.AsyncClient() as client:
             resp = await client.delete(
-                f"{self._base_url}/api/tunnels/{subdomain}/access/{rule_id}",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/access/{rule_id}",
                 headers=self._headers,
             )
             resp.raise_for_status()
@@ -101,7 +133,7 @@ class ApiClient:
         """Get PIN status for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self._base_url}/api/tunnels/{subdomain}/pin",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/pin",
                 headers=self._headers,
             )
             resp.raise_for_status()
@@ -112,7 +144,7 @@ class ApiClient:
         """Set or update the PIN for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.put(
-                f"{self._base_url}/api/tunnels/{subdomain}/pin",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/pin",
                 headers=self._headers,
                 json={"pin": pin},
             )
@@ -124,7 +156,7 @@ class ApiClient:
         """Remove the PIN for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.delete(
-                f"{self._base_url}/api/tunnels/{subdomain}/pin",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/pin",
                 headers=self._headers,
             )
             resp.raise_for_status()
@@ -144,7 +176,7 @@ class ApiClient:
             body["max_uses"] = max_uses
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self._base_url}/api/tunnels/{subdomain}/share-links",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/share-links",
                 headers=self._headers,
                 json=body,
             )
@@ -156,7 +188,7 @@ class ApiClient:
         """List share links for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self._base_url}/api/tunnels/{subdomain}/share-links",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/share-links",
                 headers=self._headers,
             )
             resp.raise_for_status()
@@ -167,7 +199,7 @@ class ApiClient:
         """Revoke a share link."""
         async with httpx.AsyncClient() as client:
             resp = await client.delete(
-                f"{self._base_url}/api/tunnels/{subdomain}/share-links/{link_id}",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/share-links/{link_id}",
                 headers=self._headers,
             )
             resp.raise_for_status()
@@ -180,7 +212,7 @@ class ApiClient:
         """Get Basic Auth status for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self._base_url}/api/tunnels/{subdomain}/basic-auth",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/basic-auth",
                 headers=self._headers,
             )
             resp.raise_for_status()
@@ -193,7 +225,7 @@ class ApiClient:
         """Set or replace Basic Auth credentials for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.put(
-                f"{self._base_url}/api/tunnels/{subdomain}/basic-auth",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/basic-auth",
                 headers=self._headers,
                 json={"username": username, "password": password},
             )
@@ -205,7 +237,7 @@ class ApiClient:
         """Remove Basic Auth for a subdomain."""
         async with httpx.AsyncClient() as client:
             resp = await client.delete(
-                f"{self._base_url}/api/tunnels/{subdomain}/basic-auth",
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/basic-auth",
                 headers=self._headers,
             )
             resp.raise_for_status()

@@ -15,6 +15,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Headers to strip when forwarding HTTP requests to the local service.
+_HOP_BY_HOP_HEADERS = frozenset({"transfer-encoding", "connection", "upgrade", "accept-encoding"})
+
 
 @dataclass
 class ProxyConfig:
@@ -87,9 +90,7 @@ class LocalProxy:
     ) -> dict[str, str]:
         """Build headers to forward, stripping hop-by-hop and optionally Host."""
         forward_host = include_host if include_host is not None else self._should_forward_host
-        skip = {"transfer-encoding", "connection", "upgrade", "accept-encoding"}
-        if not forward_host:
-            skip.add("host")
+        skip = _HOP_BY_HOP_HEADERS | (frozenset() if forward_host else frozenset({"host"}))
         result = {k: v for k, v in headers.items() if k.lower() not in skip}
 
         if self.config.upstream_basic_auth is not None:
