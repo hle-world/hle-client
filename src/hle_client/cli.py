@@ -398,6 +398,12 @@ def webhook(
     if resolved_zone:
         console.print(f"     Zone    [dim]{resolved_zone}[/dim]")
     console.print()
+    console.print(
+        "[yellow]Tip:[/yellow] Always verify webhook signatures from your provider "
+        "(e.g. GitHub X-Hub-Signature-256, Stripe Stripe-Signature) "
+        "in your application to authenticate requests."
+    )
+    console.print()
 
     try:
         asyncio.run(tunnel.connect())
