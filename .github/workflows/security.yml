@@ -19,7 +19,7 @@ jobs:
     container:
       image: python:3.13-slim
     steps:
-      - uses: actions/checkout@v4.1.7
+      - uses: actions/checkout@v6.0.2
 
       - name: Install Bandit
         run: pip install bandit[toml]
@@ -60,7 +60,7 @@ jobs:
     container:
       image: python:3.13-slim
     steps:
-      - uses: actions/checkout@v4.1.7
+      - uses: actions/checkout@v6.0.2
 
       - name: Install uv
         run: pip install uv
@@ -86,7 +86,7 @@ jobs:
       - name: Install git and curl
         run: apt-get update && apt-get install -y git curl
 
-      - uses: actions/checkout@v4.1.7
+      - uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
 
