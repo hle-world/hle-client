@@ -28,7 +28,7 @@ jobs:
       - name: Install tools
         run: apt-get update && apt-get install -y git curl
 
-      - uses: actions/checkout@v4.1.7
+      - uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
 
