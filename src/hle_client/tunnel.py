@@ -219,7 +219,7 @@ class TunnelConfig:
     webhook_path: str | None = None
     """When set, only forward requests matching this path prefix (webhook mode)."""
     response_timeout: int | None = None
-    """Server-side response timeout in seconds (default: 30s expose, 120s webhook, max 600s)."""
+    """Server-side response timeout in seconds (default: 30s expose, 120s webhook, max 1200s)."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.

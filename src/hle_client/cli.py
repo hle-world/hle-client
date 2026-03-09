@@ -122,7 +122,7 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
 @click.option(
     "--timeout",
     "response_timeout",
-    type=int,
+    type=click.IntRange(1, 1200),
     default=None,
     help="Response timeout in seconds (default: 30, max: 1200). "
     "Increase for services that do heavy processing.",
@@ -354,7 +354,7 @@ def zone_clear() -> None:
 @click.option(
     "--timeout",
     "response_timeout",
-    type=int,
+    type=click.IntRange(1, 1200),
     default=None,
     help="Response timeout in seconds (default: 120, max: 1200). "
     "Increase for webhooks that trigger long-running pipelines.",
