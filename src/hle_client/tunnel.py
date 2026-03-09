@@ -218,6 +218,8 @@ class TunnelConfig:
     """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
     webhook_path: str | None = None
     """When set, only forward requests matching this path prefix (webhook mode)."""
+    response_timeout: int | None = None
+    """Server-side response timeout in seconds (default: 30s expose, 120s webhook, max 600s)."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -417,6 +419,7 @@ class Tunnel:
                 zone=self.config.zone,
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
+                response_timeout=self.config.response_timeout,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,
