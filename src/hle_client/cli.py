@@ -119,6 +119,14 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     help="Custom zone domain for enterprise tunnel routing (e.g. project1.t00t.us). "
     "Falls back to ~/.config/hle/config.toml if not set.",
 )
+@click.option(
+    "--timeout",
+    "response_timeout",
+    type=click.IntRange(1, 1200),
+    default=None,
+    help="Response timeout in seconds (default: 30, max: 1200). "
+    "Increase for services that do heavy processing.",
+)
 def expose(
     service: str,
     auth: str,
@@ -130,6 +138,7 @@ def expose(
     forward_host: bool,
     allow: tuple[str, ...],
     zone: str | None,
+    response_timeout: int | None,
 ) -> None:
     """Expose a local service to the internet."""
     # Resolve zone: --zone flag > HLE_ZONE env > config.toml
@@ -154,6 +163,7 @@ def expose(
         upstream_basic_auth=upstream_auth_tuple,
         forward_host=forward_host,
         zone=resolved_zone,
+        response_timeout=response_timeout,
     )
 
     # Build post-registration callback for --allow rules
@@ -202,6 +212,8 @@ def expose(
     if resolved_zone:
         console.print(f"     Zone    [dim]{resolved_zone}[/dim]")
     console.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
+    if response_timeout:
+        console.print(f"     Timeout [dim]{response_timeout}s[/dim]")
     console.print()
 
     try:
@@ -339,12 +351,21 @@ def zone_clear() -> None:
     help="API key. Falls back to ~/.config/hle/config.toml if not set.",
 )
 @click.option("--zone", default=None, help="Custom zone domain for routing.")
+@click.option(
+    "--timeout",
+    "response_timeout",
+    type=click.IntRange(1, 1200),
+    default=None,
+    help="Response timeout in seconds (default: 120, max: 1200). "
+    "Increase for webhooks that trigger long-running pipelines.",
+)
 def webhook(
     path: str,
     forward_to: str,
     service_label: str | None,
     api_key: str | None,
     zone: str | None,
+    response_timeout: int | None,
 ) -> None:
     """Forward incoming webhooks to a local service.
 
@@ -381,6 +402,7 @@ def webhook(
         verify_ssl=False,
         zone=resolved_zone,
         webhook_path=path,
+        response_timeout=response_timeout,
     )
 
     tunnel = Tunnel(config=config)
@@ -394,6 +416,8 @@ def webhook(
     console.print(f"\n[bold]HLE[/bold] v{__version__}  Webhook forwarder")
     console.print(f"     Path    [cyan]{path}[/cyan]")
     console.print(f"     Forward [cyan]{forward_to}[/cyan]")
+    if response_timeout:
+        console.print(f"     Timeout [dim]{response_timeout}s[/dim]")
     console.print("     Relay   [dim]hle.world[/dim]")
     if resolved_zone:
         console.print(f"     Zone    [dim]{resolved_zone}[/dim]")
