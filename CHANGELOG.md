@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.18.0 — 2026-03-12
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.17.0 — 2026-03-07
 
 Webhook forwarding support — expose webhook endpoints through HLE tunnels without authentication.
