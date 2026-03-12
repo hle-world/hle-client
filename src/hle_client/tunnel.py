@@ -443,10 +443,8 @@ class Tunnel:
             # Fire post-registration callback (once) for --add-auth etc.
             if self.on_registered and not self._post_register_done:
                 self._post_register_done = True
-                parsed_host = urlparse(self._public_url).hostname or ""
-                subdomain = parsed_host.split(".")[0]
-                if subdomain:
-                    await self.on_registered(subdomain)
+                if ack_data.subdomain:
+                    await self.on_registered(ack_data.subdomain)
 
             # --- Receive loop ---
             await self._receive_loop(ws)
