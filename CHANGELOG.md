@@ -2,7 +2,9 @@
 
 ## v1.18.0 — 2026-03-12
 
-<!-- TODO: Fill in release notes before merging -->
+Enterprise custom domain support preparation.
+
+- **Fix subdomain extraction:** Use the `subdomain` field from the server's `TunnelRegistrationResponse` instead of parsing it from the public URL. The old approach assumed `*.hle.world` URL structure and would break for enterprise custom domain tunnels (e.g. `app.acme.com`).
 
 ## v1.17.0 — 2026-03-07
 
