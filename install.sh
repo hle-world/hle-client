@@ -2,10 +2,12 @@
 # HLE Client installer
 # Usage: curl -fsSL https://get.hle.world | sh
 #        curl -fsSL https://get.hle.world | sh -s -- --version 1.18.0
+#        sh install.sh --from-source
 set -e
 
 PACKAGE="hle-client"
 VERSION=""
+FROM_SOURCE=""
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=11
 
@@ -14,11 +16,27 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --version) VERSION="$2"; shift 2 ;;
         --version=*) VERSION="${1#*=}"; shift ;;
+        --from-source) FROM_SOURCE="1"; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-if [ -n "$VERSION" ]; then
+if [ -n "$FROM_SOURCE" ] && [ -n "$VERSION" ]; then
+    echo "--from-source and --version are mutually exclusive" >&2
+    exit 1
+fi
+
+if [ -n "$FROM_SOURCE" ]; then
+    SOURCE_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || {
+        echo "Cannot determine the script directory. Run install.sh directly from the repository root." >&2
+        exit 1
+    }
+    if [ ! -f "$SOURCE_DIR/pyproject.toml" ]; then
+        echo "Cannot find pyproject.toml in $SOURCE_DIR. Run install.sh from the repository root." >&2
+        exit 1
+    fi
+    INSTALL_SPEC="$SOURCE_DIR"
+elif [ -n "$VERSION" ]; then
     INSTALL_SPEC="${PACKAGE}==${VERSION}"
 else
     INSTALL_SPEC="${PACKAGE}"
