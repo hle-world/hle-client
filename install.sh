@@ -2,7 +2,7 @@
 # HLE Client installer
 # Usage: curl -fsSL https://get.hle.world | sh
 #        curl -fsSL https://get.hle.world | sh -s -- --version 1.18.0
-#        sh install.sh --from-source
+#        sh install.sh --from-source /path/to/repo
 set -e
 
 PACKAGE="hle-client"
@@ -14,25 +14,36 @@ MIN_PYTHON_MINOR=11
 # Parse arguments
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version) VERSION="$2"; shift 2 ;;
+        --version)
+            if [ -z "${2:-}" ] || case "$2" in -*) true ;; *) false ;; esac; then
+                echo "Error: --version requires a value (e.g., --version 1.18.0)" >&2
+                exit 1
+            fi
+            VERSION="$2"; shift 2 ;;
         --version=*) VERSION="${1#*=}"; shift ;;
-        --from-source) FROM_SOURCE="1"; shift ;;
+        --from-source)
+            if [ -n "${2:-}" ] && case "$2" in -*) false ;; *) true ;; esac; then
+                FROM_SOURCE="$2"; shift 2
+            else
+                FROM_SOURCE="."; shift
+            fi ;;
+        --from-source=*) FROM_SOURCE="${1#*=}"; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 if [ -n "$FROM_SOURCE" ] && [ -n "$VERSION" ]; then
-    echo "--from-source and --version are mutually exclusive" >&2
+    echo "Error: --from-source and --version are mutually exclusive. Use either --from-source <path> or --version <version>." >&2
     exit 1
 fi
 
 if [ -n "$FROM_SOURCE" ]; then
-    SOURCE_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || {
-        echo "Cannot determine the script directory. Run install.sh directly from the repository root." >&2
+    SOURCE_DIR=$(cd "$FROM_SOURCE" 2>/dev/null && pwd) || {
+        echo "Error: Cannot access directory '$FROM_SOURCE'. Ensure the directory exists and you have read permissions." >&2
         exit 1
     }
     if [ ! -f "$SOURCE_DIR/pyproject.toml" ]; then
-        echo "Cannot find pyproject.toml in $SOURCE_DIR. Run install.sh from the repository root." >&2
+        echo "Cannot find pyproject.toml in $SOURCE_DIR. Provide a path to a cloned hle-client repository." >&2
         exit 1
     fi
     INSTALL_SPEC="$SOURCE_DIR"
