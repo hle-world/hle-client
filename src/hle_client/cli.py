@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from hle_client.api import ApiClient
 
 from hle_client import __version__
+from hle_client.hooks import parse_hooks
 from hle_client.tunnel import (
     Tunnel,
     TunnelConfig,
@@ -119,6 +120,15 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     help="Custom zone domain for enterprise tunnel routing (e.g. project1.t00t.us). "
     "Falls back to ~/.config/hle/config.toml if not set.",
 )
+@click.option(
+    "--hook",
+    "hooks",
+    multiple=True,
+    metavar="NAME=SCRIPT",
+    help="Execute SCRIPT when lifecycle event NAME fires. "
+    "Format: hook_name=/path/to/script. "
+    "Available hooks: tunnel_established, tunnel_dismantled. Repeatable.",
+)
 def expose(
     service: str,
     auth: str,
@@ -130,6 +140,7 @@ def expose(
     forward_host: bool,
     allow: tuple[str, ...],
     zone: str | None,
+    hooks: tuple[str, ...],
 ) -> None:
     """Expose a local service to the internet."""
     # Resolve zone: --zone flag > HLE_ZONE env > config.toml
@@ -144,6 +155,9 @@ def expose(
         u, _, p = upstream_basic_auth.partition(":")
         upstream_auth_tuple = (u, p)
 
+    # Parse hooks
+    parsed_hooks = parse_hooks(hooks)
+
     config = TunnelConfig(
         service_url=service,
         auth_mode=auth,
@@ -154,6 +168,7 @@ def expose(
         upstream_basic_auth=upstream_auth_tuple,
         forward_host=forward_host,
         zone=resolved_zone,
+        hooks=parsed_hooks,
     )
 
     # Build post-registration callback for --allow rules
@@ -339,12 +354,22 @@ def zone_clear() -> None:
     help="API key. Falls back to ~/.config/hle/config.toml if not set.",
 )
 @click.option("--zone", default=None, help="Custom zone domain for routing.")
+@click.option(
+    "--hook",
+    "hooks",
+    multiple=True,
+    metavar="NAME=SCRIPT",
+    help="Execute SCRIPT when lifecycle event NAME fires. "
+    "Format: hook_name=/path/to/script. "
+    "Available hooks: tunnel_established, tunnel_dismantled. Repeatable.",
+)
 def webhook(
     path: str,
     forward_to: str,
     service_label: str | None,
     api_key: str | None,
     zone: str | None,
+    hooks: tuple[str, ...],
 ) -> None:
     """Forward incoming webhooks to a local service.
 
@@ -371,6 +396,7 @@ def webhook(
         raise SystemExit(1)
 
     resolved_zone = zone or _load_zone()
+    parsed_hooks = parse_hooks(hooks)
 
     config = TunnelConfig(
         service_url=forward_to,
@@ -381,6 +407,7 @@ def webhook(
         verify_ssl=False,
         zone=resolved_zone,
         webhook_path=path,
+        hooks=parsed_hooks,
     )
 
     tunnel = Tunnel(config=config)

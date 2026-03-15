@@ -1,0 +1,25 @@
+# Sample systemd service for HLE client.
+#
+# 1. Copy to /etc/systemd/system/hle.service
+# 2. Adjust ExecStart, Environment, and User to match your setup.
+# 3. sudo systemctl daemon-reload
+# 4. sudo systemctl enable --now hle
+#
+# Hooks can be added to ExecStart, e.g.:
+#   --hook "tunnel_established=/usr/local/bin/on-tunnel-up.sh"
+
+[Unit]
+Description=HLE Client — expose a local service to the internet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hle
+Environment=HLE_API_KEY=hle_your_key_here
+ExecStart=/usr/local/bin/hle expose --service http://127.0.0.1:80 --auth sso
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

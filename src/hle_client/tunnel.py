@@ -22,6 +22,7 @@ import websockets.asyncio.client
 import websockets.exceptions
 
 from hle_client import __version__
+from hle_client.hooks import HookRunner
 from hle_client.proxy import LocalProxy, ProxyConfig
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
@@ -218,6 +219,8 @@ class TunnelConfig:
     """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
     webhook_path: str | None = None
     """When set, only forward requests matching this path prefix (webhook mode)."""
+    hooks: dict[str, str] = field(default_factory=dict)
+    """Hook name → script path mapping, fired at tunnel lifecycle events."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -260,6 +263,7 @@ class Tunnel:
     _post_register_done: bool = field(default=False, init=False, repr=False)
     _tunnel_id: str | None = field(default=None, init=False, repr=False)
     _public_url: str | None = field(default=None, init=False, repr=False)
+    _subdomain: str | None = field(default=None, init=False, repr=False)
     _proxy: LocalProxy = field(init=False, repr=False)
     _ws: _ClientConn | None = field(default=None, init=False, repr=False)
     _ws_streams: dict[str, _ClientConn] = field(default_factory=dict, init=False, repr=False)
@@ -280,6 +284,7 @@ class Tunnel:
             )
         )
         self._server_caps: list[str] = []
+        self._hook_runner = HookRunner(hooks=self.config.hooks)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -433,6 +438,7 @@ class Tunnel:
             ack_data = TunnelRegistrationResponse.model_validate(ack_msg.payload)
             self._tunnel_id = ack_data.tunnel_id
             self._public_url = ack_data.public_url
+            self._subdomain = ack_data.subdomain
             self._server_caps = getattr(ack_data, "server_capabilities", []) or []
             logger.info(
                 "Tunnel registered: id=%s  url=%s",
@@ -445,6 +451,14 @@ class Tunnel:
                 self._post_register_done = True
                 if ack_data.subdomain:
                     await self.on_registered(ack_data.subdomain)
+
+            # Fire tunnel_established hook
+            await self._hook_runner.fire(
+                "tunnel_established",
+                subdomain=ack_data.subdomain or "",
+                public_url=self._public_url or "",
+                tunnel_id=self._tunnel_id or "",
+            )
 
             # --- Receive loop ---
             await self._receive_loop(ws)
@@ -950,6 +964,15 @@ class Tunnel:
 
     async def _cleanup(self) -> None:
         """Close all local WS streams, cancel background tasks, and stop the proxy."""
+        # Fire tunnel_dismantled hook before tearing down state.
+        if self._tunnel_id:
+            await self._hook_runner.fire(
+                "tunnel_dismantled",
+                subdomain=self._subdomain or "",
+                public_url=self._public_url or "",
+                tunnel_id=self._tunnel_id,
+            )
+
         async with self._ws_streams_lock:
             for _stream_id, local_ws in list(self._ws_streams.items()):
                 with contextlib.suppress(Exception):
