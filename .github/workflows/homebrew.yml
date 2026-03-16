@@ -125,7 +125,7 @@ jobs:
           class HleClient < Formula
             include Language::Python::Virtualenv
 
-            desc "Home Lab Everywhere — Expose homelab services with built-in SSO"
+            desc "HomeLab Everywhere — Expose homelab services with built-in SSO"
             homepage "https://hle.world"
             url "{hle_sdist['url']}"
             sha256 "{hle_sdist['digests']['sha256']}"
