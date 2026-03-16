@@ -1,4 +1,4 @@
-"""HLE CLI — Main entry point for the Home Lab Everywhere client."""
+"""HLE CLI — Main entry point for the HomeLab Everywhere client."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def _resolve_api_key(api_key: str | None) -> str:
 @click.version_option(version=__version__, prog_name="hle")
 @click.option("--debug", is_flag=True, default=False, help="Enable debug logging")
 def main(debug: bool) -> None:
-    """Home Lab Everywhere — Expose homelab services to the internet with built-in SSO."""
+    """HomeLab Everywhere — Expose homelab services to the internet with built-in SSO."""
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
         level=level,

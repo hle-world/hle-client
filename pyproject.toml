@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hle-client"
-version = "1.18.0"
-description = "Home Lab Everywhere — Expose homelab services to the internet with built-in SSO"
+version = "1.19.0"
+description = "HomeLab Everywhere — Expose homelab services to the internet with built-in SSO"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
-    { name = "Home Lab Everywhere" },
+    { name = "HomeLab Everywhere" },
 ]
 keywords = ["homelab", "tunnel", "sso", "reverse-proxy", "webhook"]
 classifiers = [
