@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.19.0 — 2026-03-16
+
+Branding: rename "Home Lab Everywhere" to "HomeLab Everywhere" across all user-facing text.
+
+- **Branding consistency:** Standardise on "HomeLab Everywhere" (one word) in all CLI output, package metadata, README, and email templates
+
 ## v1.18.0 — 2026-03-12
 
 Enterprise custom domain support preparation.

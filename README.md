@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![CI](https://github.com/hle-world/hle-client/actions/workflows/test.yml/badge.svg?v=2)](https://github.com/hle-world/hle-client/actions/workflows/test.yml)
 
-**Home Lab Everywhere** — Expose homelab services to the internet with built-in SSO authentication and WebSocket support.
+**HomeLab Everywhere** — Expose homelab services to the internet with built-in SSO authentication and WebSocket support.
 
 One command: `hle expose --service http://localhost:8080`
 
@@ -30,7 +30,7 @@ curl -fsSL https://get.hle.world | sh
 Installs via pipx (preferred), uv, or pip-in-venv. Supports `--version`:
 
 ```bash
-curl -fsSL https://get.hle.world | sh -s -- --version 1.18.0
+curl -fsSL https://get.hle.world | sh -s -- --version 1.19.0
 ```
 
 ### Homebrew
