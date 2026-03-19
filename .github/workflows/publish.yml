@@ -120,3 +120,15 @@ jobs:
             -H "Authorization: Bearer ${HLE_DOCKER_TOKEN}" \
             https://api.github.com/repos/hle-world/hle-docker/dispatches \
             -d @-
+
+      - name: Dispatch to hle-webapp
+        env:
+          HLE_PAT: ${{ secrets.HLE_DOCKER_DISPATCH_TOKEN }}
+        run: |
+          jq -n --arg version "$RELEASE_TAG" \
+            '{"event_type":"hle-client-release","client_payload":{"version":$version}}' | \
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${HLE_PAT}" \
+            https://api.github.com/repos/hle-world/hle-webapp/dispatches \
+            -d @-
