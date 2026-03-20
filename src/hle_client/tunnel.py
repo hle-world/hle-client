@@ -22,6 +22,7 @@ import websockets.asyncio.client
 import websockets.exceptions
 
 from hle_client import __version__
+from hle_client.hooks import HookRunner
 from hle_client.proxy import LocalProxy, ProxyConfig
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
@@ -218,6 +219,8 @@ class TunnelConfig:
     """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
     webhook_path: str | None = None
     """When set, only forward requests matching this path prefix (webhook mode)."""
+    hooks: dict[str, str] = field(default_factory=dict)
+    """Hook name → script path mapping, fired at tunnel lifecycle events."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -257,9 +260,11 @@ class Tunnel:
     config: TunnelConfig
     on_registered: Callable[[str], Awaitable[None]] | None = field(default=None, repr=False)
     _running: bool = field(default=False, init=False, repr=False)
+    _connect_running: bool = field(default=False, init=False, repr=False)
     _post_register_done: bool = field(default=False, init=False, repr=False)
     _tunnel_id: str | None = field(default=None, init=False, repr=False)
     _public_url: str | None = field(default=None, init=False, repr=False)
+    _subdomain: str | None = field(default=None, init=False, repr=False)
     _proxy: LocalProxy = field(init=False, repr=False)
     _ws: _ClientConn | None = field(default=None, init=False, repr=False)
     _ws_streams: dict[str, _ClientConn] = field(default_factory=dict, init=False, repr=False)
@@ -280,6 +285,7 @@ class Tunnel:
             )
         )
         self._server_caps: list[str] = []
+        self._hook_runner = HookRunner(hooks=self.config.hooks)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -288,50 +294,77 @@ class Tunnel:
     async def connect(self) -> None:
         """Establish tunnel connection to the relay server with reconnection."""
         self._running = True
+        self._connect_running = True
         delay = self.config.reconnect_delay
+        _final = False
 
-        while self._running:
-            try:
-                await self._proxy.start()
-                await self._connect_once()
-            except (
-                OSError,
-                websockets.exceptions.WebSocketException,
-                ConnectionError,
-            ) as exc:
-                if isinstance(exc, websockets.exceptions.ConnectionClosed) and exc.rcvd is not None:
-                    code = exc.rcvd.code
-                    if code == 4003:
-                        raise TunnelFatalError(
-                            "Tunnel limit reached. Your plan does not allow more "
-                            "active tunnels.\n"
-                            "Stop another tunnel or upgrade at https://hle.world/dashboard"
-                        ) from exc
-                    if code == 4001:
-                        raise TunnelFatalError(
-                            "Authentication failed. Your API key is invalid or revoked.\n"
-                            "Run 'hle auth login' to save a new key."
-                        ) from exc
-                logger.warning("Connection lost: %s", exc)
-            except asyncio.CancelledError:
-                logger.info("Tunnel cancelled")
-                break
-            finally:
-                await self._cleanup()
+        try:
+            while self._running:
+                try:
+                    await self._proxy.start()
+                    await self._connect_once()
+                except (
+                    OSError,
+                    websockets.exceptions.WebSocketException,
+                    ConnectionError,
+                ) as exc:
+                    if isinstance(exc, websockets.exceptions.ConnectionClosed) and exc.rcvd is not None:
+                        code = exc.rcvd.code
+                        if code == 4003:
+                            # Mark as final exit so cleanup/hooks run before raising
+                            _final = True
+                            self._running = False
+                            raise TunnelFatalError(
+                                "Tunnel limit reached. Your plan does not allow more "
+                                "active tunnels.\n"
+                                "Stop another tunnel or upgrade at https://hle.world/dashboard"
+                            ) from exc
+                        if code == 4001:
+                            # Mark as final exit so cleanup/hooks run before raising
+                            _final = True
+                            self._running = False
+                            raise TunnelFatalError(
+                                "Authentication failed. Your API key is invalid or revoked.\n"
+                                "Run 'hle auth login' to save a new key."
+                            ) from exc
+                    logger.warning("Connection lost: %s", exc)
+                except TunnelFatalError as exc:
+                    # Treat TunnelFatalError as a permanent exit so final cleanup and
+                    # tunnel_dismantled hooks run exactly once for established tunnels.
+                    _final = True
+                    self._running = False
+                    logger.error("%s", exc)
+                    raise
+                except asyncio.CancelledError:
+                    _final = True
+                    logger.info("Tunnel cancelled")
+                    break
+                finally:
+                    # Pass final=True when this is a permanent exit:
+                    #   - _final is True  → CancelledError or TunnelFatalError path
+                    #   - _running is False → disconnect() cleared it before closing the socket
+                    await self._cleanup(final=_final or not self._running)
 
-            if not self._running:
-                break
+                if not self._running:
+                    break
 
-            logger.info("Reconnecting in %.1fs ...", delay)
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, self.config.max_reconnect_delay)
+                logger.info("Reconnecting in %.1fs ...", delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self.config.max_reconnect_delay)
+        finally:
+            self._connect_running = False
 
     async def disconnect(self) -> None:
         """Gracefully disconnect the tunnel."""
         self._running = False
         if self._ws:
             await self._ws.close()
-        await self._cleanup()
+        # If connect() is not running (never started, or already exited), we are
+        # the terminal shutdown path and must drive cleanup ourselves so that
+        # background tasks, proxy, WS streams, and the tunnel_dismantled hook
+        # are all properly torn down.
+        if not self._connect_running:
+            await self._cleanup(final=True)
         logger.info("Tunnel disconnected")
 
     @property
@@ -433,6 +466,7 @@ class Tunnel:
             ack_data = TunnelRegistrationResponse.model_validate(ack_msg.payload)
             self._tunnel_id = ack_data.tunnel_id
             self._public_url = ack_data.public_url
+            self._subdomain = ack_data.subdomain
             self._server_caps = getattr(ack_data, "server_capabilities", []) or []
             logger.info(
                 "Tunnel registered: id=%s  url=%s",
@@ -445,6 +479,14 @@ class Tunnel:
                 self._post_register_done = True
                 if ack_data.subdomain:
                     await self.on_registered(ack_data.subdomain)
+
+            # Fire tunnel_established hook
+            await self._hook_runner.fire(
+                "tunnel_established",
+                subdomain=ack_data.subdomain or "",
+                public_url=self._public_url or "",
+                tunnel_id=self._tunnel_id or "",
+            )
 
             # --- Receive loop ---
             await self._receive_loop(ws)
@@ -948,8 +990,21 @@ class Tunnel:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _cleanup(self) -> None:
+    async def _cleanup(self, final: bool = False) -> None:
         """Close all local WS streams, cancel background tasks, and stop the proxy."""
+        # Fire tunnel_dismantled hook before tearing down state.
+        if final and self._tunnel_id:
+            await self._hook_runner.fire(
+                "tunnel_dismantled",
+                subdomain=self._subdomain or "",
+                public_url=self._public_url or "",
+                tunnel_id=self._tunnel_id,
+            )
+            # Clear identity/state to guarantee the hook runs at most once per tunnel lifecycle.
+            self._tunnel_id = None
+            self._public_url = None
+            self._subdomain = None
+
         async with self._ws_streams_lock:
             for _stream_id, local_ws in list(self._ws_streams.items()):
                 with contextlib.suppress(Exception):

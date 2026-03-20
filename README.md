@@ -82,6 +82,7 @@ Options:
 - `--upstream-basic-auth USER:PASS` — Inject Basic Auth into requests forwarded to the local service
 - `--forward-host` — Forward the browser's Host header to the local service
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
+- `--hook NAME=SCRIPT` — Execute SCRIPT when lifecycle event NAME fires (repeatable, one per hook name)
 
 ### `hle auth`
 
@@ -165,6 +166,46 @@ API key resolution order:
 1. `--api-key` CLI flag
 2. `HLE_API_KEY` environment variable
 3. `~/.config/hle/config.toml`
+
+## Hooks
+
+Hooks let you run external scripts at key tunnel lifecycle events. Pass one or
+more `--hook NAME=SCRIPT` flags to `hle expose` or `hle webhook`:
+
+```bash
+hle expose --service http://127.0.0.1:80 --auth none \
+  --hook "tunnel_established=/usr/local/bin/on-tunnel-up.sh" \
+  --hook "tunnel_dismantled=/usr/local/bin/on-tunnel-down.sh"
+```
+
+Each hook name may only be specified once. The script is invoked with
+positional arguments specific to the event:
+
+| Hook name            | Arguments                            | Fired when                        |
+| -------------------- | ------------------------------------ | --------------------------------- |
+| `tunnel_established` | `subdomain` `public_url` `tunnel_id` | Tunnel is registered and ready    |
+| `tunnel_dismantled`  | `subdomain` `public_url` `tunnel_id` | Tunnel is being torn down         |
+
+**Example hook script** (`/usr/local/bin/on-tunnel-up.sh`):
+
+```bash
+#!/bin/sh
+SUBDOMAIN="$1"
+PUBLIC_URL="$2"
+TUNNEL_ID="$3"
+echo "Tunnel $SUBDOMAIN is live at $PUBLIC_URL (id=$TUNNEL_ID)"
+```
+
+## Running as a systemd Service
+
+A sample unit file is provided in [`contrib/hle.service`](contrib/hle.service).
+Copy it into place and adjust `ExecStart` for your setup:
+
+```bash
+sudo cp contrib/hle.service /etc/systemd/system/hle.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hle
+```
 
 ## Development
 

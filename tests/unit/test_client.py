@@ -447,6 +447,46 @@ class TestTunnelRegistrationHandshake:
                 await tunnel._connect_once()
             await tunnel._proxy.stop()
 
+    async def test_successful_ack_fires_tunnel_established_hook(self):
+        tunnel = _tunnel(api_key="hle_testkey_for_hook")
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+        ack = ProtocolMessage(
+            type=MessageType.TUNNEL_ACK,
+            payload={
+                "tunnel_id": "t-hook-1",
+                "subdomain": "app-hook",
+                "public_url": "https://app-hook.hle.world",
+                "websocket_enabled": True,
+                "user_code": "abc",
+                "service_label": "myapp",
+            },
+        )
+        mock_ws.recv = AsyncMock(return_value=ack.model_dump_json())
+        mock_ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("hle_client.tunnel.websockets.connect", return_value=mock_ctx),
+            patch("hle_client.tunnel.HookRunner.fire", new_callable=AsyncMock) as mock_fire,
+        ):
+            await tunnel._proxy.start()
+            await tunnel._connect_once()
+            await tunnel._proxy.stop()
+
+        assert mock_fire.await_count == 1
+        called_args, called_kwargs = mock_fire.await_args
+        assert "tunnel_established" in called_args
+        assert called_kwargs == {
+            "subdomain": "app-hook",
+            "public_url": "https://app-hook.hle.world",
+            "tunnel_id": "t-hook-1",
+        }
+
 
 class TestTunnelHandleHttpRequest:
     """Test _handle_http_request: forwards to proxy, sends response back."""
@@ -902,6 +942,81 @@ class TestTunnelProperties:
         tunnel = _tunnel()
         tunnel._public_url = "https://myapp.relay.hle.world"
         assert tunnel.public_url == "https://myapp.relay.hle.world"
+
+
+class TestTunnelDisconnect:
+    """Test disconnect() — graceful shutdown and cleanup ownership."""
+
+    async def test_disconnect_sets_running_false(self):
+        tunnel = _tunnel()
+        tunnel._running = True
+        await tunnel.disconnect()
+        assert tunnel._running is False
+
+    async def test_disconnect_closes_ws_when_present(self):
+        tunnel = _tunnel()
+        mock_ws = AsyncMock()
+        tunnel._ws = mock_ws
+        await tunnel.disconnect()
+        mock_ws.close.assert_awaited_once()
+
+    async def test_disconnect_skips_ws_close_when_none(self):
+        tunnel = _tunnel()
+        tunnel._ws = None
+        # Should not raise.
+        await tunnel.disconnect()
+
+    async def test_disconnect_calls_cleanup_when_connect_not_running(self):
+        """When connect() is not active, disconnect() must drive cleanup itself."""
+        tunnel = _tunnel()
+        tunnel._connect_running = False
+        cleanup_called_with: list = []
+
+        async def _fake_cleanup(final: bool = False) -> None:
+            cleanup_called_with.append(final)
+
+        tunnel._cleanup = _fake_cleanup  # type: ignore[method-assign]
+        await tunnel.disconnect()
+
+        assert cleanup_called_with == [True]
+
+    async def test_disconnect_skips_cleanup_when_connect_is_running(self):
+        """When connect() is active it owns cleanup; disconnect() must not double-clean."""
+        tunnel = _tunnel()
+        tunnel._connect_running = True
+        cleanup_called_with: list = []
+
+        async def _fake_cleanup(final: bool = False) -> None:
+            cleanup_called_with.append(final)
+
+        tunnel._cleanup = _fake_cleanup  # type: ignore[method-assign]
+        await tunnel.disconnect()
+
+        assert cleanup_called_with == []
+
+    async def test_disconnect_without_connect_fires_dismantled_hook(self):
+        """tunnel_dismantled hook must fire when disconnect() owns the cleanup path."""
+        tunnel = _tunnel()
+        tunnel._connect_running = False
+        tunnel._tunnel_id = "t-hook"
+        tunnel._subdomain = "app-abc"
+        tunnel._public_url = "https://app-abc.hle.world"
+
+        fired: list[dict] = []
+
+        async def _fake_fire(event: str, **kwargs) -> None:
+            fired.append({"event": event, **kwargs})
+
+        tunnel._hook_runner.fire = _fake_fire  # type: ignore[method-assign]
+        await tunnel.disconnect()
+
+        assert len(fired) == 1
+        assert fired[0]["event"] == "tunnel_dismantled"
+        assert fired[0]["tunnel_id"] == "t-hook"
+
+    async def test_connect_running_starts_false(self):
+        tunnel = _tunnel()
+        assert tunnel._connect_running is False
 
 
 class TestTunnelReceiveLoopDispatch:
