@@ -1,5 +1,9 @@
 # Changelog
 
+## v2604.1 — 2026-04-09
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v1.19.0 — 2026-03-16
 
 Branding: rename "Home Lab Everywhere" to "HomeLab Everywhere" across all user-facing text.
