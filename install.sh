@@ -1,7 +1,7 @@
 #!/bin/sh
 # HLE Client installer
 # Usage: curl -fsSL https://get.hle.world | sh
-#        curl -fsSL https://get.hle.world | sh -s -- --version 1.18.0
+#        curl -fsSL https://get.hle.world | sh -s -- --version 2604.1
 set -e
 
 PACKAGE="hle-client"
@@ -143,7 +143,7 @@ main() {
         error "Install Python from https://python.org or via your package manager."
         exit 1
     }
-    info "Found Python: $PYTHON ($($PYTHON --version 2>&1))"
+    info "Found Python: $PYTHON ($($PYTHON --version 2604.1>&1))"
 
     # Try install methods in order of preference
     if command -v pipx >/dev/null 2>&1; then
