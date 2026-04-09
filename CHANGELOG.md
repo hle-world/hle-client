@@ -2,7 +2,10 @@
 
 ## v2604.1 — 2026-04-09
 
-<!-- TODO: Fill in release notes before merging -->
+First CalVer release. Switches from SemVer to Calendar Versioning (YYMM.RELEASE).
+
+- **Fix multi-value response headers**: Preserve multiple `Set-Cookie` headers through the tunnel proxy. Previously only the last cookie survived, breaking session persistence for services like Home Assistant.
+- **CalVer migration**: Release tooling now validates YYMM.RELEASE format instead of SemVer.
 
 ## v1.19.0 — 2026-03-16
 
