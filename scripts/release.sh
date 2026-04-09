@@ -2,9 +2,9 @@
 # Release script for hle-client
 #
 # Usage:
-#   ./scripts/release.sh 1.3.0
-#   ./scripts/release.sh 1.3.0 --dry-run
-#   ./scripts/release.sh 1.3.0 --tag   (manual fallback if auto-release didn't trigger)
+#   ./scripts/release.sh 2604.1
+#   ./scripts/release.sh 2604.1 --dry-run
+#   ./scripts/release.sh 2604.1 --tag   (manual fallback if auto-release didn't trigger)
 #
 # What it does:
 #   1. Validates the version format
@@ -36,25 +36,18 @@ done
 if [[ -z "$VERSION" ]]; then
   echo "Usage: $0 <version> [--dry-run] [--tag]"
   echo ""
+  echo "CalVer format: YYMM.RELEASE (e.g. 2604.1 = 1st release in April 2026)"
+  echo ""
   echo "Examples:"
-  echo "  $0 1.3.0           # Bump version, commit, push, open PR"
-  echo "  $0 1.3.0 --dry-run # Show what would change without modifying files"
-  echo "  $0 1.3.0 --tag     # Manual fallback: create GitHub release"
+  echo "  $0 2604.1           # Bump version, commit, push, open PR"
+  echo "  $0 2604.1 --dry-run # Show what would change without modifying files"
+  echo "  $0 2604.1 --tag     # Manual fallback: create GitHub release"
   exit 1
 fi
 
-# Validate semver format
-if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Error: Version must be semver (e.g. 1.3.0), got: $VERSION"
-  exit 1
-fi
-
-# hle-client must always use patch version 0 — patch numbers are reserved
-# for peripheral repos (ha-addon, hle-docker) to use for their own fixes.
-PATCH="${VERSION##*.}"
-if [[ "$PATCH" != "0" ]]; then
-  echo "Error: hle-client versions must end in .0 (e.g. 1.14.0), got: $VERSION"
-  echo "Patch versions are reserved for ha-addon and hle-docker."
+# Validate CalVer format: YYMM.RELEASE (e.g. 2604.1, 2612.10)
+if ! [[ "$VERSION" =~ ^[0-9]{4}\.[0-9]+$ ]]; then
+  echo "Error: Version must be CalVer YYMM.RELEASE (e.g. 2604.1), got: $VERSION"
   exit 1
 fi
 
@@ -117,21 +110,21 @@ else
   FILES_CHANGED+=(src/hle_client/__init__.py)
 fi
 
-# 3. README.md — --version X.Y.Z in curl example
+# 3. README.md — --version X.Y in curl example
 echo "Updating README.md..."
 if $DRY_RUN; then
   grep -n "\-\-version" README.md || true
 else
-  sed -i '' "s/--version [0-9]*\.[0-9]*\.[0-9]*/--version $VERSION/g" README.md
+  sed -i '' "s/--version [0-9][0-9.]*/--version $VERSION/g" README.md
   FILES_CHANGED+=(README.md)
 fi
 
-# 4. install.sh — --version X.Y.Z in comment
+# 4. install.sh — --version X.Y in comment
 echo "Updating install.sh..."
 if $DRY_RUN; then
   grep -n "\-\-version" install.sh || true
 else
-  sed -i '' "s/--version [0-9]*\.[0-9]*\.[0-9]*/--version $VERSION/g" install.sh
+  sed -i '' "s/--version [0-9][0-9.]*/--version $VERSION/g" install.sh
   FILES_CHANGED+=(install.sh)
 fi
 
