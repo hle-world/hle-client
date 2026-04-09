@@ -123,7 +123,7 @@ class ProxiedHttpResponse(BaseModel):
 
     request_id: str
     status_code: int
-    headers: dict[str, str]
+    headers: dict[str, str | list[str]]
     body: str | None = None  # base64 encoded
 
 
@@ -132,7 +132,7 @@ class HttpResponseStart(BaseModel):
 
     request_id: str
     status_code: int
-    headers: dict[str, str]
+    headers: dict[str, str | list[str]]
 
 
 class HttpResponseChunk(BaseModel):
