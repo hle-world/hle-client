@@ -34,20 +34,12 @@ jobs:
 
       - name: Extract and validate version
         run: |
-          # Extract version from branch name (chore/release-X.Y.Z)
+          # Extract version from branch name (chore/release-YYMM.RELEASE)
           VERSION="${PR_BRANCH#chore/release-}"
 
-          # Strict semver validation — reject anything that isn't digits and dots
-          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Error: Invalid version format: $VERSION"
-            exit 1
-          fi
-
-          # hle-client must always use patch version 0
-          PATCH="${VERSION##*.}"
-          if [ "$PATCH" != "0" ]; then
-            echo "Error: hle-client versions must end in .0 (got $VERSION)"
-            echo "Patch versions are reserved for ha-addon and hle-docker."
+          # CalVer validation: YYMM.RELEASE (e.g. 2604.1, 2612.10)
+          if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]+$'; then
+            echo "Error: Invalid CalVer format: $VERSION (expected YYMM.RELEASE, e.g. 2604.1)"
             exit 1
           fi
 
