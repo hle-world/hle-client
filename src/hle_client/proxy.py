@@ -18,6 +18,35 @@ logger = logging.getLogger(__name__)
 # Headers to strip when forwarding HTTP requests to the local service.
 _HOP_BY_HOP_HEADERS = frozenset({"transfer-encoding", "connection", "upgrade", "accept-encoding"})
 
+# Headers to strip from responses before sending back through the tunnel.
+_STRIP_RESPONSE_HEADERS = frozenset(
+    {"content-encoding", "content-length", "transfer-encoding", "connection"}
+)
+
+
+def _collect_response_headers(
+    raw_headers: list[tuple[bytes, bytes]],
+) -> dict[str, str | list[str]]:
+    """Build a header dict that preserves multi-value headers (e.g. Set-Cookie).
+
+    Single-value headers are stored as plain strings.  Headers that appear
+    more than once are stored as a list of strings.
+    """
+    result: dict[str, str | list[str]] = {}
+    for raw_name, raw_value in raw_headers:
+        name = raw_name.decode("latin-1").lower()
+        if name in _STRIP_RESPONSE_HEADERS:
+            continue
+        value = raw_value.decode("latin-1")
+        existing = result.get(name)
+        if existing is None:
+            result[name] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            result[name] = [existing, value]
+    return result
+
 
 @dataclass
 class ProxyConfig:
@@ -107,7 +136,7 @@ class LocalProxy:
         headers: dict[str, str],
         body: bytes | None = None,
         query_string: str = "",
-    ) -> tuple[int, dict[str, str], bytes]:
+    ) -> tuple[int, dict[str, str | list[str]], bytes]:
         """Forward an HTTP request to the local service.
 
         Parameters
@@ -200,12 +229,7 @@ class LocalProxy:
                 self._detected_forward_host = False
                 logger.debug("Host header stripping confirmed working")
 
-            resp_headers = {
-                k: v
-                for k, v in response.headers.items()
-                if k.lower()
-                not in {"content-encoding", "content-length", "transfer-encoding", "connection"}
-            }
+            resp_headers = _collect_response_headers(response.headers.raw)
             return response.status_code, resp_headers, response.content
         except httpx.ConnectError as exc:
             exc_str = str(exc).lower()
@@ -246,7 +270,7 @@ class LocalProxy:
         headers: dict[str, str],
         body: bytes | None = None,
         query_string: str = "",
-    ) -> AsyncIterator[tuple[int | None, dict[str, str] | None, bytes | None]]:
+    ) -> AsyncIterator[tuple[int | None, dict[str, str | list[str]] | None, bytes | None]]:
         """Stream an HTTP response from the local service in chunks.
 
         Yields
@@ -280,17 +304,7 @@ class LocalProxy:
                 headers=forwarded_headers,
                 content=body,
             ) as response:
-                resp_headers = {
-                    k: v
-                    for k, v in response.headers.items()
-                    if k.lower()
-                    not in {
-                        "content-encoding",
-                        "content-length",
-                        "transfer-encoding",
-                        "connection",
-                    }
-                }
+                resp_headers = _collect_response_headers(response.headers.raw)
                 yield (response.status_code, resp_headers, None)
 
                 async for chunk in response.aiter_bytes(chunk_size):
