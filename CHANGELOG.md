@@ -1,5 +1,9 @@
 # Changelog
 
+## v2604.2 — 2026-04-16
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2604.1 — 2026-04-09
 
 First CalVer release. Switches from SemVer to Calendar Versioning (YYMM.RELEASE).

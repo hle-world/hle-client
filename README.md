@@ -30,7 +30,7 @@ curl -fsSL https://get.hle.world | sh
 Installs via pipx (preferred), uv, or pip-in-venv. Supports `--version`:
 
 ```bash
-curl -fsSL https://get.hle.world | sh -s -- --version 2604.1
+curl -fsSL https://get.hle.world | sh -s -- --version 2604.2
 ```
 
 ### Homebrew
