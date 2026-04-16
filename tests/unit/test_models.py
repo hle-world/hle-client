@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from hle_common.models import (
     ProxiedHttpRequest,
@@ -23,9 +24,10 @@ class TestTunnelRegistration:
         reg = TunnelRegistration(
             service_url="http://localhost:5000",
             api_key="hle_abc123",
+            service_label="test",
         )
         assert reg.service_url == "http://localhost:5000"
-        assert reg.service_label is None
+        assert reg.service_label == "test"
         assert reg.api_key == "hle_abc123"
         assert reg.client_version is None
         assert reg.protocol_version is None
@@ -37,6 +39,7 @@ class TestTunnelRegistration:
         reg = TunnelRegistration(
             service_url="http://localhost:5000",
             api_key="hle_abc123",
+            service_label="test",
             managed_by="hle-operator",
         )
         assert reg.managed_by == "hle-operator"
@@ -45,6 +48,7 @@ class TestTunnelRegistration:
         reg = TunnelRegistration(
             service_url="http://localhost:5000",
             api_key="hle_abc123",
+            service_label="test",
             protocol_version="1.0",
         )
         assert reg.protocol_version == "1.0"
@@ -100,13 +104,13 @@ class TestTunnelRegistration:
         )
         assert reg.service_label == "my-app"
 
-        # All-invalid chars → None (server auto-generates)
-        reg = TunnelRegistration(
-            service_url="http://localhost:5000",
-            api_key="hle_key",
-            service_label="!!!",
-        )
-        assert reg.service_label is None
+        # All-invalid chars → raises ValueError (label is required)
+        with pytest.raises(ValidationError):
+            TunnelRegistration(
+                service_url="http://localhost:5000",
+                api_key="hle_key",
+                service_label="!!!",
+            )
 
 
 class TestTunnelRegistrationResponse:
