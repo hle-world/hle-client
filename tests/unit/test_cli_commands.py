@@ -508,6 +508,8 @@ class TestExposeNoAutoSave:
                     "expose",
                     "--service",
                     "http://localhost:8080",
+                    "--label",
+                    "test",
                     "--api-key",
                     "hle_" + "f" * 32,
                 ],
