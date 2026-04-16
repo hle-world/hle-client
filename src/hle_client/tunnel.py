@@ -202,7 +202,7 @@ class TunnelConfig:
     relay_host: str = "hle.world"
     relay_port: int = 443
     auth_mode: str = "sso"
-    service_label: str | None = None
+    service_label: str = ""  # required — set by CLI
     api_key: str | None = None
     websocket_enabled: bool = True
     verify_ssl: bool = False
