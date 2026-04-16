@@ -318,7 +318,7 @@ class TestTunnelConfig:
         assert cfg.relay_host == "hle.world"
         assert cfg.relay_port == 443
         assert cfg.auth_mode == "sso"
-        assert cfg.service_label is None
+        assert cfg.service_label == ""
         assert cfg.api_key is None
         assert cfg.websocket_enabled is True
         assert cfg.reconnect_delay == 1.0
@@ -426,7 +426,7 @@ class TestTunnelRegistrationHandshake:
         assert tunnel._public_url == "https://myapp-abc.hle.world"
 
     async def test_wrong_ack_type_raises(self):
-        tunnel = _tunnel(api_key="hle_testkey_for_bad_ack")
+        tunnel = _tunnel(api_key="hle_testkey_for_bad_ack", service_label="test")
 
         mock_ws = AsyncMock()
         mock_ws.send = AsyncMock()
