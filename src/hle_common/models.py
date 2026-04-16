@@ -25,7 +25,7 @@ class TunnelRegistration(BaseModel):
     """Payload the client sends when requesting a new tunnel."""
 
     service_url: str
-    service_label: str | None = None  # user-chosen name, e.g. "ha", "jellyfin"
+    service_label: str  # required — user-chosen name, e.g. "ha", "jellyfin"
     api_key: str  # required — hle_<32 hex chars>
     client_version: str | None = None
     protocol_version: str | None = None  # sent by clients >= 0.5.0
@@ -56,21 +56,20 @@ class TunnelRegistration(BaseModel):
 
     @field_validator("service_label")
     @classmethod
-    def validate_service_label(cls, v: str | None) -> str | None:
-        if v is not None:
-            # Auto-sanitize: lowercase, replace common separators with
-            # hyphens, strip invalid characters, collapse runs.
-            v = v.lower()
-            v = re.sub(r"[_ .]+", "-", v)
-            v = re.sub(r"[^a-z0-9-]", "", v)
-            v = re.sub(r"-{2,}", "-", v)
-            v = v.strip("-")
-            if not v:
-                return None
-            if len(v) > 63:
-                v = v[:63].rstrip("-")
-            if not _SERVICE_LABEL_RE.match(v):
-                return None
+    def validate_service_label(cls, v: str) -> str:
+        # Auto-sanitize: lowercase, replace common separators with
+        # hyphens, strip invalid characters, collapse runs.
+        v = v.lower()
+        v = re.sub(r"[_ .]+", "-", v)
+        v = re.sub(r"[^a-z0-9-]", "", v)
+        v = re.sub(r"-{2,}", "-", v)
+        v = v.strip("-")
+        if not v:
+            raise ValueError("service_label is required and must contain valid characters")
+        if len(v) > 63:
+            v = v[:63].rstrip("-")
+        if not _SERVICE_LABEL_RE.match(v):
+            raise ValueError(f"service_label '{v}' does not match required format")
         return v
 
 

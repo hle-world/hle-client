@@ -75,7 +75,7 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
 @main.command()
 @click.option("--service", required=True, help="Local service URL (e.g. http://localhost:8080)")
 @click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
-@click.option("--label", "service_label", default=None, help="Service label (e.g. ha, jellyfin)")
+@click.option("--label", "service_label", required=True, help="Service label (e.g. ha, jellyfin)")
 @click.option(
     "--api-key",
     default=None,
@@ -331,7 +331,7 @@ def zone_clear() -> None:
 @main.command()
 @click.option("--path", required=True, help="Webhook path (e.g. /webhook/github)")
 @click.option("--forward-to", required=True, help="Local URL to forward webhooks to")
-@click.option("--label", "service_label", default=None, help="Custom tunnel label (default: auto)")
+@click.option("--label", "service_label", required=True, help="Webhook label (e.g. github-hook)")
 @click.option(
     "--api-key",
     envvar="HLE_API_KEY",
@@ -342,7 +342,7 @@ def zone_clear() -> None:
 def webhook(
     path: str,
     forward_to: str,
-    service_label: str | None,
+    service_label: str,
     api_key: str | None,
     zone: str | None,
 ) -> None:
@@ -375,7 +375,7 @@ def webhook(
     config = TunnelConfig(
         service_url=forward_to,
         auth_mode="none",  # no SSO gate for webhooks
-        service_label=service_label or f"wh-{path.strip('/').replace('/', '-')[:20]}",
+        service_label=service_label,
         api_key=api_key,
         websocket_enabled=False,
         verify_ssl=False,
