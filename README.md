@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![CI](https://github.com/hle-world/hle-client/actions/workflows/test.yml/badge.svg?v=2)](https://github.com/hle-world/hle-client/actions/workflows/test.yml)
 
-**HomeLab Everywhere** — Expose homelab services to the internet with built-in SSO authentication and WebSocket support.
+**HomeLab Everywhere** — Expose homelab services to the internet with built-in SSO authentication, WebSocket support, and webhook forwarding.
 
 One command: `hle expose --service http://localhost:8080`
 
@@ -55,6 +55,9 @@ This opens the dashboard in your browser. Copy your key and paste it at the prom
 
 ```bash
 hle expose --service http://localhost:8080
+
+# Or forward webhooks from GitHub/Stripe:
+hle webhook --path /hook/github --forward-to http://localhost:3000 --label github-hook
 ```
 
 ## CLI Usage
@@ -82,6 +85,24 @@ Options:
 - `--upstream-basic-auth USER:PASS` — Inject Basic Auth into requests forwarded to the local service
 - `--forward-host` — Forward the browser's Host header to the local service
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
+
+### `hle webhook`
+
+Forward incoming webhooks to a local service.
+
+```bash
+hle webhook --path /hook/github --forward-to http://localhost:3000 --label github-hook
+hle webhook --path /hook/stripe --forward-to http://localhost:4000/stripe --label stripe-hook
+```
+
+Options:
+- `--path` — Webhook path prefix, e.g. `/webhook/github` (required). Cannot be `/`
+- `--forward-to` — Local URL to forward webhooks to (required)
+- `--label` — Webhook label, e.g. `github-hook` (required)
+- `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
+- `--zone` — Custom zone domain for routing
+
+Webhook tunnels bypass SSO so external services (GitHub, Stripe, etc.) can deliver payloads without authentication.
 
 ### `hle auth`
 
