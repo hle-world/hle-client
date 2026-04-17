@@ -243,3 +243,34 @@ class ApiClient:
             resp.raise_for_status()
             result: dict[str, Any] = resp.json()
             return result
+
+    # -- Auth mode -----------------------------------------------------------
+
+    async def get_tunnel_auth_mode(self, subdomain: str) -> dict[str, Any]:
+        """Get the current auth_mode ('sso' or 'none') for a tunnel."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/auth-mode",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            result: dict[str, Any] = resp.json()
+            return result
+
+    async def set_tunnel_auth_mode(self, subdomain: str, auth_mode: str) -> dict[str, Any]:
+        """Set a tunnel's auth_mode. Accepts 'sso' or 'none'.
+
+        'sso' enforces the allow-list/PIN/Basic-Auth gate; 'none' makes the tunnel public
+        regardless of configured rules.
+        """
+        if auth_mode not in ("sso", "none"):
+            raise ValueError("auth_mode must be 'sso' or 'none'")
+        async with httpx.AsyncClient() as client:
+            resp = await client.patch(
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/auth-mode",
+                headers=self._headers,
+                json={"auth_mode": auth_mode},
+            )
+            resp.raise_for_status()
+            result: dict[str, Any] = resp.json()
+            return result
