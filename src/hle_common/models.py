@@ -35,6 +35,17 @@ class TunnelRegistration(BaseModel):
     zone: str | None = None  # custom zone domain for enterprise routing
     managed_by: str | None = None  # e.g. "hle-operator" for K8s operator tunnels
     webhook_path: str | None = None  # e.g. "/webhook/github" — restricts to this path prefix
+    response_timeout: int | None = None  # seconds; server caps at its own max
+
+    @field_validator("response_timeout")
+    @classmethod
+    def validate_response_timeout(cls, v: int | None) -> int | None:
+        if v is not None:
+            if v < 1:
+                raise ValueError("response_timeout must be at least 1 second")
+            if v > 1200:
+                raise ValueError("response_timeout must not exceed 1200 seconds (20 minutes)")
+        return v
 
     @field_validator("webhook_path")
     @classmethod
