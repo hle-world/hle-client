@@ -7,13 +7,14 @@ from hle_common.protocol import (
     PROTOCOL_VERSION,
     ErrorPayload,
     MessageType,
+    NoticePayload,
     ProtocolMessage,
 )
 
 
 class TestProtocolVersion:
     def test_protocol_version_exists(self):
-        assert PROTOCOL_VERSION == "1.2"
+        assert PROTOCOL_VERSION == "1.3"
 
     def test_protocol_version_is_string(self):
         assert isinstance(PROTOCOL_VERSION, str)
@@ -52,6 +53,7 @@ class TestMessageType:
             "ping",
             "pong",
             "error",
+            "notice",
         }
         actual = {member.value for member in MessageType}
         assert actual == expected
@@ -114,3 +116,45 @@ class TestErrorPayload:
         data = err.model_dump()
         restored = ErrorPayload(**data)
         assert restored == err
+
+
+class TestNoticePayload:
+    def test_defaults(self):
+        n = NoticePayload(code="hello", message="hi")
+        assert n.level == "info"
+        assert n.details is None
+        assert n.url is None
+
+    def test_all_levels(self):
+        for lvl in ("info", "success", "warning", "error"):
+            n = NoticePayload(level=lvl, code="c", message="m")
+            assert n.level == lvl
+
+    def test_invalid_level_rejected(self):
+        with pytest.raises(ValidationError):
+            NoticePayload(level="critical", code="c", message="m")
+
+    def test_with_details_and_url(self):
+        n = NoticePayload(
+            level="success",
+            code="auto_auth_applied",
+            message="SSO protection added",
+            details={"email": "you@example.com", "provider": "google"},
+            url="https://hle.world/dashboard",
+        )
+        assert n.details == {"email": "you@example.com", "provider": "google"}
+        assert n.url == "https://hle.world/dashboard"
+
+    def test_roundtrip_via_protocol_message(self):
+        n = NoticePayload(level="warning", code="public", message="Tunnel public")
+        msg = ProtocolMessage(type=MessageType.NOTICE, payload=n.model_dump())
+        raw = msg.model_dump_json()
+        parsed = ProtocolMessage.model_validate_json(raw)
+        assert parsed.type == MessageType.NOTICE
+        restored = NoticePayload.model_validate(parsed.payload)
+        assert restored == n
+
+
+class TestNoticeMessageType:
+    def test_notice_in_message_type(self):
+        assert MessageType.NOTICE == "notice"

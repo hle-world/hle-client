@@ -13,15 +13,7 @@ Your local service gets a public URL like `myapp-x7k.hle.world` with automatic H
 
 ## Install
 
-### pip (or pipx)
-
-```bash
-pip install hle-client
-# or
-pipx install hle-client
-```
-
-### Curl installer
+### Curl installer (recommended)
 
 ```bash
 curl -fsSL https://get.hle.world | sh
@@ -31,6 +23,12 @@ Installs via pipx (preferred), uv, or pip-in-venv. Supports `--version`:
 
 ```bash
 curl -fsSL https://get.hle.world | sh -s -- --version 2604.2
+```
+
+### pipx
+
+```bash
+pipx install hle-client
 ```
 
 ### Homebrew
@@ -103,6 +101,13 @@ Options:
 - `--zone` — Custom zone domain for routing
 
 Webhook tunnels bypass SSO so external services (GitHub, Stripe, etc.) can deliver payloads without authentication.
+
+### Server notices
+
+While a tunnel is connected, the relay can push informational messages that the
+client renders to stderr (e.g. `✓ Auto-protect added you@example.com via Google
+SSO`). Wording is server-controlled so new notices do not require a client
+release.
 
 ### `hle auth`
 
