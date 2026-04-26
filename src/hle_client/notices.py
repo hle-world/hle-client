@@ -9,7 +9,7 @@ from rich.console import Console
 if TYPE_CHECKING:
     from hle_common.protocol import NoticePayload
 
-_console = Console(stderr=True)
+_console = Console()
 
 _GLYPHS = {
     "info": ("ℹ", "cyan"),
