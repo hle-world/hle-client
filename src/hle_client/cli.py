@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from hle_client.api import ApiClient
 
 from hle_client import __version__
+from hle_client.config_cmd import config as config_group
 from hle_client.tunnel import (
     Tunnel,
     TunnelConfig,
@@ -1022,6 +1023,9 @@ def _handle_api_error(exc: Exception) -> None:
         console.print("[red]Error:[/red] Could not connect to relay server.")
     else:
         console.print(f"[red]Error:[/red] {exc}")
+
+
+main.add_command(config_group, name="config")
 
 
 if __name__ == "__main__":
