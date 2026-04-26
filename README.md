@@ -13,15 +13,7 @@ Your local service gets a public URL like `myapp-x7k.hle.world` with automatic H
 
 ## Install
 
-### pip (or pipx)
-
-```bash
-pip install hle-client
-# or
-pipx install hle-client
-```
-
-### Curl installer
+### Curl installer (recommended)
 
 ```bash
 curl -fsSL https://get.hle.world | sh
@@ -31,6 +23,12 @@ Installs via pipx (preferred), uv, or pip-in-venv. Supports `--version`:
 
 ```bash
 curl -fsSL https://get.hle.world | sh -s -- --version 2604.2
+```
+
+### pipx
+
+```bash
+pipx install hle-client
 ```
 
 ### Homebrew
@@ -104,6 +102,13 @@ Options:
 
 Webhook tunnels bypass SSO so external services (GitHub, Stripe, etc.) can deliver payloads without authentication.
 
+### Server notices
+
+While a tunnel is connected, the relay can push informational messages that the
+client renders to stderr (e.g. `✓ Auto-protect added you@example.com via Google
+SSO`). Wording is server-controlled so new notices do not require a client
+release.
+
 ### `hle auth`
 
 Manage your API key.
@@ -166,6 +171,24 @@ hle basic-auth set myapp-x7k       # Set credentials (prompts for username & pas
 hle basic-auth status myapp-x7k    # Check Basic Auth status
 hle basic-auth remove myapp-x7k    # Remove Basic Auth
 ```
+
+### `hle config`
+
+Declarative tunnel configuration for IaC / CI/CD. Accepts a label (resolved
+to `<label>-<user_code>`) or a full subdomain.
+
+```bash
+hle config show ha                                              # full status in one call
+hle config auth-mode ha --set sso                               # SSO gate on
+hle config auth-mode ha --set none                              # tunnel becomes public
+hle config access ha --replace google:alice@example.com \
+                     --replace github:dev@co.com                # reconcile allow-list
+```
+
+`hle config access --replace` is declarative — rules in the dashboard but not
+in the flags are removed. Use this when the flags should be authoritative.
+`hle expose --allow` remains additive (idempotent, never prunes) for ad-hoc
+sessions.
 
 ### Global Options
 
