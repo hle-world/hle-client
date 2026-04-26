@@ -1,5 +1,15 @@
 # Changelog
 
+## v2604.4 — 2026-04-26
+
+- **Server notices on the CLI** (`PROTOCOL_VERSION` 1.2 → 1.3): the relay can now push informational messages to a connected client, rendered inline with the rest of the `hle expose` output. Wording is server-controlled so new notices do not require a client release. First use case: dashboard "auto-protect" toggles surface immediately on the CLI.
+- **`hle config` command group** for declarative tunnel configuration:
+  - `hle config show <label>` — full status (auth mode, access rules, PIN, basic-auth, live state) in one call.
+  - `hle config auth-mode <label> --set sso|none` — change the SSO gate. Webhook tunnels are always public and rejected.
+  - `hle config access <label> --replace [provider:]email ...` — declarative reconcile: rules in the dashboard but not in the flags are removed. Unlike `hle expose --allow`, which only adds.
+- **Install docs reordered**: curl one-liner (`curl -fsSL https://get.hle.world | sh`) is now the primary path, followed by `pipx install hle-client` and `brew install hle-world/tap/hle-client`.
+- **Fix:** stray `2604.2` version literal in `install.sh`'s `--version 2>&1` invocation, leftover from a previous `sed` pass.
+
 ## v2604.2 — 2026-04-16
 
 - **Required `--label` flag**: Both `hle expose` and `hle webhook` now require `--label`. Labels are the stable identity for tunnels — the server uses them to persist subdomain mappings across reconnections.
