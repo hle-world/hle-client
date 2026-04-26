@@ -172,6 +172,24 @@ hle basic-auth status myapp-x7k    # Check Basic Auth status
 hle basic-auth remove myapp-x7k    # Remove Basic Auth
 ```
 
+### `hle config`
+
+Declarative tunnel configuration for IaC / CI/CD. Accepts a label (resolved
+to `<label>-<user_code>`) or a full subdomain.
+
+```bash
+hle config show ha                                              # full status in one call
+hle config auth-mode ha --set sso                               # SSO gate on
+hle config auth-mode ha --set none                              # tunnel becomes public
+hle config access ha --replace google:alice@example.com \
+                     --replace github:dev@co.com                # reconcile allow-list
+```
+
+`hle config access --replace` is declarative — rules in the dashboard but not
+in the flags are removed. Use this when the flags should be authoritative.
+`hle expose --allow` remains additive (idempotent, never prunes) for ad-hoc
+sessions.
+
 ### Global Options
 
 ```bash
