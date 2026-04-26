@@ -22,6 +22,7 @@ import websockets.asyncio.client
 import websockets.exceptions
 
 from hle_client import __version__
+from hle_client.notices import render_notice
 from hle_client.proxy import LocalProxy, ProxyConfig
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
@@ -38,7 +39,12 @@ from hle_common.models import (
     WsStreamFrame,
     WsStreamOpen,
 )
-from hle_common.protocol import PROTOCOL_VERSION, MessageType, ProtocolMessage
+from hle_common.protocol import (
+    PROTOCOL_VERSION,
+    MessageType,
+    NoticePayload,
+    ProtocolMessage,
+)
 
 
 class TunnelFatalError(Exception):
@@ -481,8 +487,23 @@ class Tunnel:
                         task = self._active_chunked.pop(request_id, None)
                         if task and not task.done():
                             task.cancel()
+                case MessageType.NOTICE:
+                    self._handle_notice(msg)
                 case _:
                     logger.debug("Unhandled message type: %s", msg.type)
+
+    def _handle_notice(self, msg: ProtocolMessage) -> None:
+        """Render a server-pushed informational message.
+
+        Server controls wording so new notice codes do not require a client
+        release. Unknown levels fall back to ``info``.
+        """
+        try:
+            notice = NoticePayload.model_validate(msg.payload or {})
+        except Exception:
+            logger.exception("Malformed NOTICE payload: %s", msg.payload)
+            return
+        render_notice(notice)
 
     # ------------------------------------------------------------------
     # HTTP request handling

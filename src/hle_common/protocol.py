@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 # Protocol version — bump on wire-format changes.
 # Major bump (1.0 → 2.0): breaking change, server must support both during deprecation.
 # Minor bump (1.0 → 1.1): new optional fields/message types, old clients unaffected.
-PROTOCOL_VERSION = "1.2"
+PROTOCOL_VERSION = "1.3"
 
 
 class MessageType(StrEnum):
@@ -56,6 +56,11 @@ class MessageType(StrEnum):
     PONG = "pong"
     ERROR = "error"
 
+    # Server → client informational message. Rendered by the client as a
+    # human-readable line. Server controls wording so new messages do not
+    # require a client release. Unknown codes still render via `message`.
+    NOTICE = "notice"
+
 
 class ProtocolMessage(BaseModel):
     """Base message for the HLE wire protocol."""
@@ -72,3 +77,13 @@ class ErrorPayload(BaseModel):
     code: str
     message: str
     request_id: str | None = None
+
+
+class NoticePayload(BaseModel):
+    """Server → client informational message payload."""
+
+    level: Literal["info", "success", "warning", "error"] = "info"
+    code: str
+    message: str
+    details: dict[str, Any] | None = None
+    url: str | None = None

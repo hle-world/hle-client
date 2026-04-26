@@ -274,3 +274,25 @@ class ApiClient:
             resp.raise_for_status()
             result: dict[str, Any] = resp.json()
             return result
+
+    async def get_tunnel_status(self, subdomain: str) -> dict[str, Any]:
+        """Return the aggregated config + live state for a tunnel."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{self._base_url}/api/tunnels/{_safe_subdomain(subdomain)}/status",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            result: dict[str, Any] = resp.json()
+            return result
+
+    async def get_me(self) -> dict[str, Any]:
+        """Return the authenticated user (for resolving ``user_code``)."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{self._base_url}/api/auth/me",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            payload: dict[str, Any] = resp.json()
+            return payload.get("user", payload)
