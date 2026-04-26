@@ -1,5 +1,9 @@
 # Changelog
 
+## v2604.4 — 2026-04-26
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2604.2 — 2026-04-16
 
 - **Required `--label` flag**: Both `hle expose` and `hle webhook` now require `--label`. Labels are the stable identity for tunnels — the server uses them to persist subdomain mappings across reconnections.
