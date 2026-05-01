@@ -51,30 +51,6 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: twine upload dist/*
 
-  sync-ha-addon:
-    name: Trigger ha-addon release
-    needs: publish
-    runs-on: arc-runner-hle-client
-    container:
-      image: python:3.13-slim
-    env:
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
-    steps:
-      - name: Install tools
-        run: apt-get update && apt-get install -y curl jq
-
-      - name: Dispatch to ha-addon
-        env:
-          HA_ADDON_TOKEN: ${{ secrets.HA_ADDON_DISPATCH_TOKEN }}
-        run: |
-          jq -n --arg version "$RELEASE_TAG" \
-            '{"event_type":"hle-client-release","client_payload":{"version":$version}}' | \
-          curl -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${HA_ADDON_TOKEN}" \
-            https://api.github.com/repos/hle-world/ha-addon/dispatches \
-            -d @-
-
   notify-operator:
     name: Notify hle-operator
     needs: publish
@@ -97,8 +73,8 @@ jobs:
             https://api.github.com/repos/hle-world/hle-operator/dispatches \
             -d "{\"event_type\":\"hle-client-release\",\"client_payload\":{\"version\":\"${RELEASE_TAG}\"}}"
 
-  sync-hle-docker:
-    name: Trigger hle-docker release
+  sync-hle-webapp:
+    name: Trigger hle-webapp release
     needs: publish
     runs-on: arc-runner-hle-client
     container:
@@ -108,18 +84,6 @@ jobs:
     steps:
       - name: Install tools
         run: apt-get update && apt-get install -y curl jq
-
-      - name: Dispatch to hle-docker
-        env:
-          HLE_DOCKER_TOKEN: ${{ secrets.HLE_DOCKER_DISPATCH_TOKEN }}
-        run: |
-          jq -n --arg version "$RELEASE_TAG" \
-            '{"event_type":"hle-client-release","client_payload":{"version":$version}}' | \
-          curl -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${HLE_DOCKER_TOKEN}" \
-            https://api.github.com/repos/hle-world/hle-docker/dispatches \
-            -d @-
 
       - name: Dispatch to hle-webapp
         env:
