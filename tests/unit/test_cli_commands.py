@@ -58,9 +58,7 @@ class TestConfigAccessList:
         mock_client = AsyncMock()
         mock_client.list_access_rules = AsyncMock(return_value=[])
         with _patch_key(), _patch_client(mock_client):
-            result = runner.invoke(
-                main, ["config", "access", "list", "app-x7k", "--api-key", _KEY]
-            )
+            result = runner.invoke(main, ["config", "access", "list", "app-x7k", "--api-key", _KEY])
         assert result.exit_code == 0
         assert "No access rules" in result.output
 
@@ -77,9 +75,7 @@ class TestConfigAccessList:
         mock_client = AsyncMock()
         mock_client.list_access_rules = AsyncMock(return_value=rules)
         with _patch_key(), _patch_client(mock_client):
-            result = runner.invoke(
-                main, ["config", "access", "list", "app-x7k", "--api-key", _KEY]
-            )
+            result = runner.invoke(main, ["config", "access", "list", "app-x7k", "--api-key", _KEY])
         assert result.exit_code == 0
         assert "friend@example.com" in result.output
 
@@ -182,9 +178,7 @@ class TestConfigShareList:
         mock_client = AsyncMock()
         mock_client.list_share_links = AsyncMock(return_value=[])
         with _patch_key(), _patch_client(mock_client):
-            result = runner.invoke(
-                main, ["config", "share", "list", "app-x7k", "--api-key", _KEY]
-            )
+            result = runner.invoke(main, ["config", "share", "list", "app-x7k", "--api-key", _KEY])
         assert result.exit_code == 0
         assert "No share links" in result.output
 
@@ -204,9 +198,7 @@ class TestConfigShareList:
         mock_client = AsyncMock()
         mock_client.list_share_links = AsyncMock(return_value=links)
         with _patch_key(), _patch_client(mock_client):
-            result = runner.invoke(
-                main, ["config", "share", "list", "app-x7k", "--api-key", _KEY]
-            )
+            result = runner.invoke(main, ["config", "share", "list", "app-x7k", "--api-key", _KEY])
         assert result.exit_code == 0
         assert "abc12345" in result.output
         assert "for bob" in result.output
@@ -353,9 +345,7 @@ class TestErrorHandling:
             side_effect=httpx.HTTPStatusError("403", request=mock_resp.request, response=mock_resp)
         )
         with _patch_key(), _patch_client(mock_client):
-            result = runner.invoke(
-                main, ["config", "access", "list", "x-abc", "--api-key", _KEY]
-            )
+            result = runner.invoke(main, ["config", "access", "list", "x-abc", "--api-key", _KEY])
         assert result.exit_code != 0
         assert "do not own" in result.output
 
