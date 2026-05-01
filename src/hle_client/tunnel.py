@@ -134,72 +134,6 @@ def _remove_api_key() -> bool:
         return False
 
 
-def _load_zone() -> str | None:
-    """Load zone from the config file, if it exists."""
-    if not _CONFIG_FILE.exists():
-        return None
-    try:
-        import tomllib
-
-        with open(_CONFIG_FILE, "rb") as f:
-            data = tomllib.load(f)
-        return data.get("zone")
-    except Exception:
-        logger.debug("Failed to load zone from %s", _CONFIG_FILE)
-        return None
-
-
-def _save_zone(zone: str) -> None:
-    """Persist zone to the config file."""
-    try:
-        _CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-        existing_lines: list[str] = []
-        found = False
-        if _CONFIG_FILE.exists():
-            with open(_CONFIG_FILE) as f:
-                for line in f:
-                    if line.startswith("zone"):
-                        existing_lines.append(f'zone = "{zone}"\n')
-                        found = True
-                    else:
-                        existing_lines.append(line)
-
-        if not found:
-            existing_lines.append(f'zone = "{zone}"\n')
-
-        fd = os.open(_CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.writelines(existing_lines)
-
-        logger.info("Zone saved to %s", _CONFIG_FILE)
-    except Exception:
-        logger.warning("Failed to save zone to %s", _CONFIG_FILE, exc_info=True)
-
-
-def _remove_zone() -> bool:
-    """Remove zone from the config file. Returns True if a zone was removed."""
-    if not _CONFIG_FILE.exists():
-        return False
-    try:
-        with open(_CONFIG_FILE) as f:
-            lines = f.readlines()
-
-        new_lines = [line for line in lines if not line.startswith("zone")]
-        if len(new_lines) == len(lines):
-            return False
-
-        fd = os.open(_CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.writelines(new_lines)
-
-        logger.info("Zone removed from %s", _CONFIG_FILE)
-        return True
-    except Exception:
-        logger.warning("Failed to remove zone from %s", _CONFIG_FILE, exc_info=True)
-        return False
-
-
 @dataclass
 class TunnelConfig:
     """Configuration for a tunnel connection."""
@@ -218,8 +152,6 @@ class TunnelConfig:
     """Optional (username, password) injected as Authorization: Basic toward the local service."""
     forward_host: bool = False
     """Forward the browser's Host header instead of using the target hostname."""
-    zone: str | None = None
-    """Custom zone domain for enterprise tunnel routing (e.g. 'project1.t00t.us')."""
     managed_by: str | None = None
     """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
     webhook_path: str | None = None
@@ -420,7 +352,6 @@ class Tunnel:
                 websocket_enabled=self.config.websocket_enabled,
                 auth_mode=self.config.auth_mode,
                 capabilities=[CAPABILITY_CHUNKED_RESPONSE],
-                zone=self.config.zone,
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
             )
