@@ -114,10 +114,9 @@ class TestConfigAccessReplace:
                 [
                     "config",
                     "access",
+                    "replace",
                     "ha",
-                    "--replace",
                     "google:alice@example.com",
-                    "--replace",
                     "github:carol@example.com",
                     "--api-key",
                     _KEY,
@@ -151,8 +150,8 @@ class TestConfigAccessReplace:
                 [
                     "config",
                     "access",
+                    "replace",
                     "ha",
-                    "--replace",
                     "google:alice@example.com",
                     "--api-key",
                     _KEY,
@@ -164,8 +163,8 @@ class TestConfigAccessReplace:
         mock_client.delete_access_rule.assert_not_called()
         assert "in sync" in result.output
 
-    def test_access_no_replace_flag_errors(self) -> None:
+    def test_access_no_specs_errors(self) -> None:
         runner = CliRunner()
-        result = runner.invoke(main, ["config", "access", "ha", "--api-key", _KEY])
+        result = runner.invoke(main, ["config", "access", "replace", "ha", "--api-key", _KEY])
         assert result.exit_code != 0
-        assert "--replace" in result.output
+        assert "--clear" in result.output
