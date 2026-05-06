@@ -7,6 +7,7 @@ for tunnel registration, HTTP proxying, and WebSocket stream multiplexing.
 from __future__ import annotations
 
 import re
+from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
 
@@ -176,6 +177,41 @@ class WsStreamClose(BaseModel):
     stream_id: str
     code: int = 1000
     reason: str = ""
+    # Optional diagnostics added in PROTOCOL_VERSION 1.4. Always-on (does
+    # not require LOG_CONFIG) so the relay sees rich close info on every
+    # stream, e.g. {"exc_type": "ConnectionClosedError", "frames_in": 42,
+    # "frames_out": 17, "ms_open": 312}. Old servers ignore the field.
+    diagnostics: dict[str, Any] | None = None
+
+
+class LogConfig(BaseModel):
+    """Server → client: adjust per-tunnel log verbosity and diagnostics.
+
+    Sent at any time by the relay (typically toggled by an admin panel).
+    The client honors the requested log level on its hle_client logger
+    and starts/stops emitting DIAGNOSTIC events based on ``diagnostics``.
+    """
+
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    diagnostics: bool = False
+
+
+class DiagnosticEvent(BaseModel):
+    """Client → server: structured diagnostic event for live debugging.
+
+    The client only emits these while the server has enabled them via
+    ``LogConfig(diagnostics=True)``, so older servers that do not yet
+    handle DIAGNOSTIC will not see unexpected message types.
+
+    ``event`` is a dotted name (e.g. ``"ws.close"``, ``"ws.connect_error"``).
+    ``data`` is an arbitrary JSON-compatible payload — schema is owned by
+    the server side, kept open here so new event kinds can be added
+    without a protocol bump.
+    """
+
+    event: str
+    data: dict[str, Any] = {}
+    ts: float | None = None
 
 
 # ---------------------------------------------------------------------------
