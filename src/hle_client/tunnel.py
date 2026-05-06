@@ -161,6 +161,8 @@ class TunnelConfig:
 # Hard limits to protect against a malicious or compromised relay server.
 WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB — control-plane WebSocket message limit
 MAX_WS_STREAMS = 100
+# RFC 6455: close reason is encoded in UTF-8 and limited to 123 bytes.
+_WS_CLOSE_REASON_MAX = 123
 MAX_SPEED_TEST_CHUNKS = 100  # ~6.4 MB at 64 KB/chunk
 MAX_SPEED_TEST_CHUNK_SIZE = 1_048_576  # 1 MB — cap server-requested chunk size
 
@@ -200,7 +202,13 @@ class Tunnel:
     _public_url: str | None = field(default=None, init=False, repr=False)
     _proxy: LocalProxy = field(init=False, repr=False)
     _ws: _ClientConn | None = field(default=None, init=False, repr=False)
-    _ws_streams: dict[str, _ClientConn] = field(default_factory=dict, init=False, repr=False)
+    # Values are either a connected _ClientConn (local WS established) or an
+    # asyncio.Queue placeholder used to buffer inbound frames while the local
+    # WS is still being opened — prevents losing frames sent by the relay
+    # between WS_OPEN dispatch and websockets.connect() completion.
+    _ws_streams: dict[str, _ClientConn | asyncio.Queue[WsStreamFrame]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _ws_streams_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _active_chunked: dict[str, asyncio.Task[None]] = field(
@@ -652,6 +660,11 @@ class Tunnel:
             return
 
         # Limit concurrent streams to prevent resource exhaustion.
+        # Pre-register a placeholder queue so frames arriving from the relay
+        # while we're still opening the local WS get buffered rather than
+        # dropped (otherwise the very first frame after WS_OPEN — e.g. an
+        # auth message — can race the connect() and be silently lost).
+        pending_queue: asyncio.Queue[WsStreamFrame] = asyncio.Queue()
         async with self._ws_streams_lock:
             if len(self._ws_streams) >= MAX_WS_STREAMS:
                 logger.warning(
@@ -669,6 +682,7 @@ class Tunnel:
                 with contextlib.suppress(websockets.exceptions.ConnectionClosed):
                     await ws.send(close_msg.model_dump_json())
                 return
+            self._ws_streams[stream_id] = pending_queue
 
         # Build the local WS URL.
         local_base = self.config.service_url.replace("http://", "ws://").replace(
@@ -713,21 +727,60 @@ class Tunnel:
                 additional_headers=clean_headers,
                 ssl=ws_ssl,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to open local WS connection to %s", local_ws_url)
+            async with self._ws_streams_lock:
+                self._ws_streams.pop(stream_id, None)
+            reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
             close_msg = ProtocolMessage(
                 type=MessageType.WS_CLOSE,
                 tunnel_id=self._tunnel_id,
                 payload=WsStreamClose(
-                    stream_id=stream_id, code=1011, reason="local connect failed"
+                    stream_id=stream_id, code=1011, reason=reason or "local connect failed"
                 ).model_dump(),
             )
             with contextlib.suppress(websockets.exceptions.ConnectionClosed):
                 await ws.send(close_msg.model_dump_json())
             return
 
+        # Swap the placeholder queue for the live local WS, then drain any
+        # frames that arrived during connect() into the upstream so message
+        # ordering is preserved. If the relay already sent a WS_CLOSE while
+        # we were connecting, the placeholder is gone — abandon the upstream
+        # we just opened rather than leak it.
         async with self._ws_streams_lock:
+            current = self._ws_streams.get(stream_id)
+            if current is not pending_queue:
+                with contextlib.suppress(Exception):
+                    await local_ws.close(code=1000, reason="closed during connect")
+                logger.info(
+                    "Discarding local WS opened after WS_CLOSE: stream_id=%s",
+                    stream_id,
+                )
+                return
             self._ws_streams[stream_id] = local_ws
+        try:
+            while True:
+                try:
+                    buffered = pending_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    if buffered.is_binary:
+                        await local_ws.send(base64.b64decode(buffered.data))
+                    else:
+                        await local_ws.send(buffered.data)
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info(
+                        "Local WS closed while flushing buffered frames: stream_id=%s",
+                        stream_id,
+                    )
+                    break
+        except Exception:
+            logger.exception(
+                "Error flushing buffered frames to local WS: stream_id=%s", stream_id
+            )
+
         logger.info("WS stream opened: stream_id=%s -> %s", stream_id, local_ws_url)
 
         # Start a background task that reads from the local WS and sends
@@ -740,7 +793,15 @@ class Tunnel:
         local_ws: _ClientConn,
         stream_id: str,
     ) -> None:
-        """Read frames from a local WS and forward them to the relay."""
+        """Read frames from a local WS and forward them to the relay.
+
+        Captures the upstream close code/reason verbatim and forwards them in
+        the WS_CLOSE message so the relay (and ultimately the browser) sees
+        the real reason the upstream service closed — instead of always
+        defaulting to ``1000 ""``. This is generic to any upstream WS service.
+        """
+        close_code: int = 1000
+        close_reason: str = ""
         try:
             async for frame_data in local_ws:
                 if isinstance(frame_data, bytes):
@@ -761,36 +822,72 @@ class Tunnel:
                     payload=frame_payload.model_dump(),
                 )
                 await relay_ws.send(frame_msg.model_dump_json())
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("Local WS connection closed: stream_id=%s", stream_id)
-        except Exception:
+        except websockets.exceptions.ConnectionClosed as exc:
+            # Prefer the close code from the exception (covers abnormal closes
+            # where local_ws.close_code may not yet be populated).
+            close_code = exc.code or getattr(local_ws, "close_code", None) or 1006
+            close_reason = (
+                exc.reason or getattr(local_ws, "close_reason", "") or ""
+            )[:_WS_CLOSE_REASON_MAX]
+            logger.info(
+                "Local WS connection closed: stream_id=%s code=%d reason=%r",
+                stream_id,
+                close_code,
+                close_reason,
+            )
+        except Exception as exc:
+            close_code = 1011
+            close_reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
             logger.exception("Error reading from local WS: stream_id=%s", stream_id)
+        else:
+            # async-for ended without an exception (rare path — peer half-closed
+            # cleanly). Read the recorded close metadata from the connection.
+            close_code = getattr(local_ws, "close_code", None) or 1000
+            close_reason = (getattr(local_ws, "close_reason", "") or "")[
+                :_WS_CLOSE_REASON_MAX
+            ]
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
-            # Notify the relay that this stream is closed.
+            # Notify the relay that this stream is closed, preserving the
+            # upstream-reported close code and reason for diagnostics.
             with contextlib.suppress(Exception):
                 close_msg = ProtocolMessage(
                     type=MessageType.WS_CLOSE,
                     tunnel_id=self._tunnel_id,
-                    payload=WsStreamClose(stream_id=stream_id).model_dump(),
+                    payload=WsStreamClose(
+                        stream_id=stream_id,
+                        code=close_code,
+                        reason=close_reason,
+                    ).model_dump(),
                 )
                 await relay_ws.send(close_msg.model_dump_json())
 
     async def _handle_ws_frame(self, msg: ProtocolMessage) -> None:
-        """Forward a WS frame received from the relay to the local WS connection."""
+        """Forward a WS frame received from the relay to the local WS connection.
+
+        If the local WS is still being established (placeholder queue), the
+        frame is buffered and replayed once connect() finishes — preventing
+        the lost-frame race that breaks any protocol whose first message must
+        arrive promptly after the upgrade (e.g. WS auth handshakes).
+        """
         frame = WsStreamFrame.model_validate(msg.payload)
         async with self._ws_streams_lock:
-            local_ws = self._ws_streams.get(frame.stream_id)
-        if local_ws is None:
+            target = self._ws_streams.get(frame.stream_id)
+        if target is None:
             logger.warning("WS_FRAME for unknown stream_id=%s", frame.stream_id)
+            return
+
+        if isinstance(target, asyncio.Queue):
+            # Local WS still connecting — buffer until connect() completes.
+            await target.put(frame)
             return
 
         try:
             if frame.is_binary:
-                await local_ws.send(base64.b64decode(frame.data))
+                await target.send(base64.b64decode(frame.data))
             else:
-                await local_ws.send(frame.data)
+                await target.send(frame.data)
         except websockets.exceptions.ConnectionClosed:
             logger.info("Local WS already closed for stream_id=%s", frame.stream_id)
             async with self._ws_streams_lock:
@@ -800,12 +897,22 @@ class Tunnel:
         """Close a local WS connection when the relay signals stream closure."""
         close_req = WsStreamClose.model_validate(msg.payload)
         async with self._ws_streams_lock:
-            local_ws = self._ws_streams.pop(close_req.stream_id, None)
-        if local_ws is None:
+            target = self._ws_streams.pop(close_req.stream_id, None)
+        if target is None:
+            return
+
+        # Placeholder queue: connect() is still in flight — nothing to close
+        # at the upstream. The pending _handle_ws_open task will discover the
+        # stream is gone after connect() finishes and clean up its own socket.
+        if isinstance(target, asyncio.Queue):
+            logger.info(
+                "WS stream closed during connect: stream_id=%s",
+                close_req.stream_id,
+            )
             return
 
         with contextlib.suppress(Exception):
-            await local_ws.close(code=close_req.code, reason=close_req.reason)
+            await target.close(code=close_req.code, reason=close_req.reason)
         logger.info("WS stream closed: stream_id=%s", close_req.stream_id)
 
     # ------------------------------------------------------------------
@@ -903,9 +1010,13 @@ class Tunnel:
     async def _cleanup(self) -> None:
         """Close all local WS streams, cancel background tasks, and stop the proxy."""
         async with self._ws_streams_lock:
-            for _stream_id, local_ws in list(self._ws_streams.items()):
+            for _stream_id, target in list(self._ws_streams.items()):
+                # Skip placeholder queues — there is no upstream socket yet;
+                # the in-flight _handle_ws_open task will be cancelled below.
+                if isinstance(target, asyncio.Queue):
+                    continue
                 with contextlib.suppress(Exception):
-                    await local_ws.close()
+                    await target.close()
             self._ws_streams.clear()
 
         for task in list(self._tasks):
