@@ -777,9 +777,7 @@ class Tunnel:
                     )
                     break
         except Exception:
-            logger.exception(
-                "Error flushing buffered frames to local WS: stream_id=%s", stream_id
-            )
+            logger.exception("Error flushing buffered frames to local WS: stream_id=%s", stream_id)
 
         logger.info("WS stream opened: stream_id=%s -> %s", stream_id, local_ws_url)
 
@@ -826,9 +824,9 @@ class Tunnel:
             # Prefer the close code from the exception (covers abnormal closes
             # where local_ws.close_code may not yet be populated).
             close_code = exc.code or getattr(local_ws, "close_code", None) or 1006
-            close_reason = (
-                exc.reason or getattr(local_ws, "close_reason", "") or ""
-            )[:_WS_CLOSE_REASON_MAX]
+            close_reason = (exc.reason or getattr(local_ws, "close_reason", "") or "")[
+                :_WS_CLOSE_REASON_MAX
+            ]
             logger.info(
                 "Local WS connection closed: stream_id=%s code=%d reason=%r",
                 stream_id,
@@ -843,9 +841,7 @@ class Tunnel:
             # async-for ended without an exception (rare path — peer half-closed
             # cleanly). Read the recorded close metadata from the connection.
             close_code = getattr(local_ws, "close_code", None) or 1000
-            close_reason = (getattr(local_ws, "close_reason", "") or "")[
-                :_WS_CLOSE_REASON_MAX
-            ]
+            close_reason = (getattr(local_ws, "close_reason", "") or "")[:_WS_CLOSE_REASON_MAX]
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
