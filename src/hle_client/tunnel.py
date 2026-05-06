@@ -26,9 +26,11 @@ from hle_client.notices import render_notice
 from hle_client.proxy import LocalProxy, ProxyConfig
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
+    DiagnosticEvent,
     HttpResponseChunk,
     HttpResponseEnd,
     HttpResponseStart,
+    LogConfig,
     ProxiedHttpRequest,
     ProxiedHttpResponse,
     SpeedTestData,
@@ -163,6 +165,40 @@ WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB — control-plane WebSocket messag
 MAX_WS_STREAMS = 100
 # RFC 6455: close reason is encoded in UTF-8 and limited to 123 bytes.
 _WS_CLOSE_REASON_MAX = 123
+
+
+def _build_ws_close_diagnostics(
+    stats: dict[str, Any] | None, exc_type: str | None
+) -> dict[str, Any] | None:
+    """Build the rich diagnostics payload attached to every WS_CLOSE.
+
+    Always-on (does not require server LOG_CONFIG opt-in). Old relays
+    ignore the new field; newer relays surface it in admin UIs / logs.
+    Returns ``None`` if no stats were recorded (defensive — should not
+    happen in practice).
+    """
+    if stats is None:
+        return {"exc_type": exc_type} if exc_type else None
+    now = time.monotonic()
+    opened = stats.get("opened_monotonic", now)
+    last_in = stats.get("last_in_monotonic")
+    last_out = stats.get("last_out_monotonic")
+    out: dict[str, Any] = {
+        "ms_open": int((now - opened) * 1000),
+        "frames_in": stats.get("frames_in", 0),
+        "frames_out": stats.get("frames_out", 0),
+        "bytes_in": stats.get("bytes_in", 0),
+        "bytes_out": stats.get("bytes_out", 0),
+    }
+    if last_in is not None:
+        out["ms_since_last_in"] = int((now - last_in) * 1000)
+    if last_out is not None:
+        out["ms_since_last_out"] = int((now - last_out) * 1000)
+    if exc_type is not None:
+        out["exc_type"] = exc_type
+    return out
+
+
 MAX_SPEED_TEST_CHUNKS = 100  # ~6.4 MB at 64 KB/chunk
 MAX_SPEED_TEST_CHUNK_SIZE = 1_048_576  # 1 MB — cap server-requested chunk size
 
@@ -210,6 +246,19 @@ class Tunnel:
         default_factory=dict, init=False, repr=False
     )
     _ws_streams_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # Per-stream lifecycle stats — populated for every stream regardless of
+    # whether server-side diagnostics are enabled. Attached to every
+    # WsStreamClose so the relay sees rich close info even with diagnostics
+    # off. Keyed by stream_id, values: {opened_ms, frames_in, frames_out,
+    # last_in_ms, last_out_ms}.
+    _ws_stream_stats: dict[str, dict[str, Any]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    # Server-toggled diagnostics state (LOG_CONFIG message). When
+    # _diagnostics_enabled is True the client emits structured DIAGNOSTIC
+    # events to the relay — gated on the server opting in so older relays
+    # never see an unknown message type.
+    _diagnostics_enabled: bool = field(default=False, init=False, repr=False)
     _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _active_chunked: dict[str, asyncio.Task[None]] = field(
         default_factory=dict, init=False, repr=False
@@ -428,6 +477,8 @@ class Tunnel:
                             task.cancel()
                 case MessageType.NOTICE:
                     self._handle_notice(msg)
+                case MessageType.LOG_CONFIG:
+                    self._handle_log_config(msg)
                 case _:
                     logger.debug("Unhandled message type: %s", msg.type)
 
@@ -443,6 +494,63 @@ class Tunnel:
             logger.exception("Malformed NOTICE payload: %s", msg.payload)
             return
         render_notice(notice)
+
+    # ------------------------------------------------------------------
+    # Diagnostics — server-toggled debug logging and event echo
+    # ------------------------------------------------------------------
+
+    def _handle_log_config(self, msg: ProtocolMessage) -> None:
+        """Apply a server-requested log level / diagnostics toggle.
+
+        Sent by the relay (typically from an admin panel action) to crank
+        verbosity on a single tunnel without redeploying the client.
+        """
+        try:
+            cfg = LogConfig.model_validate(msg.payload or {})
+        except Exception:
+            logger.exception("Malformed LOG_CONFIG payload: %s", msg.payload)
+            return
+        # Apply level to the hle_client logger tree only — we do not touch
+        # third-party loggers to avoid leaking unrelated noise back to the
+        # relay through DIAGNOSTIC events.
+        level_value = getattr(logging, cfg.level, logging.INFO)
+        logging.getLogger("hle_client").setLevel(level_value)
+        self._diagnostics_enabled = cfg.diagnostics
+        logger.info(
+            "LOG_CONFIG applied: level=%s diagnostics=%s tunnel=%s",
+            cfg.level,
+            cfg.diagnostics,
+            self._tunnel_id,
+        )
+
+    def _emit_diagnostic(self, event: str, **data: Any) -> None:
+        """Send a structured DIAGNOSTIC event back to the relay.
+
+        Best-effort and fully gated on ``_diagnostics_enabled`` — older
+        relays will never see this message type because the server has to
+        opt in via LOG_CONFIG first. Failures are swallowed so diagnostics
+        cannot break the data plane.
+        """
+        if not self._diagnostics_enabled or self._ws is None or self._tunnel_id is None:
+            return
+        try:
+            payload = DiagnosticEvent(event=event, data=data, ts=time.time())
+            ws_msg = ProtocolMessage(
+                type=MessageType.DIAGNOSTIC,
+                tunnel_id=self._tunnel_id,
+                payload=payload.model_dump(),
+            )
+            # Fire-and-forget; do not await on the data plane.
+            self._spawn(self._send_diagnostic(ws_msg))
+        except Exception:
+            logger.debug("Failed to enqueue DIAGNOSTIC event %s", event, exc_info=True)
+
+    async def _send_diagnostic(self, ws_msg: ProtocolMessage) -> None:
+        """Best-effort send of a DIAGNOSTIC message; never raises."""
+        if self._ws is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._ws.send(ws_msg.model_dump_json())
 
     # ------------------------------------------------------------------
     # HTTP request handling
@@ -743,11 +851,21 @@ class Tunnel:
                 await ws.send(close_msg.model_dump_json())
             return
 
-        # Swap the placeholder queue for the live local WS, then drain any
-        # frames that arrived during connect() into the upstream so message
-        # ordering is preserved. If the relay already sent a WS_CLOSE while
-        # we were connecting, the placeholder is gone — abandon the upstream
-        # we just opened rather than leak it.
+        # Drain the buffered frames into the live local WS BEFORE swapping
+        # the slot, all while holding the streams lock. This is critical:
+        # if we swap first then drain, a new frame arriving via
+        # _handle_ws_frame would find `local_ws` in the slot and send
+        # directly — ahead of the still-buffered earlier frames. That
+        # reorders the wire (e.g. `subscribe_*` before `auth`) and many
+        # WS protocols treat any out-of-order frame as a fatal protocol
+        # violation, dropping the TCP without a close frame (code 1006).
+        # Holding the lock through the drain serializes _handle_ws_frame
+        # behind us, so frames keep landing in the queue until we install
+        # the live socket atomically.
+        #
+        # If the relay already sent a WS_CLOSE while we were connecting,
+        # the placeholder is gone — abandon the upstream we just opened
+        # rather than leak it.
         async with self._ws_streams_lock:
             current = self._ws_streams.get(stream_id)
             if current is not pending_queue:
@@ -758,8 +876,8 @@ class Tunnel:
                     stream_id,
                 )
                 return
-            self._ws_streams[stream_id] = local_ws
-        try:
+
+            drained_ok = True
             while True:
                 try:
                     buffered = pending_queue.get_nowait()
@@ -775,11 +893,47 @@ class Tunnel:
                         "Local WS closed while flushing buffered frames: stream_id=%s",
                         stream_id,
                     )
+                    drained_ok = False
                     break
-        except Exception:
-            logger.exception("Error flushing buffered frames to local WS: stream_id=%s", stream_id)
+                except Exception:
+                    logger.exception(
+                        "Error flushing buffered frames to local WS: stream_id=%s",
+                        stream_id,
+                    )
+                    drained_ok = False
+                    break
 
+            if drained_ok:
+                # Atomically install the live socket — _handle_ws_frame can
+                # now send directly since order is guaranteed by the lock.
+                self._ws_streams[stream_id] = local_ws
+            else:
+                # Upstream died mid-drain. Drop the slot so future frames
+                # are recognized as unknown-stream rather than enqueued
+                # into a placeholder that nothing will ever drain.
+                self._ws_streams.pop(stream_id, None)
+                with contextlib.suppress(Exception):
+                    await local_ws.close()
+                return
+
+        # Initialize per-stream stats so close-time diagnostics carry counts
+        # and durations for every stream — not gated on diagnostics_enabled.
+        self._ws_stream_stats[stream_id] = {
+            "opened_monotonic": time.monotonic(),
+            "frames_in": 0,
+            "frames_out": 0,
+            "bytes_in": 0,
+            "bytes_out": 0,
+            "last_in_monotonic": None,
+            "last_out_monotonic": None,
+        }
         logger.info("WS stream opened: stream_id=%s -> %s", stream_id, local_ws_url)
+        self._emit_diagnostic(
+            "ws.open",
+            stream_id=stream_id,
+            local_url=local_ws_url,
+            path=open_req.path,
+        )
 
         # Start a background task that reads from the local WS and sends
         # frames back through the relay tunnel.
@@ -800,14 +954,23 @@ class Tunnel:
         """
         close_code: int = 1000
         close_reason: str = ""
+        exc_type: str | None = None
         try:
             async for frame_data in local_ws:
                 if isinstance(frame_data, bytes):
                     data_str = base64.b64encode(frame_data).decode("ascii")
                     is_binary = True
+                    size = len(frame_data)
                 else:
                     data_str = frame_data
                     is_binary = False
+                    size = len(frame_data)
+
+                stats = self._ws_stream_stats.get(stream_id)
+                if stats is not None:
+                    stats["frames_in"] += 1
+                    stats["bytes_in"] += size
+                    stats["last_in_monotonic"] = time.monotonic()
 
                 frame_payload = WsStreamFrame(
                     stream_id=stream_id,
@@ -827,6 +990,7 @@ class Tunnel:
             close_reason = (exc.reason or getattr(local_ws, "close_reason", "") or "")[
                 :_WS_CLOSE_REASON_MAX
             ]
+            exc_type = type(exc).__name__
             logger.info(
                 "Local WS connection closed: stream_id=%s code=%d reason=%r",
                 stream_id,
@@ -836,6 +1000,7 @@ class Tunnel:
         except Exception as exc:
             close_code = 1011
             close_reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
+            exc_type = type(exc).__name__
             logger.exception("Error reading from local WS: stream_id=%s", stream_id)
         else:
             # async-for ended without an exception (rare path — peer half-closed
@@ -845,8 +1010,10 @@ class Tunnel:
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
+            stats = self._ws_stream_stats.pop(stream_id, None)
+            diagnostics = _build_ws_close_diagnostics(stats, exc_type)
             # Notify the relay that this stream is closed, preserving the
-            # upstream-reported close code and reason for diagnostics.
+            # upstream-reported close code, reason and rich per-stream stats.
             with contextlib.suppress(Exception):
                 close_msg = ProtocolMessage(
                     type=MessageType.WS_CLOSE,
@@ -855,9 +1022,17 @@ class Tunnel:
                         stream_id=stream_id,
                         code=close_code,
                         reason=close_reason,
+                        diagnostics=diagnostics,
                     ).model_dump(),
                 )
                 await relay_ws.send(close_msg.model_dump_json())
+            self._emit_diagnostic(
+                "ws.close",
+                stream_id=stream_id,
+                code=close_code,
+                reason=close_reason,
+                **(diagnostics or {}),
+            )
 
     async def _handle_ws_frame(self, msg: ProtocolMessage) -> None:
         """Forward a WS frame received from the relay to the local WS connection.
@@ -881,9 +1056,17 @@ class Tunnel:
 
         try:
             if frame.is_binary:
-                await target.send(base64.b64decode(frame.data))
+                payload = base64.b64decode(frame.data)
+                await target.send(payload)
+                size = len(payload)
             else:
                 await target.send(frame.data)
+                size = len(frame.data)
+            stats = self._ws_stream_stats.get(frame.stream_id)
+            if stats is not None:
+                stats["frames_out"] += 1
+                stats["bytes_out"] += size
+                stats["last_out_monotonic"] = time.monotonic()
         except websockets.exceptions.ConnectionClosed:
             logger.info("Local WS already closed for stream_id=%s", frame.stream_id)
             async with self._ws_streams_lock:

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 # Protocol version — bump on wire-format changes.
 # Major bump (1.0 → 2.0): breaking change, server must support both during deprecation.
 # Minor bump (1.0 → 1.1): new optional fields/message types, old clients unaffected.
-PROTOCOL_VERSION = "1.3"
+PROTOCOL_VERSION = "1.4"
 
 
 class MessageType(StrEnum):
@@ -60,6 +60,20 @@ class MessageType(StrEnum):
     # human-readable line. Server controls wording so new messages do not
     # require a client release. Unknown codes still render via `message`.
     NOTICE = "notice"
+
+    # Diagnostics — added in PROTOCOL_VERSION 1.4.
+    #
+    # LOG_CONFIG (server → client): adjust client-side log verbosity for
+    # this tunnel and toggle whether the client emits structured DIAGNOSTIC
+    # events back. Lets a server admin enable per-tunnel debug from the
+    # admin panel without touching the homelab.
+    #
+    # DIAGNOSTIC (client → server): generic structured event stream used
+    # for live debugging. The client only emits DIAGNOSTIC events while
+    # the server has explicitly enabled them via LOG_CONFIG, which avoids
+    # tripping the unknown-message-type disconnect on older servers.
+    LOG_CONFIG = "log_config"
+    DIAGNOSTIC = "diagnostic"
 
 
 class ProtocolMessage(BaseModel):
