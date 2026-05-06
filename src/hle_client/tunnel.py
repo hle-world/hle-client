@@ -743,11 +743,21 @@ class Tunnel:
                 await ws.send(close_msg.model_dump_json())
             return
 
-        # Swap the placeholder queue for the live local WS, then drain any
-        # frames that arrived during connect() into the upstream so message
-        # ordering is preserved. If the relay already sent a WS_CLOSE while
-        # we were connecting, the placeholder is gone — abandon the upstream
-        # we just opened rather than leak it.
+        # Drain the buffered frames into the live local WS BEFORE swapping
+        # the slot, all while holding the streams lock. This is critical:
+        # if we swap first then drain, a new frame arriving via
+        # _handle_ws_frame would find `local_ws` in the slot and send
+        # directly — ahead of the still-buffered earlier frames. That
+        # reorders the wire (e.g. `subscribe_*` before `auth`) and many
+        # WS protocols treat any out-of-order frame as a fatal protocol
+        # violation, dropping the TCP without a close frame (code 1006).
+        # Holding the lock through the drain serializes _handle_ws_frame
+        # behind us, so frames keep landing in the queue until we install
+        # the live socket atomically.
+        #
+        # If the relay already sent a WS_CLOSE while we were connecting,
+        # the placeholder is gone — abandon the upstream we just opened
+        # rather than leak it.
         async with self._ws_streams_lock:
             current = self._ws_streams.get(stream_id)
             if current is not pending_queue:
@@ -758,8 +768,8 @@ class Tunnel:
                     stream_id,
                 )
                 return
-            self._ws_streams[stream_id] = local_ws
-        try:
+
+            drained_ok = True
             while True:
                 try:
                     buffered = pending_queue.get_nowait()
@@ -775,9 +785,28 @@ class Tunnel:
                         "Local WS closed while flushing buffered frames: stream_id=%s",
                         stream_id,
                     )
+                    drained_ok = False
                     break
-        except Exception:
-            logger.exception("Error flushing buffered frames to local WS: stream_id=%s", stream_id)
+                except Exception:
+                    logger.exception(
+                        "Error flushing buffered frames to local WS: stream_id=%s",
+                        stream_id,
+                    )
+                    drained_ok = False
+                    break
+
+            if drained_ok:
+                # Atomically install the live socket — _handle_ws_frame can
+                # now send directly since order is guaranteed by the lock.
+                self._ws_streams[stream_id] = local_ws
+            else:
+                # Upstream died mid-drain. Drop the slot so future frames
+                # are recognized as unknown-stream rather than enqueued
+                # into a placeholder that nothing will ever drain.
+                self._ws_streams.pop(stream_id, None)
+                with contextlib.suppress(Exception):
+                    await local_ws.close()
+                return
 
         logger.info("WS stream opened: stream_id=%s -> %s", stream_id, local_ws_url)
 
