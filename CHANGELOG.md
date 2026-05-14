@@ -1,5 +1,9 @@
 # Changelog
 
+## v2605.5 — 2026-05-14
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2604.4 — 2026-04-26
 
 - **Server notices on the CLI** (`PROTOCOL_VERSION` 1.2 → 1.3): the relay can now push informational messages to a connected client, rendered inline with the rest of the `hle expose` output. Wording is server-controlled so new notices do not require a client release. First use case: dashboard "auto-protect" toggles surface immediately on the CLI.
