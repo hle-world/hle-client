@@ -1,5 +1,10 @@
 # Changelog
 
+## v2605.5 — 2026-05-14
+
+- **WebSocket subprotocol negotiation** (`PROTOCOL_VERSION` 1.4 → 1.5): forward `Sec-WebSocket-Protocol` end-to-end so upstreams that require subprotocol negotiation (ttyd, mqtt, graphql-ws, etc.) work through a tunnel. Previously the client stripped the header as if it were hop-by-hop, causing browsers to close the WS with code 1006. New `WS_ACCEPT` message carries the upstream-selected subprotocol back to the relay so it can echo it in the 101 response.
+- Requires server protocol 1.5 to take effect; older relays ignore the new message and fall back to no-subprotocol acceptance (no regression for WS flows that don't negotiate one).
+
 ## v2604.4 — 2026-04-26
 
 - **Server notices on the CLI** (`PROTOCOL_VERSION` 1.2 → 1.3): the relay can now push informational messages to a connected client, rendered inline with the rest of the `hle expose` output. Wording is server-controlled so new notices do not require a client release. First use case: dashboard "auto-protect" toggles surface immediately on the CLI.
