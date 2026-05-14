@@ -163,6 +163,19 @@ class WsStreamOpen(BaseModel):
     headers: dict[str, str] = {}
 
 
+class WsStreamAccept(BaseModel):
+    """Client → server: upstream WS handshake completed, report selected subprotocol.
+
+    Sent immediately after the client successfully opens the WebSocket to the
+    local service. The relay uses ``subprotocol`` when calling ``ws.accept()``
+    on the browser-facing socket so the 101 response echoes the requested
+    Sec-WebSocket-Protocol value. ``None`` means no subprotocol was negotiated.
+    """
+
+    stream_id: str
+    subprotocol: str | None = None
+
+
 class WsStreamFrame(BaseModel):
     """A single WebSocket frame in a proxied stream."""
 

@@ -15,6 +15,7 @@ from hle_common.models import (
     ProxiedHttpRequest,
     WsStreamClose,
     WsStreamFrame,
+    WsStreamOpen,
 )
 from hle_common.protocol import MessageType, ProtocolMessage
 
@@ -651,6 +652,88 @@ class TestTunnelSsrfProtection:
         assert len(sent) == 1
         close_msg = ProtocolMessage.model_validate_json(sent[0])
         assert close_msg.type == MessageType.WS_CLOSE
+
+
+class TestTunnelWsSubprotocolNegotiation:
+    """Verify Sec-WebSocket-Protocol is forwarded to upstream and reported back."""
+
+    async def test_forwards_subprotocols_and_sends_ws_accept(self):
+        tunnel = _tunnel(service_url="http://localhost:7681")
+        tunnel._tunnel_id = "t-subproto"
+
+        mock_relay_ws = AsyncMock()
+        sent: list[str] = []
+        mock_relay_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        mock_local_ws = AsyncMock()
+        mock_local_ws.subprotocol = "tty"
+
+        open_payload = WsStreamOpen(
+            stream_id="s-tty",
+            path="/ws",
+            headers={"Sec-WebSocket-Protocol": "tty, fallback"},
+        )
+        msg = ProtocolMessage(type=MessageType.WS_OPEN, payload=open_payload.model_dump())
+
+        captured: dict = {}
+
+        async def fake_connect(url, **kwargs):
+            captured["url"] = url
+            captured["subprotocols"] = kwargs.get("subprotocols")
+            captured["headers"] = dict(kwargs.get("additional_headers") or {})
+            return mock_local_ws
+
+        with patch("hle_client.tunnel.websockets.connect", side_effect=fake_connect):
+            await tunnel._handle_ws_open(mock_relay_ws, msg)
+
+        # Subprotocols extracted and passed to websockets.connect.
+        assert captured["subprotocols"] == ["tty", "fallback"]
+        # Header removed from forwarded headers (websockets adds it back).
+        assert "sec-websocket-protocol" not in {k.lower() for k in captured["headers"]}
+
+        # WS_ACCEPT sent back with negotiated subprotocol.
+        accept_msgs = [
+            ProtocolMessage.model_validate_json(s)
+            for s in sent
+            if ProtocolMessage.model_validate_json(s).type == MessageType.WS_ACCEPT
+        ]
+        assert len(accept_msgs) == 1
+        assert accept_msgs[0].payload["stream_id"] == "s-tty"
+        assert accept_msgs[0].payload["subprotocol"] == "tty"
+
+    async def test_no_subprotocol_when_header_absent(self):
+        tunnel = _tunnel(service_url="http://localhost:8080")
+        tunnel._tunnel_id = "t-plain"
+
+        mock_relay_ws = AsyncMock()
+        sent: list[str] = []
+        mock_relay_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        mock_local_ws = AsyncMock()
+        mock_local_ws.subprotocol = None
+
+        open_payload = WsStreamOpen(stream_id="s-plain", path="/ws", headers={})
+        msg = ProtocolMessage(type=MessageType.WS_OPEN, payload=open_payload.model_dump())
+
+        captured: dict = {}
+
+        async def fake_connect(url, **kwargs):
+            captured["subprotocols"] = kwargs.get("subprotocols")
+            return mock_local_ws
+
+        with patch("hle_client.tunnel.websockets.connect", side_effect=fake_connect):
+            await tunnel._handle_ws_open(mock_relay_ws, msg)
+
+        # No subprotocols requested → None passed (not []).
+        assert captured["subprotocols"] is None
+
+        accept_msgs = [
+            ProtocolMessage.model_validate_json(s)
+            for s in sent
+            if ProtocolMessage.model_validate_json(s).type == MessageType.WS_ACCEPT
+        ]
+        assert len(accept_msgs) == 1
+        assert accept_msgs[0].payload["subprotocol"] is None
 
 
 class TestTunnelHandleWsFrame:
