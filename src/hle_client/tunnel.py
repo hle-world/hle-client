@@ -37,6 +37,7 @@ from hle_common.models import (
     SpeedTestResult,
     TunnelRegistration,
     TunnelRegistrationResponse,
+    WsStreamAccept,
     WsStreamClose,
     WsStreamFrame,
     WsStreamOpen,
@@ -212,7 +213,10 @@ _WS_HOP_BY_HOP_HEADERS = frozenset(
         "sec-websocket-version",
         "sec-websocket-extensions",
         "sec-websocket-accept",
-        "sec-websocket-protocol",
+        # NOTE: sec-websocket-protocol is end-to-end (RFC 6455 §4.1) and must
+        # be forwarded so upstreams like ttyd/mqtt that mandate subprotocol
+        # negotiation accept the connection. The negotiated value is reported
+        # back to the relay via WS_ACCEPT (protocol 1.5+).
         "transfer-encoding",
         "content-length",
         "keep-alive",
@@ -829,10 +833,23 @@ class Tunnel:
             ws_ssl.check_hostname = False
             ws_ssl.verify_mode = ssl.CERT_NONE
 
+        # Extract the browser-requested subprotocols so websockets propagates
+        # them in the upstream handshake. The header value is a comma-separated
+        # list (RFC 6455 §4.1).
+        requested_subprotocols: list[str] = []
+        for k, v in list(clean_headers.items()):
+            if k.lower() == "sec-websocket-protocol":
+                requested_subprotocols = [p.strip() for p in v.split(",") if p.strip()]
+                # Remove from headers — websockets.connect adds it back from
+                # the `subprotocols` arg and rejects the duplicate.
+                clean_headers.pop(k)
+                break
+
         try:
             local_ws = await websockets.connect(
                 local_ws_url,
                 additional_headers=clean_headers,
+                subprotocols=requested_subprotocols or None,
                 ssl=ws_ssl,
             )
         except Exception as exc:
@@ -850,6 +867,21 @@ class Tunnel:
             with contextlib.suppress(websockets.exceptions.ConnectionClosed):
                 await ws.send(close_msg.model_dump_json())
             return
+
+        # Report the negotiated subprotocol to the relay so it can complete
+        # the browser-facing 101 handshake with the matching Sec-WebSocket-
+        # Protocol header (protocol 1.5+). Older relays ignore unknown
+        # message types, so this is safe to always send.
+        accept_msg = ProtocolMessage(
+            type=MessageType.WS_ACCEPT,
+            tunnel_id=self._tunnel_id,
+            payload=WsStreamAccept(
+                stream_id=stream_id,
+                subprotocol=local_ws.subprotocol,
+            ).model_dump(),
+        )
+        with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+            await ws.send(accept_msg.model_dump_json())
 
         # Drain the buffered frames into the live local WS BEFORE swapping
         # the slot, all while holding the streams lock. This is critical:
