@@ -13,6 +13,7 @@ from hle_common.models import (
     SpeedTestResult,
     TunnelRegistration,
     TunnelRegistrationResponse,
+    WsStreamAccept,
     WsStreamClose,
     WsStreamFrame,
     WsStreamOpen,
@@ -203,6 +204,17 @@ class TestWsStreamOpen:
             headers={"Authorization": "Bearer tok123"},
         )
         assert stream.headers == {"Authorization": "Bearer tok123"}
+
+
+class TestWsStreamAccept:
+    def test_default_no_subprotocol(self):
+        accept = WsStreamAccept(stream_id="s-1")
+        assert accept.stream_id == "s-1"
+        assert accept.subprotocol is None
+
+    def test_with_subprotocol(self):
+        accept = WsStreamAccept(stream_id="s-2", subprotocol="tty")
+        assert accept.subprotocol == "tty"
 
 
 class TestWsStreamFrame:

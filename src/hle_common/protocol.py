@@ -10,7 +10,7 @@ from pydantic import BaseModel
 # Protocol version — bump on wire-format changes.
 # Major bump (1.0 → 2.0): breaking change, server must support both during deprecation.
 # Minor bump (1.0 → 1.1): new optional fields/message types, old clients unaffected.
-PROTOCOL_VERSION = "1.4"
+PROTOCOL_VERSION = "1.5"
 
 
 class MessageType(StrEnum):
@@ -42,6 +42,11 @@ class MessageType(StrEnum):
     WS_OPEN = "ws_open"
     WS_CLOSE = "ws_close"
     WS_FRAME = "ws_frame"
+    # WS_ACCEPT (client → server, added in PROTOCOL_VERSION 1.5): reports
+    # the subprotocol negotiated with the upstream service so the relay can
+    # echo it in the 101 response to the browser. Required for upstreams
+    # that mandate Sec-WebSocket-Protocol negotiation (ttyd, mqtt, etc.).
+    WS_ACCEPT = "ws_accept"
 
     # Webhook
     WEBHOOK_INCOMING = "webhook_incoming"

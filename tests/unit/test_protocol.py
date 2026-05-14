@@ -14,7 +14,7 @@ from hle_common.protocol import (
 
 class TestProtocolVersion:
     def test_protocol_version_exists(self):
-        assert PROTOCOL_VERSION == "1.4"
+        assert PROTOCOL_VERSION == "1.5"
 
     def test_protocol_version_is_string(self):
         assert isinstance(PROTOCOL_VERSION, str)
@@ -46,6 +46,7 @@ class TestMessageType:
             "ws_open",
             "ws_close",
             "ws_frame",
+            "ws_accept",
             "webhook_incoming",
             "webhook_response",
             "speed_test_data",
