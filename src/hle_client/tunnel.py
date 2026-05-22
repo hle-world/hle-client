@@ -851,6 +851,14 @@ class Tunnel:
                 additional_headers=clean_headers,
                 subprotocols=requested_subprotocols or None,
                 ssl=ws_ssl,
+                # Match the control-plane limit. The library default is 1 MB,
+                # which breaks upstreams that send single frames bigger than
+                # that — e.g. Home Assistant's config/entity_registry/list
+                # response easily exceeds 1 MB on a populated install. The
+                # relay-side WS accepts up to WS_MAX_MESSAGE_SIZE; mirroring
+                # it here means an oversized frame fails predictably instead
+                # of silently 1006-closing the browser's WebSocket.
+                max_size=WS_MAX_MESSAGE_SIZE,
             )
         except Exception as exc:
             logger.exception("Failed to open local WS connection to %s", local_ws_url)
