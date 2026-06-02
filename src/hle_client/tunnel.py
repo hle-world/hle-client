@@ -159,6 +159,8 @@ class TunnelConfig:
     """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
     webhook_path: str | None = None
     """When set, only forward requests matching this path prefix (webhook mode)."""
+    zone: str | None = None
+    """Custom-zone domain to publish under (None = base domain)."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -415,6 +417,7 @@ class Tunnel:
                 capabilities=[CAPABILITY_CHUNKED_RESPONSE],
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
+                zone=self.config.zone,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,
