@@ -221,13 +221,17 @@ class AgentClient:
                 self._start_endpoint(spec)
 
     def _start_endpoint(self, spec: EndpointSpec) -> None:
+        # Data-plane credential: an explicit key from the welcome if the server
+        # sent one, otherwise the agent's own token (the server accepts hlea_
+        # tokens for tunnel registration). One enrollment, one secret.
+        data_key = self._api_key or self._token
         cfg = TunnelConfig(
             service_url=spec.service_url,
             relay_host=self._relay_host,
             relay_port=self._relay_port,
             auth_mode=spec.auth_mode,
             service_label=spec.label,
-            api_key=self._api_key,
+            api_key=data_key,
             websocket_enabled=spec.websocket_enabled,
             webhook_path=spec.webhook_path,
             zone=spec.zone,
