@@ -12,6 +12,13 @@ import click
 from rich.console import Console
 
 from hle_client import __version__
+from hle_client.agent import (
+    AGENT_TOKEN_PREFIX,
+    AgentClient,
+    load_agent_token,
+    remove_agent_token,
+    save_agent_token,
+)
 from hle_client.config_cmd import config as config_group
 from hle_client.tunnel import (
     Tunnel,
@@ -315,6 +322,80 @@ def logout() -> None:
 
 
 main.add_command(config_group, name="config")
+
+
+@main.group()
+def agent() -> None:
+    """Run a multi-tunnel agent controlled from the dashboard."""
+
+
+@agent.command()
+@click.argument("token", required=False)
+def enroll(token: str | None) -> None:
+    """Save an agent enrollment token (created in the dashboard)."""
+    if token is None:
+        console.print(
+            "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
+        )
+        token = click.prompt("Agent token", hide_input=True)
+
+    if not token.startswith(AGENT_TOKEN_PREFIX):
+        console.print(
+            f"[red]Error:[/red] Invalid agent token. Expected one starting with "
+            f"'{AGENT_TOKEN_PREFIX}'."
+        )
+        raise SystemExit(1)
+
+    save_agent_token(token)
+    console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
+    console.print("Start the agent with: [cyan]hle agent run[/cyan]")
+
+
+@agent.command()
+@click.option(
+    "--token", default=None, envvar="HLE_AGENT_TOKEN", help="Agent token (overrides saved)"
+)
+@click.option("--relay-host", default="hle.world", help="Relay host")
+@click.option("--relay-port", default=443, type=int, help="Relay port")
+def run(token: str | None, relay_host: str, relay_port: int) -> None:
+    """Run the agent: connect, fetch endpoints from the dashboard, and reconcile."""
+    token = token or load_agent_token()
+    if not token:
+        console.print("[red]Error:[/red] No agent token. Run [cyan]hle agent enroll[/cyan] first.")
+        raise SystemExit(1)
+
+    client = AgentClient(token, relay_host=relay_host, relay_port=relay_port)
+    console.print(f"[green]Agent running[/green] — control: {client.control_uri}")
+    console.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
+    try:
+        asyncio.run(client.run())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Agent stopped.[/yellow]")
+
+
+@agent.command("status")
+def agent_status() -> None:
+    """Show whether an agent token is configured."""
+    env_token = os.environ.get("HLE_AGENT_TOKEN")
+    if env_token:
+        console.print("Agent token source: [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
+        return
+    token = load_agent_token()
+    if token:
+        masked = f"{token[:9]}...{token[-4:]}" if len(token) > 13 else token
+        console.print("Agent token source: [cyan]~/.config/hle/agent.toml[/cyan]")
+        console.print(f"Token: [dim]{masked}[/dim]")
+    else:
+        console.print("[dim]No agent token configured. Run 'hle agent enroll'.[/dim]")
+
+
+@agent.command("logout")
+def agent_logout() -> None:
+    """Remove the saved agent token."""
+    if remove_agent_token():
+        console.print("[green]Agent token removed[/green] from ~/.config/hle/agent.toml")
+    else:
+        console.print("[dim]No agent token saved.[/dim]")
 
 
 if __name__ == "__main__":

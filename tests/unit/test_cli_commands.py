@@ -450,6 +450,47 @@ class TestAuthLogout:
         assert "No API key saved" in result.output
 
 
+class TestAgentCli:
+    def test_enroll_saves_token(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        cfg = tmp_path / "agent.toml"
+        with patch("hle_client.agent.AGENT_CONFIG_PATH", cfg):
+            result = runner.invoke(main, ["agent", "enroll", "hlea_" + "a" * 40])
+        assert result.exit_code == 0
+        assert "Enrolled" in result.output
+        assert "token" in cfg.read_text()
+
+    def test_enroll_rejects_bad_token(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["agent", "enroll", "hle_notanagent"])
+        assert result.exit_code == 1
+        assert "Invalid agent token" in result.output
+
+    def test_status_no_token(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        cfg = tmp_path / "missing.toml"
+        with patch("hle_client.agent.AGENT_CONFIG_PATH", cfg):
+            result = runner.invoke(main, ["agent", "status"])
+        assert result.exit_code == 0
+        assert "No agent token" in result.output
+
+    def test_run_requires_token(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        cfg = tmp_path / "missing.toml"
+        with patch("hle_client.agent.AGENT_CONFIG_PATH", cfg):
+            result = runner.invoke(main, ["agent", "run"])
+        assert result.exit_code == 1
+        assert "No agent token" in result.output
+
+    def test_run_invokes_client(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        # Close the coroutine instead of awaiting it (avoids "never awaited" warning).
+        with patch("hle_client.cli.asyncio.run", side_effect=lambda coro: coro.close()) as mock_run:
+            result = runner.invoke(main, ["agent", "run", "--token", "hlea_" + "b" * 40])
+        assert result.exit_code == 0
+        assert mock_run.called
+
+
 class TestExposeNoAutoSave:
     def test_expose_does_not_auto_save(self, tmp_path: Path) -> None:
         runner = CliRunner()
