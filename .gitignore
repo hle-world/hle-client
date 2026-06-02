@@ -32,3 +32,8 @@ htmlcov/
 
 # Distribution
 *.tar.gz
+
+# local env / lockfile (not tracked)
+.envrc
+.direnv/
+uv.lock
