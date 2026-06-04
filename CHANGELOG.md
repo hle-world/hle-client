@@ -1,5 +1,9 @@
 # Changelog
 
+## v2606.1 — 2026-06-04
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2605.5 — 2026-05-14
 
 - **WebSocket subprotocol negotiation** (`PROTOCOL_VERSION` 1.4 → 1.5): forward `Sec-WebSocket-Protocol` end-to-end so upstreams that require subprotocol negotiation (ttyd, mqtt, graphql-ws, etc.) work through a tunnel. Previously the client stripped the header as if it were hop-by-hop, causing browsers to close the WS with code 1006. New `WS_ACCEPT` message carries the upstream-selected subprotocol back to the relay so it can echo it in the 101 response.
