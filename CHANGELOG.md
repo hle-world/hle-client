@@ -1,5 +1,18 @@
 # Changelog
 
+## v2606.1 — 2026-06-04
+
+### Added
+- **`hle agent`** — run one agent that hosts many tunnels, managed from the dashboard.
+  - `hle agent enroll <token>` — save an agent enrollment token (created in the dashboard).
+  - `hle agent run` — connect to the server, fetch the desired endpoints, and reconcile a
+    pool of tunnels live (add/remove/change endpoints from the dashboard with no restart).
+  - `hle agent status` / `hle agent logout`.
+  - Shared agent control protocol in `hle_common.agent_protocol`.
+- `TunnelConfig.zone` — publish a tunnel under a custom zone (not just the base domain).
+
+Requires a server with the agent control plane enabled (`HLE_AGENTS_ENABLED`).
+
 ## v2605.5 — 2026-05-14
 
 - **WebSocket subprotocol negotiation** (`PROTOCOL_VERSION` 1.4 → 1.5): forward `Sec-WebSocket-Protocol` end-to-end so upstreams that require subprotocol negotiation (ttyd, mqtt, graphql-ws, etc.) work through a tunnel. Previously the client stripped the header as if it were hop-by-hop, causing browsers to close the WS with code 1006. New `WS_ACCEPT` message carries the upstream-selected subprotocol back to the relay so it can echo it in the 101 response.
