@@ -2,7 +2,16 @@
 
 ## v2606.1 — 2026-06-04
 
-<!-- TODO: Fill in release notes before merging -->
+### Added
+- **`hle agent`** — run one agent that hosts many tunnels, managed from the dashboard.
+  - `hle agent enroll <token>` — save an agent enrollment token (created in the dashboard).
+  - `hle agent run` — connect to the server, fetch the desired endpoints, and reconcile a
+    pool of tunnels live (add/remove/change endpoints from the dashboard with no restart).
+  - `hle agent status` / `hle agent logout`.
+  - Shared agent control protocol in `hle_common.agent_protocol`.
+- `TunnelConfig.zone` — publish a tunnel under a custom zone (not just the base domain).
+
+Requires a server with the agent control plane enabled (`HLE_AGENTS_ENABLED`).
 
 ## v2605.5 — 2026-05-14
 
