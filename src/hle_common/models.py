@@ -21,6 +21,12 @@ CAPABILITY_CHUNKED_RESPONSE = "chunked_response"
 # Validation patterns
 _SERVICE_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
+# Guardrails for the generic `options` passthrough bag.
+_MAX_OPTIONS = 32
+_MAX_OPTION_KEY_LEN = 64
+_MAX_OPTION_VALUE_LEN = 1024
+_OPTION_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+
 
 class TunnelRegistration(BaseModel):
     """Payload the client sends when requesting a new tunnel."""
@@ -39,6 +45,12 @@ class TunnelRegistration(BaseModel):
     managed_by: str | None = None  # e.g. "hle-operator" for K8s operator tunnels
     webhook_path: str | None = None  # e.g. "/webhook/github" — restricts to this path prefix
     apex: bool = False  # serve at the bare zone root (e.g. t00t.us); requires `zone`
+    # Generic, server-interpreted feature parameters. The client transports
+    # these verbatim (e.g. from `--option key=value`) without understanding
+    # them; the server defines the vocabulary and validates. This lets the
+    # server gain features without requiring a client release. Client→server
+    # intent only — the client must never act on server-returned config.
+    options: dict[str, str] = {}
 
     @field_validator("webhook_path")
     @classmethod
@@ -78,6 +90,24 @@ class TunnelRegistration(BaseModel):
             v = v[:63].rstrip("-")
         if not _SERVICE_LABEL_RE.match(v):
             raise ValueError(f"service_label '{v}' does not match required format")
+        return v
+
+    @field_validator("options")
+    @classmethod
+    def validate_options(cls, v: dict[str, str]) -> dict[str, str]:
+        # Transport-level guardrails only — the server owns the vocabulary and
+        # rejects keys it doesn't recognize. This keeps a malicious or buggy
+        # client from flooding the bag, without the contract needing to know
+        # which keys exist.
+        if len(v) > _MAX_OPTIONS:
+            raise ValueError(f"too many options (max {_MAX_OPTIONS})")
+        for key, val in v.items():
+            if not isinstance(key, str) or not isinstance(val, str):
+                raise ValueError("option keys and values must be strings")
+            if not _OPTION_KEY_RE.match(key) or len(key) > _MAX_OPTION_KEY_LEN:
+                raise ValueError(f"invalid option key: {key!r}")
+            if len(val) > _MAX_OPTION_VALUE_LEN:
+                raise ValueError(f"option {key!r} value too long (max {_MAX_OPTION_VALUE_LEN})")
         return v
 
     @model_validator(mode="after")

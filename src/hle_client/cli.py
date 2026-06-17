@@ -84,6 +84,14 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     help="Serve at the bare zone root (e.g. https://t00t.us) instead of a subdomain.",
 )
 @click.option(
+    "--option",
+    "options",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Generic server-interpreted parameter, passed through verbatim. "
+    "Repeatable. The server defines which keys are valid. Example: --option zone=t00t.us",
+)
+@click.option(
     "--api-key",
     default=None,
     envvar="HLE_API_KEY",
@@ -125,6 +133,7 @@ def expose(
     service_label: str | None,
     zone: str | None,
     apex: bool,
+    options: tuple[str, ...],
     api_key: str | None,
     websocket: bool,
     verify_ssl: bool,
@@ -133,6 +142,15 @@ def expose(
     allow: tuple[str, ...],
 ) -> None:
     """Expose a local service to the internet."""
+    # Parse --option KEY=VALUE pairs into a passthrough dict.
+    options_dict: dict[str, str] = {}
+    for opt in options:
+        key, sep, val = opt.partition("=")
+        if not sep or not key:
+            console.print(f"[red]Error:[/red] --option must be KEY=VALUE (got '{opt}').")
+            raise SystemExit(1)
+        options_dict[key.strip()] = val
+
     # Validate apex / label / zone combination up front.
     if apex and not zone:
         console.print("[red]Error:[/red] --apex requires --zone (e.g. --zone t00t.us).")
@@ -155,6 +173,7 @@ def expose(
         service_label=service_label,
         zone=zone,
         apex=apex,
+        options=options_dict,
         api_key=api_key,
         websocket_enabled=websocket,
         verify_ssl=verify_ssl,
