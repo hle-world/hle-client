@@ -161,6 +161,10 @@ class TunnelConfig:
     """When set, only forward requests matching this path prefix (webhook mode)."""
     zone: str | None = None
     """Custom-zone domain to publish under (None = base domain)."""
+    apex: bool = False
+    """Serve at the bare zone root (e.g. t00t.us) instead of a subdomain. Requires `zone`."""
+    options: dict[str, str] = field(default_factory=dict)
+    """Generic server-interpreted feature parameters, passed through verbatim."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -418,6 +422,8 @@ class Tunnel:
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
                 zone=self.config.zone,
+                apex=self.config.apex,
+                options=self.config.options,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,

@@ -71,6 +71,47 @@ class TestTunnelRegistration:
         with pytest.raises(ValueError):
             TunnelRegistration(service_url="http://localhost:5000")
 
+    def test_label_optional_when_apex(self):
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_abc123",
+            apex=True,
+        )
+        assert reg.service_label is None
+        assert reg.apex is True
+
+    def test_label_required_without_apex(self):
+        with pytest.raises(ValueError, match="service_label is required"):
+            TunnelRegistration(service_url="http://localhost:5000", api_key="hle_abc123")
+
+    def test_options_passthrough(self):
+        reg = TunnelRegistration(
+            service_url="http://localhost:5000",
+            api_key="hle_abc123",
+            service_label="ha",
+            options={"zone": "t00t.us", "geo_region": "eu"},
+        )
+        assert reg.options["zone"] == "t00t.us"
+        assert reg.options["geo_region"] == "eu"
+
+    def test_options_reject_invalid_key(self):
+        with pytest.raises(ValueError, match="invalid option key"):
+            TunnelRegistration(
+                service_url="http://localhost:5000",
+                api_key="hle_abc123",
+                service_label="ha",
+                options={"Bad Key!": "x"},
+            )
+
+    def test_options_reject_too_many(self):
+        with pytest.raises(ValueError, match="too many options"):
+            TunnelRegistration(
+                service_url="http://localhost:5000",
+                api_key="hle_abc123",
+                service_label="ha",
+                options={f"k{i}": "v" for i in range(40)},
+            )
+
     def test_tunnel_registration_service_label_sanitization(self):
         """Labels are auto-sanitized instead of rejected."""
         # Underscores → hyphens
