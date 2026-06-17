@@ -161,6 +161,8 @@ class TunnelConfig:
     """When set, only forward requests matching this path prefix (webhook mode)."""
     zone: str | None = None
     """Custom-zone domain to publish under (None = base domain)."""
+    apex: bool = False
+    """Serve at the bare zone root (e.g. t00t.us) instead of a subdomain. Requires `zone`."""
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -406,9 +408,12 @@ class Tunnel:
             self._ws = ws
 
             # --- Registration handshake ---
+            # Apex tunnels serve at the bare zone root, so the label is unused
+            # for routing — but the wire model still requires a non-empty value.
+            service_label = self.config.service_label or ("apex" if self.config.apex else None)
             registration = TunnelRegistration(
                 service_url=self.config.service_url,
-                service_label=self.config.service_label,
+                service_label=service_label,
                 api_key=api_key,
                 client_version=__version__,
                 protocol_version=PROTOCOL_VERSION,
@@ -418,6 +423,7 @@ class Tunnel:
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
                 zone=self.config.zone,
+                apex=self.config.apex,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,

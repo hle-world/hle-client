@@ -36,6 +36,7 @@ class TunnelRegistration(BaseModel):
     zone: str | None = None  # custom zone domain for enterprise routing
     managed_by: str | None = None  # e.g. "hle-operator" for K8s operator tunnels
     webhook_path: str | None = None  # e.g. "/webhook/github" — restricts to this path prefix
+    apex: bool = False  # serve at the bare zone root (e.g. t00t.us); requires `zone`
 
     @field_validator("webhook_path")
     @classmethod

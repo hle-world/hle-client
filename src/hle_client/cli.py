@@ -66,7 +66,23 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
 @main.command()
 @click.option("--service", required=True, help="Local service URL (e.g. http://localhost:8080)")
 @click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
-@click.option("--label", "service_label", required=True, help="Service label (e.g. ha, jellyfin)")
+@click.option(
+    "--label",
+    "service_label",
+    default=None,
+    help="Service label (e.g. ha, jellyfin). Required unless --apex is set.",
+)
+@click.option(
+    "--zone",
+    default=None,
+    help="Custom zone to publish under (e.g. t00t.us). Required for --apex.",
+)
+@click.option(
+    "--apex",
+    is_flag=True,
+    default=False,
+    help="Serve at the bare zone root (e.g. https://t00t.us) instead of a subdomain.",
+)
 @click.option(
     "--api-key",
     default=None,
@@ -107,6 +123,8 @@ def expose(
     service: str,
     auth: str,
     service_label: str | None,
+    zone: str | None,
+    apex: bool,
     api_key: str | None,
     websocket: bool,
     verify_ssl: bool,
@@ -115,6 +133,14 @@ def expose(
     allow: tuple[str, ...],
 ) -> None:
     """Expose a local service to the internet."""
+    # Validate apex / label / zone combination up front.
+    if apex and not zone:
+        console.print("[red]Error:[/red] --apex requires --zone (e.g. --zone t00t.us).")
+        raise SystemExit(1)
+    if not apex and not service_label:
+        console.print("[red]Error:[/red] --label is required (or use --apex with --zone).")
+        raise SystemExit(1)
+
     upstream_auth_tuple: tuple[str, str] | None = None
     if upstream_basic_auth:
         if ":" not in upstream_basic_auth:
@@ -127,6 +153,8 @@ def expose(
         service_url=service,
         auth_mode=auth,
         service_label=service_label,
+        zone=zone,
+        apex=apex,
         api_key=api_key,
         websocket_enabled=websocket,
         verify_ssl=verify_ssl,
