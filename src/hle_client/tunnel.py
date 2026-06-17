@@ -408,12 +408,9 @@ class Tunnel:
             self._ws = ws
 
             # --- Registration handshake ---
-            # Apex tunnels serve at the bare zone root, so the label is unused
-            # for routing — but the wire model still requires a non-empty value.
-            service_label = self.config.service_label or ("apex" if self.config.apex else None)
             registration = TunnelRegistration(
                 service_url=self.config.service_url,
-                service_label=service_label,
+                service_label=self.config.service_label,
                 api_key=api_key,
                 client_version=__version__,
                 protocol_version=PROTOCOL_VERSION,

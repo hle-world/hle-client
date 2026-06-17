@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Tunnel registration (client -> server -> client)
@@ -26,7 +26,9 @@ class TunnelRegistration(BaseModel):
     """Payload the client sends when requesting a new tunnel."""
 
     service_url: str
-    service_label: str  # required — user-chosen name, e.g. "ha", "jellyfin"
+    # User-chosen name, e.g. "ha", "jellyfin". Optional only when `apex` is set
+    # (an apex tunnel serves at the bare zone root and has no label).
+    service_label: str | None = None
     api_key: str  # required — hle_<32 hex chars>
     client_version: str | None = None
     protocol_version: str | None = None  # sent by clients >= 0.5.0
@@ -58,7 +60,11 @@ class TunnelRegistration(BaseModel):
 
     @field_validator("service_label")
     @classmethod
-    def validate_service_label(cls, v: str) -> str:
+    def validate_service_label(cls, v: str | None) -> str | None:
+        # Empty/None is allowed here; the apex-vs-label rule is enforced in the
+        # model validator below so the wire contract states the rule explicitly.
+        if v is None:
+            return None
         # Auto-sanitize: lowercase, replace common separators with
         # hyphens, strip invalid characters, collapse runs.
         v = v.lower()
@@ -67,12 +73,20 @@ class TunnelRegistration(BaseModel):
         v = re.sub(r"-{2,}", "-", v)
         v = v.strip("-")
         if not v:
-            raise ValueError("service_label is required and must contain valid characters")
+            return None
         if len(v) > 63:
             v = v[:63].rstrip("-")
         if not _SERVICE_LABEL_RE.match(v):
             raise ValueError(f"service_label '{v}' does not match required format")
         return v
+
+    @model_validator(mode="after")
+    def validate_label_or_apex(self) -> TunnelRegistration:
+        # A tunnel is addressed either by a label (a subdomain) or by the apex.
+        # Exactly the absence of a label requires apex to be set.
+        if not self.service_label and not self.apex:
+            raise ValueError("service_label is required unless apex is set")
+        return self
 
 
 class TunnelRegistrationResponse(BaseModel):
