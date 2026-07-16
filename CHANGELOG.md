@@ -1,5 +1,18 @@
 # Changelog
 
+## v2607.1 — 2026-07-16
+
+### Fixed
+- **Scheme-less service URLs** (`hle expose --service localhost:9998`) registered the
+  tunnel successfully but failed every forwarded request with
+  `UnsupportedProtocol` — visitors saw "Bad Gateway: unexpected error" while the
+  tunnel looked healthy. Service URLs without a scheme are now normalized to
+  `http://` across all entry points (expose, forward, agent endpoints).
+- The catch-all 502 response now names the exception class
+  (`Bad Gateway: unexpected error (UnsupportedProtocol)`) so unknown failure
+  modes are diagnosable from the relay side.
+- `install.sh`: repaired a `2>&1` redirect clobbered by an earlier version bump.
+
 ## v2606.1 — 2026-06-04
 
 ### Added
