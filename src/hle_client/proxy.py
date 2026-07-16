@@ -261,7 +261,11 @@ class LocalProxy:
             )
         except httpx.HTTPError as exc:
             logger.error("HTTP error forwarding %s %s: %s", method, url, exc)
-            return 502, {"content-type": "text/plain"}, b"Bad Gateway: unexpected error"
+            # Include the exception class so the failure mode is identifiable
+            # from the relay side (e.g. via tunnel debug capture) without
+            # leaking error details.
+            reason = f"Bad Gateway: unexpected error ({exc.__class__.__name__})"
+            return 502, {"content-type": "text/plain"}, reason.encode()
 
     async def stream_http(
         self,

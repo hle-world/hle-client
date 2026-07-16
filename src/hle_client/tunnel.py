@@ -166,6 +166,15 @@ class TunnelConfig:
     options: dict[str, str] = field(default_factory=dict)
     """Generic server-interpreted feature parameters, passed through verbatim."""
 
+    def __post_init__(self) -> None:
+        # A scheme-less service URL ("localhost:9998") makes httpx treat
+        # "localhost" as the protocol and fail every forwarded request with
+        # UnsupportedProtocol ("Bad Gateway: unexpected error" for visitors,
+        # while the tunnel itself registers fine) — normalize to http:// here
+        # so every entry point (expose, forward, agent endpoints) is covered.
+        if self.service_url and "://" not in self.service_url:
+            self.service_url = f"http://{self.service_url}"
+
 
 # Hard limits to protect against a malicious or compromised relay server.
 WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB — control-plane WebSocket message limit
