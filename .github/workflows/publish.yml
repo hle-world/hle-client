@@ -51,6 +51,29 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: twine upload dist/*
 
+      # PyPI upload succeeding does NOT mean the version is installable yet —
+      # the CDN/index takes a bit to propagate. Downstream repos (hle-webapp →
+      # ha-addon, Homebrew) pip-install this exact version immediately on the
+      # dispatch and fail if it isn't there yet, then never retry. Block the
+      # job here until the version is actually installable so every downstream
+      # only fires once PyPI serves it.
+      - name: Wait for PyPI propagation
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          echo "Waiting for hle-client==${VERSION} to be installable from PyPI..."
+          for i in $(seq 1 60); do
+            if pip download --no-deps --dest /tmp/pypi-check "hle-client==${VERSION}" >/dev/null 2>&1; then
+              echo "hle-client==${VERSION} installable after attempt ${i}."
+              exit 0
+            fi
+            echo "  not on PyPI yet (attempt ${i}/60); sleeping 15s..."
+            sleep 15
+          done
+          echo "::error::hle-client==${VERSION} did not become installable within ~15 minutes"
+          exit 1
+
   notify-operator:
     name: Notify hle-operator
     needs: publish
