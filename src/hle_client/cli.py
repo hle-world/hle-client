@@ -20,6 +20,7 @@ from hle_client.agent import (
     save_agent_token,
 )
 from hle_client.config_cmd import config as config_group
+from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import (
     Tunnel,
     TunnelConfig,
@@ -28,6 +29,7 @@ from hle_client.tunnel import (
     _remove_api_key,
     _save_api_key,
 )
+from hle_client.update_cmd import update as update_command
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -369,6 +371,8 @@ def logout() -> None:
 
 
 main.add_command(config_group, name="config")
+main.add_command(update_command, name="update")
+main.add_command(service_group, name="service")
 
 
 @main.group()

@@ -84,6 +84,43 @@ Options:
 - `--forward-host` — Forward the browser's Host header to the local service
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
 
+### `hle update`
+
+Update the client to the latest version, regardless of how it was installed
+(pipx, uv tool, the installer's venv, or pip). It detects the install method
+and runs the right upgrade.
+
+```bash
+hle update            # upgrade to the latest release
+hle update --check    # just report current vs. latest, don't change anything
+hle update --version 2607.2   # pin an exact version
+```
+
+After updating, restart any running tunnels (e.g. `systemctl restart hle-<label>`)
+so they pick up the new version.
+
+### `hle service`
+
+Install and manage a systemd service for a tunnel, so it survives reboots and
+restarts on failure. Linux/systemd only. The API key is read at runtime from
+`~/.config/hle/config.toml` (or `HLE_API_KEY`) and is never written into the
+unit file.
+
+```bash
+# Install + start a system service (writes /etc/systemd/system/hle-tv.service)
+sudo hle service install --service http://localhost:9998 --label tv
+
+# Custom zone / extra expose options are supported
+sudo hle service install --service https://192.168.2.200:8006 --label prox --zone pr.t00t.us
+
+# Per-user service (no sudo; writes ~/.config/systemd/user/hle-tv.service)
+hle service install --user --service http://localhost:9998 --label tv
+
+hle service status --label tv       # systemctl status
+hle service list                    # list all hle-* services
+hle service uninstall --label tv    # stop, disable, remove the unit
+```
+
 ### `hle webhook`
 
 Forward incoming webhooks to a local service.
