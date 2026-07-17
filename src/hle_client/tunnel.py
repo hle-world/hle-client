@@ -183,6 +183,21 @@ MAX_WS_STREAMS = 100
 _WS_CLOSE_REASON_MAX = 123
 
 
+def _build_local_ws_url(service_url: str, path: str) -> str:
+    """Join the local service URL and a WS path into a ``ws(s)://`` URL.
+
+    ``path`` always starts with ``/``. The base has any trailing slash
+    stripped first, otherwise a service URL like ``https://host:8006/`` would
+    yield a doubled slash (``wss://host:8006//api2/...``). The HTTP path is
+    unaffected (httpx normalizes ``base_url`` + path), but ``websockets``
+    does not, and strict upstreams reject the ``//`` — e.g. Proxmox's
+    vncwebsocket answers HTTP 500, breaking every VM/CT console over the
+    tunnel.
+    """
+    base = service_url.replace("http://", "ws://").replace("https://", "wss://")
+    return f"{base.rstrip('/')}{path}"
+
+
 def _build_ws_close_diagnostics(
     stats: dict[str, Any] | None, exc_type: str | None
 ) -> dict[str, Any] | None:
@@ -814,11 +829,9 @@ class Tunnel:
                 return
             self._ws_streams[stream_id] = pending_queue
 
-        # Build the local WS URL.
-        local_base = self.config.service_url.replace("http://", "ws://").replace(
-            "https://", "wss://"
-        )
-        local_ws_url = f"{local_base}{open_req.path}"
+        # Build the local WS URL (see _build_local_ws_url for the trailing-
+        # slash handling that keeps strict upstreams like Proxmox happy).
+        local_ws_url = _build_local_ws_url(self.config.service_url, open_req.path)
 
         # Strip WebSocket handshake and hop-by-hop headers — these belong to
         # the browser↔relay connection, not the client↔local service connection.
