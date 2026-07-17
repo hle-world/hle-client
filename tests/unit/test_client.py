@@ -448,6 +448,49 @@ class TestTunnelRegistrationHandshake:
                 await tunnel._connect_once()
             await tunnel._proxy.stop()
 
+    async def test_ping_before_ack_is_tolerated(self):
+        # Regression: a keepalive PING arriving before TUNNEL_ACK (common right
+        # after a reconnect) must not tear down the fresh tunnel. The client
+        # should PONG and keep waiting for the ACK.
+        tunnel = _tunnel(api_key="hle_testkey_ping_ack", service_label="myapp")
+
+        ping = ProtocolMessage(type=MessageType.PING, tunnel_id="t-ping-1")
+        ack = ProtocolMessage(
+            type=MessageType.TUNNEL_ACK,
+            payload={
+                "tunnel_id": "t-ping-1",
+                "subdomain": "myapp-abc",
+                "public_url": "https://myapp-abc.hle.world",
+                "websocket_enabled": True,
+                "user_code": "abc",
+                "service_label": "myapp",
+            },
+        )
+        mock_ws = AsyncMock()
+        sent_messages: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent_messages.append(m))
+        mock_ws.recv = AsyncMock(side_effect=[ping.model_dump_json(), ack.model_dump_json()])
+        mock_ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("hle_client.tunnel.websockets.connect", return_value=mock_ctx):
+            await tunnel._proxy.start()
+            await tunnel._connect_once()
+            await tunnel._proxy.stop()
+
+        # Registered successfully despite the pre-ACK PING.
+        assert tunnel._tunnel_id == "t-ping-1"
+        # A PONG was sent in response to the PING.
+        pongs = [
+            m
+            for m in sent_messages
+            if ProtocolMessage.model_validate_json(m).type == MessageType.PONG
+        ]
+        assert len(pongs) == 1
+
 
 class TestTunnelHandleHttpRequest:
     """Test _handle_http_request: forwards to proxy, sends response back."""
@@ -780,6 +823,29 @@ class TestTunnelHandleWsFrame:
             payload=frame.model_dump(),
         )
         await tunnel._handle_ws_frame(msg)  # no error
+
+    async def test_recently_closed_stream_frame_is_demoted(self, caplog):
+        # A frame trailing a failed/closed local WS should log at debug, not
+        # WARNING (expected race), while a truly unknown id still warns.
+        import logging
+
+        tunnel = _tunnel()
+        tunnel._recent_closed_streams.append("recent")
+
+        recent = WsStreamFrame(stream_id="recent", data="x", is_binary=False)
+        ghost = WsStreamFrame(stream_id="ghost", data="x", is_binary=False)
+
+        with caplog.at_level(logging.WARNING, logger="hle_client.tunnel"):
+            await tunnel._handle_ws_frame(
+                ProtocolMessage(type=MessageType.WS_FRAME, payload=recent.model_dump())
+            )
+        assert not any("recent" in r.message for r in caplog.records)
+
+        with caplog.at_level(logging.WARNING, logger="hle_client.tunnel"):
+            await tunnel._handle_ws_frame(
+                ProtocolMessage(type=MessageType.WS_FRAME, payload=ghost.model_dump())
+            )
+        assert any("unknown stream_id=ghost" in r.message for r in caplog.records)
 
     async def test_closed_connection_removes_stream(self):
         import websockets.exceptions
