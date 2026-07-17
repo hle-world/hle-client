@@ -431,6 +431,12 @@ class Tunnel:
         default_factory=dict, init=False, repr=False
     )
     _ws_streams_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # Recently removed/failed stream ids. A WS_FRAME can arrive from the relay
+    # just after a local WS failed to open or was closed (the browser's queued
+    # frames race the teardown); demote those to debug instead of WARNING.
+    _recent_closed_streams: deque[str] = field(
+        default_factory=lambda: deque(maxlen=512), init=False, repr=False
+    )
     # Per-stream lifecycle stats — populated for every stream regardless of
     # whether server-side diagnostics are enabled. Attached to every
     # WsStreamClose so the relay sees rich close info even with diagnostics
@@ -584,7 +590,15 @@ class Tunnel:
         relay_uri = await self._discover_relay_uri(api_key)
         logger.info("Connecting to relay at %s", relay_uri)
 
-        async with websockets.connect(relay_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
+        # Relaxed keepalive: a large/slow tunnel body over the single control
+        # WS can delay a pong; the default 20s ping timeout would sever the
+        # tunnel (1011). App-level PING/PONG still tracks liveness.
+        async with websockets.connect(
+            relay_uri,
+            max_size=WS_MAX_MESSAGE_SIZE,
+            ping_interval=30,
+            ping_timeout=120,
+        ) as ws:
             self._ws = ws
 
             # --- Registration handshake ---
@@ -609,10 +623,23 @@ class Tunnel:
             )
             await ws.send(register_msg.model_dump_json())
 
-            # Wait for acknowledgement (30s timeout to avoid hanging on buggy relay)
-            ack_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
-            ack_msg = ProtocolMessage.model_validate_json(ack_raw)
-            if ack_msg.type != MessageType.TUNNEL_ACK:
+            # Wait for acknowledgement (30s total to avoid hanging on a buggy
+            # relay). The relay's app-level keepalive PING can arrive before
+            # TUNNEL_ACK — especially right after a reconnect — so respond with
+            # PONG and keep waiting instead of tearing down a healthy tunnel.
+            deadline = time.monotonic() + 30.0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConnectionError("Timed out waiting for TUNNEL_ACK")
+                ack_raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                ack_msg = ProtocolMessage.model_validate_json(ack_raw)
+                if ack_msg.type == MessageType.TUNNEL_ACK:
+                    break
+                if ack_msg.type == MessageType.PING:
+                    pong = ProtocolMessage(type=MessageType.PONG, tunnel_id=ack_msg.tunnel_id)
+                    await ws.send(pong.model_dump_json())
+                    continue
                 raise ConnectionError(f"Expected TUNNEL_ACK, received {ack_msg.type}")
 
             ack_data = TunnelRegistrationResponse.model_validate(ack_msg.payload)
@@ -1117,6 +1144,7 @@ class Tunnel:
             logger.exception("Failed to open local WS connection to %s", local_ws_url)
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
+                self._recent_closed_streams.append(stream_id)
             reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
             close_msg = ProtocolMessage(
                 type=MessageType.WS_CLOSE,
@@ -1208,6 +1236,7 @@ class Tunnel:
                 # are recognized as unknown-stream rather than enqueued
                 # into a placeholder that nothing will ever drain.
                 self._ws_streams.pop(stream_id, None)
+                self._recent_closed_streams.append(stream_id)
                 with contextlib.suppress(Exception):
                     await local_ws.close()
                 return
@@ -1306,6 +1335,7 @@ class Tunnel:
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
+                self._recent_closed_streams.append(stream_id)
             stats = self._ws_stream_stats.pop(stream_id, None)
             diagnostics = _build_ws_close_diagnostics(stats, exc_type)
             # Notify the relay that this stream is closed, preserving the
@@ -1342,7 +1372,11 @@ class Tunnel:
         async with self._ws_streams_lock:
             target = self._ws_streams.get(frame.stream_id)
         if target is None:
-            logger.warning("WS_FRAME for unknown stream_id=%s", frame.stream_id)
+            if frame.stream_id in self._recent_closed_streams:
+                # Expected race: frames trailing a failed/closed local WS.
+                logger.debug("WS_FRAME for recently closed stream_id=%s", frame.stream_id)
+            else:
+                logger.warning("WS_FRAME for unknown stream_id=%s", frame.stream_id)
             return
 
         if isinstance(target, asyncio.Queue):
@@ -1367,12 +1401,14 @@ class Tunnel:
             logger.info("Local WS already closed for stream_id=%s", frame.stream_id)
             async with self._ws_streams_lock:
                 self._ws_streams.pop(frame.stream_id, None)
+                self._recent_closed_streams.append(frame.stream_id)
 
     async def _handle_ws_close(self, msg: ProtocolMessage) -> None:
         """Close a local WS connection when the relay signals stream closure."""
         close_req = WsStreamClose.model_validate(msg.payload)
         async with self._ws_streams_lock:
             target = self._ws_streams.pop(close_req.stream_id, None)
+            self._recent_closed_streams.append(close_req.stream_id)
         if target is None:
             return
 
