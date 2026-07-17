@@ -20,16 +20,18 @@ jobs:
 
       - name: Wait for PyPI availability
         run: |
-          echo "Waiting for hle-client==${VERSION} on PyPI..."
-          for i in $(seq 1 30); do
-            if pip index versions hle-client 2>/dev/null | grep -q "$VERSION"; then
-              echo "Package available on PyPI"
+          echo "Waiting for hle-client==${VERSION} to be installable from PyPI..."
+          # pip download actually fetches the artifact — a stronger check than
+          # `pip index versions`, whose listing can be cached and lag the file.
+          for i in $(seq 1 60); do
+            if pip download --no-deps --dest /tmp/pypi-check "hle-client==${VERSION}" >/dev/null 2>&1; then
+              echo "hle-client==${VERSION} installable after attempt ${i}."
               exit 0
             fi
-            echo "Attempt $i/30 — waiting 20s..."
-            sleep 20
+            echo "Attempt $i/60 — not installable yet, waiting 15s..."
+            sleep 15
           done
-          echo "Timed out waiting for PyPI"
+          echo "::error::Timed out waiting for hle-client==${VERSION} on PyPI"
           exit 1
 
       - name: Install git
