@@ -183,6 +183,38 @@ MAX_WS_STREAMS = 100
 _WS_CLOSE_REASON_MAX = 123
 
 
+def _sanitize_ws_url(url: str) -> str:
+    """Drop the query string from a WS URL before logging/reporting it.
+
+    Proxmox vncwebsocket (and similar) carry single-use secrets in the query
+    string (``vncticket``, tokens), which must never be stored in the relay's
+    debug capture. The path is what matters for diagnosis (e.g. spotting a
+    doubled slash), so keep it and drop everything after ``?``.
+    """
+    return url.split("?", 1)[0]
+
+
+def _upstream_connect_diagnostics(url: str, exc: BaseException) -> dict[str, Any]:
+    """Structured diagnostics for a failed upstream WS connect.
+
+    Sent to the relay in the WS_CLOSE ``diagnostics`` field so the failure is
+    visible in admin debug capture without reading the client's local log —
+    e.g. it would have shown the ``//api2`` doubled slash and the upstream
+    ``HTTP 500`` for the Proxmox console bug directly.
+    """
+    diag: dict[str, Any] = {
+        "phase": "upstream_connect",
+        "upstream_url": _sanitize_ws_url(url),
+        "exc_type": type(exc).__name__,
+    }
+    # websockets' InvalidStatus carries the upstream HTTP response.
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is not None:
+        diag["upstream_status"] = status
+    return diag
+
+
 def _build_local_ws_url(service_url: str, path: str) -> str:
     """Join the local service URL and a WS path into a ``ws(s)://`` URL.
 
@@ -900,7 +932,10 @@ class Tunnel:
                 type=MessageType.WS_CLOSE,
                 tunnel_id=self._tunnel_id,
                 payload=WsStreamClose(
-                    stream_id=stream_id, code=1011, reason=reason or "local connect failed"
+                    stream_id=stream_id,
+                    code=1011,
+                    reason=reason or "local connect failed",
+                    diagnostics=_upstream_connect_diagnostics(local_ws_url, exc),
                 ).model_dump(),
             )
             with contextlib.suppress(websockets.exceptions.ConnectionClosed):
