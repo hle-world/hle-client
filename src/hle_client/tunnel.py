@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,13 +18,14 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
+import httpx
 import websockets
 import websockets.asyncio.client
 import websockets.exceptions
 
 from hle_client import __version__
 from hle_client.notices import render_notice
-from hle_client.proxy import LocalProxy, ProxyConfig
+from hle_client.proxy import UPSTREAM_ERROR_HEADER, LocalProxy, ProxyConfig
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
     DiagnosticEvent,
@@ -262,6 +264,123 @@ def _build_ws_close_diagnostics(
     return out
 
 
+# --------------------------------------------------------------------------
+# Diagnostics helpers (pure, unit-tested in isolation)
+# --------------------------------------------------------------------------
+
+# Secret patterns redacted from client log lines before they leave the host.
+_REDACT_API_KEY = re.compile(r"hle_[0-9a-f]{32}")
+_REDACT_KV = re.compile(r"(?i)\b(vncticket|token)=[^\s&]+")
+_REDACT_AUTH = re.compile(r"(?i)(authorization:\s*).+")
+
+
+def _redact_secrets(text: str) -> str:
+    """Redact obvious secrets from a log message (best-effort, no raise)."""
+    text = _REDACT_API_KEY.sub("[REDACTED]", text)
+    text = _REDACT_KV.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
+    text = _REDACT_AUTH.sub(lambda m: f"{m.group(1)}[REDACTED]", text)
+    return text
+
+
+def _service_check_data(
+    service_url: str,
+    verify_ssl: bool,
+    elapsed_ms: float,
+    *,
+    response: httpx.Response | None = None,
+    error: BaseException | None = None,
+) -> dict[str, Any]:
+    """Turn a probe result (response or exception) into the diagnostic payload.
+
+    Pure and side-effect free so it can be unit-tested without a network.
+    """
+    parsed = urlparse(service_url)
+    scheme = parsed.scheme or ""
+    data: dict[str, Any] = {
+        "reachable": response is not None,
+        "status": response.status_code if response is not None else None,
+        "scheme": scheme,
+        "is_tls": scheme == "https",
+        "verify_ssl": verify_ssl,
+        "redirect_location": None,
+        "elapsed_ms": round(elapsed_ms, 1),
+        "error": None,
+    }
+    if response is not None and 300 <= response.status_code < 400:
+        location = response.headers.get("location")
+        if location:
+            # Strip any query string — it can carry tokens/tickets.
+            data["redirect_location"] = location.split("?", 1)[0]
+    if error is not None:
+        # Exception class + short message; never the full repr (no secrets).
+        data["error"] = f"{type(error).__name__}: {error}"[:200]
+    return data
+
+
+class _DiagnosticLogHandler(logging.Handler):
+    """Bounded in-memory ring that forwards WARNING+ records as diagnostics.
+
+    Installed on the ``hle_client`` logger. Keeps the last ``capacity``
+    formatted records and, while the owning tunnel has diagnostics enabled,
+    emits each WARNING-or-above record as a ``log.line`` DIAGNOSTIC event.
+
+    Best-effort throughout: secrets are redacted, a token-bucket rate limit
+    prevents floods (with a dropped count surfaced on the next line), and a
+    re-entrancy flag guards against the emit path logging back into us.
+    """
+
+    def __init__(self, tunnel: Tunnel, capacity: int = 200, rate: int = 10) -> None:
+        super().__init__(level=logging.NOTSET)
+        self._tunnel = tunnel
+        self._rate = rate
+        self.ring: deque[str] = deque(maxlen=capacity)
+        self._in_emit = False
+        self._window_start = 0.0
+        self._sent_in_window = 0
+        self._dropped = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Guard against infinite recursion: anything logged while we are
+        # inside emit() (including from _emit_diagnostic) must not re-enter.
+        if self._in_emit:
+            return
+        self._in_emit = True
+        try:
+            message = record.getMessage()
+            self.ring.append(message)
+
+            if not self._tunnel._diagnostics_enabled or record.levelno < logging.WARNING:
+                return
+
+            now = time.monotonic()
+            if now - self._window_start >= 1.0:
+                self._window_start = now
+                self._sent_in_window = 0
+                dropped, self._dropped = self._dropped, 0
+            else:
+                dropped = 0
+
+            if self._sent_in_window >= self._rate:
+                self._dropped += 1
+                return
+            self._sent_in_window += 1
+
+            data: dict[str, Any] = {
+                "level": record.levelname,
+                "logger": record.name,
+                "message": _redact_secrets(message),
+                "ts": record.created,
+            }
+            if dropped:
+                data["dropped"] = dropped
+            self._tunnel._emit_diagnostic("log.line", **data)
+        except Exception:
+            # Never let diagnostics logging break real logging.
+            pass
+        finally:
+            self._in_emit = False
+
+
 MAX_SPEED_TEST_CHUNKS = 100  # ~6.4 MB at 64 KB/chunk
 MAX_SPEED_TEST_CHUNK_SIZE = 1_048_576  # 1 MB — cap server-requested chunk size
 
@@ -329,8 +448,10 @@ class Tunnel:
     _active_chunked: dict[str, asyncio.Task[None]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _log_handler: _DiagnosticLogHandler | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self._install_log_handler()
         self._proxy = LocalProxy(
             ProxyConfig(
                 target_url=self.config.service_url,
@@ -393,6 +514,7 @@ class Tunnel:
         if self._ws:
             await self._ws.close()
         await self._cleanup()
+        self._remove_log_handler()
         logger.info("Tunnel disconnected")
 
     @property
@@ -584,6 +706,7 @@ class Tunnel:
         # relay through DIAGNOSTIC events.
         level_value = getattr(logging, cfg.level, logging.INFO)
         logging.getLogger("hle_client").setLevel(level_value)
+        was_enabled = self._diagnostics_enabled
         self._diagnostics_enabled = cfg.diagnostics
         logger.info(
             "LOG_CONFIG applied: level=%s diagnostics=%s tunnel=%s",
@@ -591,6 +714,34 @@ class Tunnel:
             cfg.diagnostics,
             self._tunnel_id,
         )
+        # On a False->True transition, run a one-shot upstream self-check so
+        # the operator immediately sees whether the local service is reachable.
+        if cfg.diagnostics and not was_enabled:
+            self._spawn(self._probe_service_check())
+
+    async def _probe_service_check(self) -> None:
+        """Probe the local service once and emit a ``service.check`` diagnostic.
+
+        Best-effort: honours ``verify_ssl``, does not follow redirects, uses a
+        short timeout, and never raises. Tries HEAD first, falling back to GET.
+        """
+        url = self.config.service_url
+        verify = self.config.verify_ssl
+        start = time.monotonic()
+        try:
+            async with httpx.AsyncClient(
+                verify=verify, follow_redirects=False, timeout=5.0
+            ) as client:
+                try:
+                    response = await client.head(url)
+                except httpx.HTTPError:
+                    response = await client.get(url)
+            elapsed_ms = (time.monotonic() - start) * 1000
+            data = _service_check_data(url, verify, elapsed_ms, response=response)
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            data = _service_check_data(url, verify, elapsed_ms, error=exc)
+        self._emit_diagnostic("service.check", **data)
 
     def _emit_diagnostic(self, event: str, **data: Any) -> None:
         """Send a structured DIAGNOSTIC event back to the relay.
@@ -620,6 +771,35 @@ class Tunnel:
             return
         with contextlib.suppress(Exception):
             await self._ws.send(ws_msg.model_dump_json())
+
+    def _pop_upstream_error(self, headers: dict[str, Any]) -> str | None:
+        """Pop the synthetic upstream-error marker header (case-insensitive).
+
+        The proxy tags synthetic 502/504 responses with ``UPSTREAM_ERROR_HEADER``
+        carrying the httpx exception class name. We strip it here so it never
+        reaches the browser and return its value for the ``http.upstream_error``
+        diagnostic.
+        """
+        for key in list(headers):
+            if key.lower() == UPSTREAM_ERROR_HEADER:
+                value = headers.pop(key)
+                if isinstance(value, list):
+                    return value[0] if value else None
+                if isinstance(value, str):
+                    return value
+                return None
+        return None
+
+    def _emit_upstream_error(self, req: ProxiedHttpRequest, status_code: int, reason: str) -> None:
+        """Emit an ``http.upstream_error`` diagnostic (gated, best-effort)."""
+        self._emit_diagnostic(
+            "http.upstream_error",
+            request_id=req.request_id,
+            method=req.method,
+            path=req.path,
+            status=status_code,
+            reason=reason,
+        )
 
     # ------------------------------------------------------------------
     # HTTP request handling
@@ -684,6 +864,11 @@ class Tunnel:
             query_string=req.query_string,
         )
 
+        # Strip + report the synthetic upstream-error marker before relaying.
+        reason = self._pop_upstream_error(resp_headers)
+        if reason is not None:
+            self._emit_upstream_error(req, status_code, reason)
+
         encoded_body: str | None = None
         if resp_body is not None:
             encoded_body = base64.b64encode(resp_body).decode("ascii")
@@ -733,11 +918,16 @@ class Tunnel:
                 query_string=req.query_string,
             ):
                 if status_code is not None:
-                    # First yield: send START
+                    # First yield: send START. Strip + report any synthetic
+                    # upstream-error marker before it reaches the browser.
+                    headers_out = resp_headers or {}
+                    reason = self._pop_upstream_error(headers_out)
+                    if reason is not None:
+                        self._emit_upstream_error(req, status_code, reason)
                     start = HttpResponseStart(
                         request_id=req.request_id,
                         status_code=status_code,
-                        headers=resp_headers or {},
+                        headers=headers_out,
                     )
                     start_msg = ProtocolMessage(
                         type=MessageType.HTTP_RESPONSE_START,
@@ -1291,6 +1481,22 @@ class Tunnel:
         task = asyncio.ensure_future(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _install_log_handler(self) -> None:
+        """Attach the bounded ring log handler to the ``hle_client`` logger."""
+        if self._log_handler is not None:
+            return
+        handler = _DiagnosticLogHandler(self)
+        logging.getLogger("hle_client").addHandler(handler)
+        self._log_handler = handler
+
+    def _remove_log_handler(self) -> None:
+        """Detach the ring log handler (best-effort)."""
+        if self._log_handler is None:
+            return
+        with contextlib.suppress(Exception):
+            logging.getLogger("hle_client").removeHandler(self._log_handler)
+        self._log_handler = None
 
     async def _cleanup(self) -> None:
         """Close all local WS streams, cancel background tasks, and stop the proxy."""

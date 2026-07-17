@@ -23,6 +23,16 @@ _STRIP_RESPONSE_HEADERS = frozenset(
     {"content-encoding", "content-length", "transfer-encoding", "connection"}
 )
 
+# Marker header attached to synthetic upstream-error responses (502/504) so the
+# tunnel layer can emit a diagnostic and strip it before the response reaches
+# the browser. The value is the httpx exception class name.
+UPSTREAM_ERROR_HEADER = "x-hle-upstream-error"
+
+
+def _upstream_error_headers(exc: BaseException) -> dict[str, str | list[str]]:
+    """Build the header dict for a synthetic upstream-error response."""
+    return {"content-type": "text/plain", UPSTREAM_ERROR_HEADER: type(exc).__name__}
+
 
 def _collect_response_headers(
     raw_headers: list[tuple[bytes, bytes]],
@@ -242,21 +252,21 @@ class LocalProxy:
                 )
                 return (
                     502,
-                    {"content-type": "text/plain"},
+                    _upstream_error_headers(exc),
                     b"Bad Gateway: SSL certificate verification failed "
                     b"(use --no-verify-ssl for self-signed certificates)",
                 )
             logger.error("Connection refused forwarding %s %s to local service", method, url)
             return (
                 502,
-                {"content-type": "text/plain"},
+                _upstream_error_headers(exc),
                 b"Bad Gateway: local service connection refused",
             )
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             logger.error("Timeout forwarding %s %s to local service", method, url)
             return (
                 504,
-                {"content-type": "text/plain"},
+                _upstream_error_headers(exc),
                 b"Gateway Timeout: local service did not respond",
             )
         except httpx.HTTPError as exc:
@@ -265,7 +275,7 @@ class LocalProxy:
             # from the relay side (e.g. via tunnel debug capture) without
             # leaking error details.
             reason = f"Bad Gateway: unexpected error ({exc.__class__.__name__})"
-            return 502, {"content-type": "text/plain"}, reason.encode()
+            return 502, _upstream_error_headers(exc), reason.encode()
 
     async def stream_http(
         self,
@@ -322,7 +332,7 @@ class LocalProxy:
                     method,
                     url,
                 )
-                yield (502, {"content-type": "text/plain"}, None)
+                yield (502, _upstream_error_headers(exc), None)
                 yield (
                     None,
                     None,
@@ -331,13 +341,13 @@ class LocalProxy:
                 )
                 return
             logger.error("Connection refused forwarding %s %s to local service", method, url)
-            yield (502, {"content-type": "text/plain"}, None)
+            yield (502, _upstream_error_headers(exc), None)
             yield (None, None, b"Bad Gateway: local service connection refused")
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             logger.error("Timeout forwarding %s %s to local service", method, url)
-            yield (504, {"content-type": "text/plain"}, None)
+            yield (504, _upstream_error_headers(exc), None)
             yield (None, None, b"Gateway Timeout: local service did not respond")
         except httpx.HTTPError as exc:
             logger.error("HTTP error forwarding %s %s: %s", method, url, exc)
-            yield (502, {"content-type": "text/plain"}, None)
+            yield (502, _upstream_error_headers(exc), None)
             yield (None, None, b"Bad Gateway: unexpected error")
