@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from hle_client.service_cmd import build_expose_args, render_unit, unit_name
+from hle_client.service_cmd import (
+    build_expose_args,
+    launchd_label,
+    render_launchd_plist,
+    render_unit,
+    unit_name,
+)
 
 
 class TestUnitName:
@@ -96,6 +102,60 @@ class TestRenderUnit:
         )
         assert '"note=hello world"' in unit
         assert '"/opt/hle bin/hle"' not in unit  # only args are quoted, not the leading path
+
+
+class TestLaunchdLabel:
+    def test_default(self):
+        assert launchd_label("tv") == "world.hle.tv"
+
+    def test_explicit_name(self):
+        assert launchd_label("tv", "com.acme.tunnel") == "com.acme.tunnel"
+
+    def test_explicit_name_strips_plist_suffix(self):
+        assert launchd_label("tv", "com.acme.tunnel.plist") == "com.acme.tunnel"
+
+
+class TestRenderLaunchdPlist:
+    def test_system_daemon_has_username(self):
+        plist = render_launchd_plist(
+            label="tv",
+            plist_label="world.hle.tv",
+            hle_path="/usr/local/bin/hle",
+            expose_args=["expose", "--service", "http://localhost:9998", "--label", "tv"],
+            run_as_user="ian",
+            log_dir="/var/log",
+        )
+        assert "<string>world.hle.tv</string>" in plist
+        assert "<key>UserName</key>" in plist
+        assert "<string>ian</string>" in plist
+        assert "<string>/usr/local/bin/hle</string>" in plist
+        assert "<string>--label</string>" in plist
+        assert "<key>RunAtLoad</key>" in plist
+        assert "<key>KeepAlive</key>" in plist
+        assert "/var/log/tv.log" in plist
+
+    def test_user_agent_omits_username(self):
+        plist = render_launchd_plist(
+            label="tv",
+            plist_label="world.hle.tv",
+            hle_path="/opt/homebrew/bin/hle",
+            expose_args=["expose", "--service", "http://localhost:9998"],
+            run_as_user=None,
+            log_dir="/Users/ian/Library/Logs/hle",
+        )
+        assert "<key>UserName</key>" not in plist
+
+    def test_xml_special_chars_escaped(self):
+        plist = render_launchd_plist(
+            label="tv",
+            plist_label="world.hle.tv",
+            hle_path="/usr/local/bin/hle",
+            expose_args=["expose", "--option", "note=a&b<c"],
+            run_as_user=None,
+            log_dir="/var/log",
+        )
+        assert "a&amp;b&lt;c" in plist
+        assert "a&b<c" not in plist
 
 
 class TestServiceWiring:

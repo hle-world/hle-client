@@ -1,5 +1,30 @@
 # Changelog
 
+## v2607.3 — 2026-07-17
+
+### Added
+- **`hle update`** — self-upgrade regardless of install method. Detects pipx /
+  uv tool / installer venv / pip and runs the right upgrade. `--check` reports
+  current vs. latest without changing anything; `--version X` pins a version.
+- **`hle service`** — install and manage a background service for a tunnel so
+  it survives reboots and restarts on failure, without hand-writing unit files.
+  - **Linux** → systemd unit (system or `--user`).
+  - **macOS** → launchd plist (LaunchDaemons or `--user` LaunchAgents).
+  - Windows is unsupported (use Task Scheduler / NSSM); the command exits with
+    a clear message and no side effects.
+  - The API key is read at runtime from config/`HLE_API_KEY` — never written
+    into the service file.
+
+### Fixed
+- **Tunnel flapping under load / streaming** (`1011 keepalive ping timeout`):
+  relaxed the control-WebSocket keepalive (`ping_interval=30`, `ping_timeout=120`)
+  so a large or continuous tunnel body (e.g. a live video stream) no longer
+  starves the ping/pong and severs the tunnel. Pairs with a matching relay-side
+  change (needs a relay running the corresponding server release).
+- **Reconnect handshake**: a keepalive `PING` arriving before `TUNNEL_ACK`
+  (common right after a reconnect) no longer aborts registration — the client
+  now responds `PONG` and keeps waiting for the ACK.
+
 ## v2607.2 — 2026-07-17
 
 ### Fixed

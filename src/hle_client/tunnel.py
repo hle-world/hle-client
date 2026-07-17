@@ -584,7 +584,15 @@ class Tunnel:
         relay_uri = await self._discover_relay_uri(api_key)
         logger.info("Connecting to relay at %s", relay_uri)
 
-        async with websockets.connect(relay_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
+        # Relaxed keepalive: a large/slow tunnel body over the single control
+        # WS can delay a pong; the default 20s ping timeout would sever the
+        # tunnel (1011). App-level PING/PONG still tracks liveness.
+        async with websockets.connect(
+            relay_uri,
+            max_size=WS_MAX_MESSAGE_SIZE,
+            ping_interval=30,
+            ping_timeout=120,
+        ) as ws:
             self._ws = ws
 
             # --- Registration handshake ---
@@ -609,10 +617,23 @@ class Tunnel:
             )
             await ws.send(register_msg.model_dump_json())
 
-            # Wait for acknowledgement (30s timeout to avoid hanging on buggy relay)
-            ack_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
-            ack_msg = ProtocolMessage.model_validate_json(ack_raw)
-            if ack_msg.type != MessageType.TUNNEL_ACK:
+            # Wait for acknowledgement (30s total to avoid hanging on a buggy
+            # relay). The relay's app-level keepalive PING can arrive before
+            # TUNNEL_ACK — especially right after a reconnect — so respond with
+            # PONG and keep waiting instead of tearing down a healthy tunnel.
+            deadline = time.monotonic() + 30.0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ConnectionError("Timed out waiting for TUNNEL_ACK")
+                ack_raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                ack_msg = ProtocolMessage.model_validate_json(ack_raw)
+                if ack_msg.type == MessageType.TUNNEL_ACK:
+                    break
+                if ack_msg.type == MessageType.PING:
+                    pong = ProtocolMessage(type=MessageType.PONG, tunnel_id=ack_msg.tunnel_id)
+                    await ws.send(pong.model_dump_json())
+                    continue
                 raise ConnectionError(f"Expected TUNNEL_ACK, received {ack_msg.type}")
 
             ack_data = TunnelRegistrationResponse.model_validate(ack_msg.payload)

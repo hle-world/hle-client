@@ -448,6 +448,49 @@ class TestTunnelRegistrationHandshake:
                 await tunnel._connect_once()
             await tunnel._proxy.stop()
 
+    async def test_ping_before_ack_is_tolerated(self):
+        # Regression: a keepalive PING arriving before TUNNEL_ACK (common right
+        # after a reconnect) must not tear down the fresh tunnel. The client
+        # should PONG and keep waiting for the ACK.
+        tunnel = _tunnel(api_key="hle_testkey_ping_ack", service_label="myapp")
+
+        ping = ProtocolMessage(type=MessageType.PING, tunnel_id="t-ping-1")
+        ack = ProtocolMessage(
+            type=MessageType.TUNNEL_ACK,
+            payload={
+                "tunnel_id": "t-ping-1",
+                "subdomain": "myapp-abc",
+                "public_url": "https://myapp-abc.hle.world",
+                "websocket_enabled": True,
+                "user_code": "abc",
+                "service_label": "myapp",
+            },
+        )
+        mock_ws = AsyncMock()
+        sent_messages: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent_messages.append(m))
+        mock_ws.recv = AsyncMock(side_effect=[ping.model_dump_json(), ack.model_dump_json()])
+        mock_ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("hle_client.tunnel.websockets.connect", return_value=mock_ctx):
+            await tunnel._proxy.start()
+            await tunnel._connect_once()
+            await tunnel._proxy.stop()
+
+        # Registered successfully despite the pre-ACK PING.
+        assert tunnel._tunnel_id == "t-ping-1"
+        # A PONG was sent in response to the PING.
+        pongs = [
+            m
+            for m in sent_messages
+            if ProtocolMessage.model_validate_json(m).type == MessageType.PONG
+        ]
+        assert len(pongs) == 1
+
 
 class TestTunnelHandleHttpRequest:
     """Test _handle_http_request: forwards to proxy, sends response back."""

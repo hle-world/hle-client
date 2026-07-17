@@ -101,24 +101,29 @@ so they pick up the new version.
 
 ### `hle service`
 
-Install and manage a systemd service for a tunnel, so it survives reboots and
-restarts on failure. Linux/systemd only. The API key is read at runtime from
-`~/.config/hle/config.toml` (or `HLE_API_KEY`) and is never written into the
-unit file.
+Install and manage a background service for a tunnel, so it survives reboots
+and restarts on failure. Uses **systemd on Linux** and **launchd on macOS**
+(Windows is unsupported — use Task Scheduler or NSSM). The API key is read at
+runtime from `~/.config/hle/config.toml` (or `HLE_API_KEY`) and is never
+written into the service file.
 
 ```bash
-# Install + start a system service (writes /etc/systemd/system/hle-tv.service)
+# Install + start a system service
+#   Linux → /etc/systemd/system/hle-tv.service
+#   macOS → /Library/LaunchDaemons/world.hle.tv.plist
 sudo hle service install --service http://localhost:9998 --label tv
 
 # Custom zone / extra expose options are supported
 sudo hle service install --service https://192.168.2.200:8006 --label prox --zone pr.t00t.us
 
-# Per-user service (no sudo; writes ~/.config/systemd/user/hle-tv.service)
+# Per-user service (no sudo)
+#   Linux → ~/.config/systemd/user/hle-tv.service
+#   macOS → ~/Library/LaunchAgents/world.hle.tv.plist
 hle service install --user --service http://localhost:9998 --label tv
 
-hle service status --label tv       # systemctl status
-hle service list                    # list all hle-* services
-hle service uninstall --label tv    # stop, disable, remove the unit
+hle service status --label tv       # service status
+hle service list                    # list all hle services
+hle service uninstall --label tv    # stop, disable, remove the service
 ```
 
 ### `hle webhook`
