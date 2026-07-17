@@ -1,5 +1,30 @@
 # Changelog
 
+## v2607.2 — 2026-07-17
+
+### Fixed
+- **Proxmox VM/CT consoles (and other WebSocket upstreams) over a tunnel**: a
+  service URL with a trailing slash (`--service https://host:8006/`) produced a
+  doubled slash in the upstream WebSocket URL (`wss://host:8006//api2/...`),
+  which strict upstreams reject — Proxmox's vncwebsocket answers HTTP 500. The
+  WS URL is now built without the doubled slash. HTTP was unaffected.
+
+### Added — debug telemetry
+When the relay enables debug capture for a tunnel (admin panel), the client now
+pushes structured diagnostics back so failures are visible from the dashboard
+without reading the client's local log:
+- Failed upstream WebSocket connects report the sanitized upstream URL (query
+  string / tickets stripped) and upstream HTTP status.
+- `service.check` — on enable, the client probes its local service (reachable /
+  status / scheme / TLS / redirect).
+- `http.upstream_error` — synthetic upstream 502/504s (connect refused /
+  timeout / SSL) are surfaced with the exception class.
+- `log.line` — the client's own WARNING+ log lines stream to the relay,
+  redacted (API keys / tickets / tokens / Authorization) and rate-limited.
+
+All diagnostics are best-effort, gated on the relay opting in, and never touch
+the data plane. Requires a relay running v2607.4+ to surface them.
+
 ## v2607.1 — 2026-07-16
 
 ### Fixed
