@@ -431,6 +431,12 @@ class Tunnel:
         default_factory=dict, init=False, repr=False
     )
     _ws_streams_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # Recently removed/failed stream ids. A WS_FRAME can arrive from the relay
+    # just after a local WS failed to open or was closed (the browser's queued
+    # frames race the teardown); demote those to debug instead of WARNING.
+    _recent_closed_streams: deque[str] = field(
+        default_factory=lambda: deque(maxlen=512), init=False, repr=False
+    )
     # Per-stream lifecycle stats — populated for every stream regardless of
     # whether server-side diagnostics are enabled. Attached to every
     # WsStreamClose so the relay sees rich close info even with diagnostics
@@ -1138,6 +1144,7 @@ class Tunnel:
             logger.exception("Failed to open local WS connection to %s", local_ws_url)
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
+                self._recent_closed_streams.append(stream_id)
             reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
             close_msg = ProtocolMessage(
                 type=MessageType.WS_CLOSE,
@@ -1229,6 +1236,7 @@ class Tunnel:
                 # are recognized as unknown-stream rather than enqueued
                 # into a placeholder that nothing will ever drain.
                 self._ws_streams.pop(stream_id, None)
+                self._recent_closed_streams.append(stream_id)
                 with contextlib.suppress(Exception):
                     await local_ws.close()
                 return
@@ -1327,6 +1335,7 @@ class Tunnel:
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
+                self._recent_closed_streams.append(stream_id)
             stats = self._ws_stream_stats.pop(stream_id, None)
             diagnostics = _build_ws_close_diagnostics(stats, exc_type)
             # Notify the relay that this stream is closed, preserving the
@@ -1363,7 +1372,11 @@ class Tunnel:
         async with self._ws_streams_lock:
             target = self._ws_streams.get(frame.stream_id)
         if target is None:
-            logger.warning("WS_FRAME for unknown stream_id=%s", frame.stream_id)
+            if frame.stream_id in self._recent_closed_streams:
+                # Expected race: frames trailing a failed/closed local WS.
+                logger.debug("WS_FRAME for recently closed stream_id=%s", frame.stream_id)
+            else:
+                logger.warning("WS_FRAME for unknown stream_id=%s", frame.stream_id)
             return
 
         if isinstance(target, asyncio.Queue):
@@ -1388,12 +1401,14 @@ class Tunnel:
             logger.info("Local WS already closed for stream_id=%s", frame.stream_id)
             async with self._ws_streams_lock:
                 self._ws_streams.pop(frame.stream_id, None)
+                self._recent_closed_streams.append(frame.stream_id)
 
     async def _handle_ws_close(self, msg: ProtocolMessage) -> None:
         """Close a local WS connection when the relay signals stream closure."""
         close_req = WsStreamClose.model_validate(msg.payload)
         async with self._ws_streams_lock:
             target = self._ws_streams.pop(close_req.stream_id, None)
+            self._recent_closed_streams.append(close_req.stream_id)
         if target is None:
             return
 

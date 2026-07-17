@@ -824,6 +824,29 @@ class TestTunnelHandleWsFrame:
         )
         await tunnel._handle_ws_frame(msg)  # no error
 
+    async def test_recently_closed_stream_frame_is_demoted(self, caplog):
+        # A frame trailing a failed/closed local WS should log at debug, not
+        # WARNING (expected race), while a truly unknown id still warns.
+        import logging
+
+        tunnel = _tunnel()
+        tunnel._recent_closed_streams.append("recent")
+
+        recent = WsStreamFrame(stream_id="recent", data="x", is_binary=False)
+        ghost = WsStreamFrame(stream_id="ghost", data="x", is_binary=False)
+
+        with caplog.at_level(logging.WARNING, logger="hle_client.tunnel"):
+            await tunnel._handle_ws_frame(
+                ProtocolMessage(type=MessageType.WS_FRAME, payload=recent.model_dump())
+            )
+        assert not any("recent" in r.message for r in caplog.records)
+
+        with caplog.at_level(logging.WARNING, logger="hle_client.tunnel"):
+            await tunnel._handle_ws_frame(
+                ProtocolMessage(type=MessageType.WS_FRAME, payload=ghost.model_dump())
+            )
+        assert any("unknown stream_id=ghost" in r.message for r in caplog.records)
+
     async def test_closed_connection_removes_stream(self):
         import websockets.exceptions
 

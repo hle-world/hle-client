@@ -24,6 +24,9 @@
 - **Reconnect handshake**: a keepalive `PING` arriving before `TUNNEL_ACK`
   (common right after a reconnect) no longer aborts registration — the client
   now responds `PONG` and keeps waiting for the ACK.
+- **Log noise**: a `WS_FRAME` arriving just after a local WebSocket failed to
+  open or was closed (the browser's queued frames racing teardown) now logs at
+  debug instead of `WARNING: WS_FRAME for unknown stream_id=...`.
 
 ## v2607.2 — 2026-07-17
 
