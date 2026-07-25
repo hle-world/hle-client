@@ -1,8 +1,9 @@
-"""``hle service`` — install and manage a background service for a tunnel.
+"""``hle service`` — install and manage a background service.
 
-Generates a service definition that runs ``hle expose ...`` with the given
-options, so a homelab tunnel survives reboots and restarts on failure without
-the user hand-writing service files.
+Generates a service definition that runs either ``hle expose ...`` (a single
+tunnel) or ``hle agent run`` (the dashboard-driven multi-tunnel agent), so a
+homelab stays reachable across reboots and restarts on failure without the user
+hand-writing service files.
 
 Backends:
   * Linux  → systemd unit (``systemctl`` / ``/etc/systemd/system`` or ``--user``)
@@ -14,6 +15,7 @@ Windows is not supported (use Task Scheduler / NSSM manually).
 from __future__ import annotations
 
 import getpass
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +29,9 @@ console = Console()
 
 _SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 _LAUNCHD_LABEL_PREFIX = "world.hle"
+
+# Label used for the agent's unit/plist when the user doesn't override it.
+AGENT_LABEL = "agent"
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +98,42 @@ def build_expose_args(
     return args
 
 
+def build_agent_args(
+    *,
+    relay_host: str | None = None,
+    relay_port: int | None = None,
+) -> list[str]:
+    """Build the ``agent run`` argv (no secrets) for the service definition.
+
+    The enrollment token is *not* baked in — the agent reads it at runtime from
+    the running user's ``~/.config/hle/agent.toml`` or ``HLE_AGENT_TOKEN``.
+    """
+    args = ["agent", "run"]
+    if relay_host:
+        args += ["--relay-host", relay_host]
+    if relay_port:
+        args += ["--relay-port", str(relay_port)]
+    return args
+
+
+def resolve_user_mode(*, user_flag: bool, system_flag: bool) -> bool:
+    """Decide between a per-user and a system service.
+
+    Explicit ``--user`` / ``--system`` always win. Otherwise auto-detect: root
+    installs a system service (starts at boot), non-root installs a per-user one
+    (no sudo needed).
+    """
+    if user_flag and system_flag:
+        console.print("[red]Pass either --user or --system, not both.[/red]")
+        raise SystemExit(1)
+    if user_flag:
+        return True
+    if system_flag:
+        return False
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    return not is_root
+
+
 def current_platform() -> str:
     """Return ``"linux"``, ``"darwin"``, or the raw ``sys.platform`` value."""
     if sys.platform.startswith("linux"):
@@ -142,22 +183,24 @@ def render_unit(
     *,
     label: str,
     hle_path: str,
-    expose_args: list[str],
+    run_args: list[str],
     user_mode: bool,
     run_as_user: str | None,
+    description: str | None = None,
+    restart: str = "on-failure",
 ) -> str:
     """Render the systemd unit file text. Pure function (unit-testable)."""
-    exec_start = f"{hle_path} {_quote_exec_args(expose_args)}"
+    exec_start = f"{hle_path} {_quote_exec_args(run_args)}"
     lines = [
         "[Unit]",
-        f"Description=HLE tunnel: {label}",
+        f"Description={description or f'HLE tunnel: {label}'}",
         "After=network-online.target",
         "Wants=network-online.target",
         "",
         "[Service]",
         "Type=simple",
         f"ExecStart={exec_start}",
-        "Restart=on-failure",
+        f"Restart={restart}",
         "RestartSec=5",
     ]
     # System units run as root by default; pin an explicit user when asked so
@@ -192,19 +235,23 @@ def _unit_dir(user_mode: bool) -> Path:
 def _systemd_install(
     *,
     label: str,
-    expose_args: list[str],
+    run_args: list[str],
     name: str | None,
     user_mode: bool,
     run_as: str | None,
     start: bool,
+    description: str | None = None,
+    restart: str = "on-failure",
 ) -> None:
     run_as_user = run_as or (None if user_mode else getpass.getuser())
     unit = render_unit(
         label=label,
         hle_path=find_hle_path(),
-        expose_args=expose_args,
+        run_args=run_args,
         user_mode=user_mode,
         run_as_user=run_as_user,
+        description=description,
+        restart=restart,
     )
     uname = unit_name(label, name)
     path = _unit_dir(user_mode) / uname
@@ -227,6 +274,13 @@ def _systemd_install(
             console.print(f"[yellow]Installed but failed to start {uname}.[/yellow]")
     else:
         console.print(f"Run: systemctl {'--user ' if user_mode else ''}enable --now {uname}")
+
+    if user_mode:
+        # Per-user units stop when the user logs out unless lingering is on.
+        console.print(
+            f"[dim]Tip: run `sudo loginctl enable-linger {getpass.getuser()}` so the "
+            f"service keeps running after logout and starts at boot.[/dim]"
+        )
 
 
 def _systemd_uninstall(*, label: str, name: str | None, user_mode: bool) -> None:
@@ -263,7 +317,7 @@ def render_launchd_plist(
     label: str,
     plist_label: str,
     hle_path: str,
-    expose_args: list[str],
+    run_args: list[str],
     run_as_user: str | None,
     log_dir: str,
 ) -> str:
@@ -272,7 +326,7 @@ def render_launchd_plist(
     ``run_as_user`` adds a ``UserName`` key (system daemons only); pass ``None``
     for per-user agents that already run as the invoking user.
     """
-    prog = [hle_path, *expose_args]
+    prog = [hle_path, *run_args]
     prog_xml = "\n".join(f"        <string>{_xml_escape(a)}</string>" for a in prog)
     out_log = f"{log_dir.rstrip('/')}/{label}.log"
     err_log = f"{log_dir.rstrip('/')}/{label}.err.log"
@@ -330,7 +384,7 @@ def _launchd_log_dir(user_mode: bool) -> str:
 def _launchd_install(
     *,
     label: str,
-    expose_args: list[str],
+    run_args: list[str],
     name: str | None,
     user_mode: bool,
     run_as: str | None,
@@ -344,7 +398,7 @@ def _launchd_install(
         label=label,
         plist_label=plabel,
         hle_path=find_hle_path(),
-        expose_args=expose_args,
+        run_args=run_args,
         run_as_user=run_as_user,
         log_dir=_launchd_log_dir(user_mode),
     )
@@ -410,14 +464,33 @@ def _launchd_list(*, user_mode: bool) -> None:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def _resolve_label(label: str | None, agent_mode: bool) -> str:
+    """Resolve the label for uninstall/status: --agent implies the agent label."""
+    if label:
+        return label
+    if agent_mode:
+        return AGENT_LABEL
+    console.print("[red]--label is required[/red] (or pass --agent for the agent service).")
+    raise SystemExit(1)
+
+
 @click.group()
 def service() -> None:
-    """Install and manage a background service for a tunnel (systemd/launchd)."""
+    """Install and manage a background service (systemd/launchd)."""
 
 
 @service.command("install")
-@click.option("--service", "service_url", required=True, help="Local service URL")
-@click.option("--label", required=True, help="Service label (also names the unit hle-<label>)")
+@click.option(
+    "--agent",
+    "agent_mode",
+    is_flag=True,
+    default=False,
+    help="Install the dashboard-driven agent (`hle agent run`) instead of a single tunnel",
+)
+@click.option("--relay-host", default=None, help="Agent mode: relay host (default hle.world)")
+@click.option("--relay-port", default=None, type=int, help="Agent mode: relay port (default 443)")
+@click.option("--service", "service_url", default=None, help="Local service URL")
+@click.option("--label", default=None, help="Service label (also names the unit hle-<label>)")
 @click.option("--zone", default=None, help="Custom zone to publish under")
 @click.option("--apex", is_flag=True, default=False, help="Serve at the bare zone root")
 @click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
@@ -430,11 +503,17 @@ def service() -> None:
 )
 @click.option("--name", default=None, help="Override the unit/plist name")
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Install a per-user service")
+@click.option(
+    "--system", "system_mode", is_flag=True, default=False, help="Install a system-wide service"
+)
 @click.option("--run-as", "run_as", default=None, help="System service user (default: current)")
 @click.option("--start/--no-start", default=True, help="Enable + start the service now")
 def install(
-    service_url: str,
-    label: str,
+    agent_mode: bool,
+    relay_host: str | None,
+    relay_port: int | None,
+    service_url: str | None,
+    label: str | None,
     zone: str | None,
     apex: bool,
     auth: str,
@@ -445,33 +524,66 @@ def install(
     options: tuple[str, ...],
     name: str | None,
     user_mode: bool,
+    system_mode: bool,
     run_as: str | None,
     start: bool,
 ) -> None:
-    """Install (and start) a background service running this tunnel.
+    """Install (and start) a background service.
 
-    The API key is read from the running user's ~/.config/hle/config.toml or
-    HLE_API_KEY at runtime — it is never written into the service file. For a
+    Default: a single tunnel (`hle expose`) — requires --service and --label.
+    With --agent: the dashboard-driven agent (`hle agent run`), which serves
+    every endpoint you declare in the dashboard from one process.
+
+    Credentials are never written into the service file. They are read at
+    runtime from the running user's ~/.config/hle/ (config.toml for the API key,
+    agent.toml for the agent token) or from HLE_API_KEY / HLE_AGENT_TOKEN. For a
     system service, pass --run-as <user> (defaults to the current user) so the
     service reads that user's config.
+
+    Scope is auto-detected when neither --user nor --system is given: root
+    installs a system service, a normal user installs a per-user one.
     """
     plat = _require_supported()
-    expose_args = build_expose_args(
-        service=service_url,
-        label=label,
-        zone=zone,
-        apex=apex,
-        auth=auth,
-        websocket=websocket,
-        verify_ssl=verify_ssl,
-        forward_host=forward_host,
-        allow=allow,
-        options=options,
-    )
+    user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
+
+    if agent_mode:
+        if service_url:
+            console.print("[red]--service is not used with --agent.[/red] Endpoints come from")
+            console.print("the dashboard. Drop --service, or drop --agent for a single tunnel.")
+            raise SystemExit(1)
+        label = label or AGENT_LABEL
+        run_args = build_agent_args(relay_host=relay_host, relay_port=relay_port)
+        description = "HLE agent (dashboard-managed tunnels)"
+        # The agent is the homelab's front door: always bring it back, not just
+        # on failure (a clean exit from a dropped control channel still needs a
+        # restart).
+        restart = "always"
+    else:
+        if not service_url or not label:
+            console.print(
+                "[red]--service and --label are required[/red] (or pass --agent to install "
+                "the dashboard-managed agent)."
+            )
+            raise SystemExit(1)
+        run_args = build_expose_args(
+            service=service_url,
+            label=label,
+            zone=zone,
+            apex=apex,
+            auth=auth,
+            websocket=websocket,
+            verify_ssl=verify_ssl,
+            forward_host=forward_host,
+            allow=allow,
+            options=options,
+        )
+        description = f"HLE tunnel: {label}"
+        restart = "on-failure"
+
     if plat == "darwin":
         _launchd_install(
             label=label,
-            expose_args=expose_args,
+            run_args=run_args,
             name=name,
             user_mode=user_mode,
             run_as=run_as,
@@ -480,21 +592,37 @@ def install(
     else:
         _systemd_install(
             label=label,
-            expose_args=expose_args,
+            run_args=run_args,
             name=name,
             user_mode=user_mode,
             run_as=run_as,
             start=start,
+            description=description,
+            restart=restart,
+        )
+
+    if agent_mode:
+        console.print(
+            "\n[dim]Add endpoints at https://hle.world/dashboard — the agent picks them "
+            "up within seconds, no restart needed.[/dim]"
         )
 
 
 @service.command("uninstall")
-@click.option("--label", required=True, help="Service label")
+@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
+@click.option("--label", default=None, help="Service label")
 @click.option("--name", default=None, help="Explicit unit/plist name")
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
-def uninstall(label: str, name: str | None, user_mode: bool) -> None:
-    """Stop, disable, and remove a tunnel's background service."""
+@click.option(
+    "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
+)
+def uninstall(
+    agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
+) -> None:
+    """Stop, disable, and remove a background service."""
     plat = _require_supported()
+    label = _resolve_label(label, agent_mode)
+    user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     if plat == "darwin":
         _launchd_uninstall(label=label, name=name, user_mode=user_mode)
     else:
@@ -502,12 +630,20 @@ def uninstall(label: str, name: str | None, user_mode: bool) -> None:
 
 
 @service.command("status")
-@click.option("--label", required=True, help="Service label")
+@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
+@click.option("--label", default=None, help="Service label")
 @click.option("--name", default=None, help="Explicit unit/plist name")
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
-def status(label: str, name: str | None, user_mode: bool) -> None:
-    """Show status for a tunnel's background service."""
+@click.option(
+    "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
+)
+def status(
+    agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
+) -> None:
+    """Show status for a background service."""
     plat = _require_supported()
+    label = _resolve_label(label, agent_mode)
+    user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     if plat == "darwin":
         _launchd_status(label=label, name=name, user_mode=user_mode)
     else:
