@@ -442,6 +442,59 @@ def agent_status() -> None:
         console.print("[dim]No agent token configured. Run 'hle agent enroll'.[/dim]")
 
 
+@agent.command("services")
+@click.option("--provider", default=None, help="Only show one provider (k8s, docker)")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output")
+def agent_services(provider: str | None, as_json: bool) -> None:
+    """List services this machine can see and could expose.
+
+    Runs the same discovery the agent reports to the dashboard, locally — useful
+    for checking what an agent would find before enrolling it, or for debugging
+    why something isn't showing up.
+    """
+    import json as _json
+
+    from rich.table import Table
+
+    from hle_client.discovery import active_providers, scan_all
+
+    providers = active_providers()
+    if provider:
+        providers = [p for p in providers if p.name == provider]
+
+    if not providers:
+        console.print("[yellow]No discovery providers are active here.[/yellow]")
+        console.print(
+            "[dim]Kubernetes needs an in-cluster ServiceAccount; Docker needs "
+            "/var/run/docker.sock mounted.[/dim]"
+        )
+        return
+
+    services, names, error = asyncio.run(scan_all(providers))
+
+    if as_json:
+        console.print(_json.dumps([s.model_dump() for s in services], indent=2))
+        return
+
+    if error:
+        console.print(f"[yellow]Some providers had trouble:[/yellow] {error}")
+    if not services:
+        console.print(f"[dim]No services found (scanned: {', '.join(names)}).[/dim]")
+        return
+
+    table = Table(title=f"Discovered services ({', '.join(names)})")
+    table.add_column("Name", style="cyan")
+    table.add_column("Where", style="dim")
+    table.add_column("Address")
+    table.add_column("Suggested label", style="green")
+    for s in sorted(services, key=lambda s: (s.provider, s.namespace or "", s.name)):
+        table.add_row(s.name, s.namespace or s.provider, s.address, s.suggested_label())
+    console.print(table)
+    console.print(
+        "\n[dim]Expose any of these from https://hle.world/dashboard → Agents → Endpoints.[/dim]"
+    )
+
+
 @agent.command("logout")
 def agent_logout() -> None:
     """Remove the saved agent token."""
