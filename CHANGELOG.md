@@ -1,5 +1,49 @@
 # Changelog
 
+## v2607.7 — 2026-07-25
+
+### Added
+
+- **`hle agent list`** — shows your agents and whether they're online:
+
+  ```console
+  $ hle agent list
+                            Agents
+  ┏━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━┓
+  ┃ Name     ┃ Status  ┃ Endpoints ┃ Version ┃ Last seen ┃
+  ┡━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━┩
+  │ trikala  │ online  │         2 │ 2607.7  │ 4s ago    │
+  │ nas      │ offline │         1 │ 2607.5  │ 3h ago    │
+  └──────────┴─────────┴───────────┴─────────┴───────────┘
+  ```
+
+  There was previously no way to see this from the CLI — `hle agent status`
+  only inspects the local machine — so finding the name that `hle fp --agent`
+  expects meant opening the dashboard. `--json` for scripting.
+
+  It authenticates with your API key rather than the agent token, since it's an
+  account-level question. Needs hle-server 2607.12, which is what made
+  `/api/agents` reachable with a key at all.
+
+### Fixed
+
+- **The agent's reconnect backoff never reset.** It only reset when a session
+  ended cleanly, but a relay restart ends it with an exception, so a session
+  that had been healthy for 19 minutes still inherited the delay from an
+  earlier unrelated blip:
+
+  ```
+  18:46:25  lost -> retry in 1.0s
+  18:46:29  502  -> retry in 4.0s
+  18:46:34  Agent registered           # healthy for 19 minutes
+  19:05:55  lost -> retry in 8.0s      # should have been 1.0s
+  ```
+
+  The delay only ever grew over a process's lifetime, so a long-running agent
+  drifted toward the 60s ceiling and every routine relay deploy cost up to a
+  minute of downtime for no reason. It now resets after any session that got as
+  far as registering.
+
 ## v2607.6 — 2026-07-25
 
 ### Fixed
