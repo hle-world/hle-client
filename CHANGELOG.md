@@ -1,5 +1,52 @@
 # Changelog
 
+## v2607.5 — 2026-07-25
+
+### Added
+
+- **Firepuncher (`hle fp`)** — forward a TCP port that only a remote agent can
+  reach to a local port, with no inbound port anywhere:
+
+  ```bash
+  hle fp --agent rpi --to 22 --port 9922
+  ```
+
+  Then point your SSH client at `localhost:9922`. One session multiplexes many
+  connections, so `scp`, `rsync`, and SSH's own forwarding work too.
+
+  Both ends authenticate over WSS and there is never a public TCP port.
+  Authorization is enforced twice: the relay proves you own the agent, and the
+  agent independently checks the target against an allowlist — so a leaked API
+  key can't turn an agent into a pivot into the network behind it. The allowlist
+  defaults to loopback only, and an empty rule list denies everything.
+
+- **`hle service install --fp`** — install a forward as a systemd unit or
+  launchd job, so a remote port is simply always available locally:
+
+  ```bash
+  hle service install --fp --agent-name rpi --to 22 --port 9922
+  ```
+
+- **Service discovery** — an agent on a Kubernetes cluster or Docker host
+  reports what's running there, so you can expose it from the dashboard instead
+  of copying URLs by hand. `hle agent services` lists the same inventory
+  locally. Providers self-detect; an agent on a plain VM reports nothing.
+
+  Both providers are read-only and add no dependencies — they use httpx rather
+  than the Docker SDK or the Kubernetes client.
+
+### Security
+
+- The Kubernetes discovery provider never skips TLS verification. An earlier
+  draft fell back to an unverified connection when the cluster CA was missing,
+  which would have sent the ServiceAccount bearer token to an unverified
+  endpoint. It now fails closed.
+
+### Fixed
+
+- Agent protocol 1.1: `forward_rules` in `welcome` / `state_sync`, so changing
+  what an agent may forward to takes effect within seconds without a restart.
+
 ## v2607.4 — 2026-07-25
 
 ### Added
