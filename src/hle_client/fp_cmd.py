@@ -11,7 +11,6 @@ targets on its allowlist. Nothing listens on a public port.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 
@@ -69,6 +68,15 @@ def fp_uri(relay_host: str, relay_port: int) -> str:
     return f"{scheme}://{relay_host}:{relay_port}/_hle/fp"
 
 
+# Close codes that mean "stop trying": the problem is the credential or the
+# request, and retrying just repeats it. Anything else — relay restart, network
+# drop, agent temporarily offline — is worth reconnecting through.
+_FATAL_CLOSE_CODES = frozenset({4001, 4003})
+
+RECONNECT_DELAY = 1.0
+MAX_RECONNECT_DELAY = 30.0
+
+
 async def _run(
     *,
     api_key: str,
@@ -80,45 +88,110 @@ async def _run(
     relay_host: str,
     relay_port: int,
 ) -> None:
+    """Serve the local port, reconnecting to the relay as needed.
+
+    The listener is bound once and kept for the lifetime of the command, so a
+    relay restart or a dropped network doesn't take the local port away. Streams
+    in flight when the connection drops cannot be recovered — the far end is
+    gone — so they're closed and the caller reconnects, but the port stays
+    there ready for them.
+    """
     uri = fp_uri(relay_host, relay_port)
-    async with websockets.connect(uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
-        await ws.send(
-            FpHello(api_key=api_key, agent=agent, client_version=__version__).model_dump_json()
-        )
-        raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
-        first = json.loads(raw)
-        if first.get("type") == "fp_error":
-            console.print(f"[red]Error:[/red] {first.get('message') or first.get('code')}")
-            raise SystemExit(1)
-        welcome = FpWelcome.model_validate(first)
+    client = FpLocalClient(
+        send=_not_connected,
+        target_host=target_host,
+        target_port=target_port,
+        on_error=lambda detail: console.print(f"[red]Refused:[/red] {detail}"),
+    )
+    server = await client.serve(bind_host, bind_port)
+    printed_banner = False
+    delay = RECONNECT_DELAY
 
-        client = FpLocalClient(
-            send=ws.send,
-            target_host=target_host,
-            target_port=target_port,
-            on_error=lambda detail: console.print(f"[red]Refused:[/red] {detail}"),
-        )
-        server = await client.serve(bind_host, bind_port)
+    async with server:
+        while True:
+            try:
+                async with websockets.connect(uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
+                    await ws.send(
+                        FpHello(
+                            api_key=api_key, agent=agent, client_version=__version__
+                        ).model_dump_json()
+                    )
+                    raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                    first = json.loads(raw)
+                    if first.get("type") == "fp_error":
+                        detail = first.get("message") or first.get("code")
+                        code = first.get("code")
+                        if code == "agent_offline":
+                            # Worth waiting for: the agent may be restarting.
+                            console.print(f"[yellow]{detail}[/yellow] — retrying...")
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, MAX_RECONNECT_DELAY)
+                            continue
+                        console.print(f"[red]Error:[/red] {detail}")
+                        raise SystemExit(1)
 
-        console.print(
-            f"[green]Forwarding[/green] {bind_host}:{bind_port} "
-            f"→ [cyan]{agent}[/cyan] → {target_host}:{target_port}"
-        )
-        if welcome.allowed:
-            console.print(f"[dim]Agent allows: {', '.join(welcome.allowed)}[/dim]")
-        if target_port == 22:
-            console.print(f"[dim]Try: ssh -p {bind_port} <user>@{bind_host}[/dim]")
-        console.print("[dim]Ctrl+C to stop.[/dim]")
+                    welcome = FpWelcome.model_validate(first)
+                    client.send = ws.send
+                    client.connected = True
+                    delay = RECONNECT_DELAY
 
-        pump = asyncio.create_task(_read_loop(ws, client))
-        try:
-            async with server:
-                await pump
-        finally:
-            pump.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pump
-            await client.close_all()
+                    if not printed_banner:
+                        console.print(
+                            f"[green]Forwarding[/green] {bind_host}:{bind_port} "
+                            f"→ [cyan]{agent}[/cyan] → {target_host}:{target_port}"
+                        )
+                        if welcome.allowed:
+                            console.print(f"[dim]Agent allows: {', '.join(welcome.allowed)}[/dim]")
+                        if target_port == 22:
+                            console.print(f"[dim]Try: ssh -p {bind_port} <user>@{bind_host}[/dim]")
+                        console.print("[dim]Ctrl+C to stop.[/dim]")
+                        printed_banner = True
+                    else:
+                        console.print("[green]Reconnected.[/green]")
+
+                    await _read_loop(ws, client)
+
+                # A clean close still means the session ended; reconnect.
+                console.print("[yellow]Connection closed by the relay[/yellow] — reconnecting...")
+
+            except SystemExit:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except websockets.exceptions.ConnectionClosed as exc:
+                if exc.rcvd is not None and exc.rcvd.code in _FATAL_CLOSE_CODES:
+                    console.print(f"[red]Error:[/red] {exc.rcvd.reason or 'rejected by relay'}")
+                    raise SystemExit(1) from None
+                console.print(f"[yellow]Connection lost[/yellow] ({_close_reason(exc)})")
+            except OSError as exc:
+                # DNS failure, no route, refused — typical when the laptop's
+                # network drops entirely.
+                console.print(f"[yellow]Cannot reach the relay[/yellow] ({exc})")
+            except Exception as exc:  # noqa: BLE001 — never surface a traceback here
+                console.print(f"[yellow]Connection problem[/yellow] ({exc})")
+            finally:
+                client.connected = False
+                client.send = _not_connected
+                # Streams cannot outlive the connection that carried them.
+                await client.close_all()
+
+            console.print(f"[dim]Retrying in {delay:.0f}s (Ctrl+C to stop)...[/dim]")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, MAX_RECONNECT_DELAY)
+
+
+async def _not_connected(_: str) -> None:
+    """Placeholder sender used while the relay connection is down."""
+    raise ConnectionError("not connected to the relay")
+
+
+def _close_reason(exc: websockets.exceptions.ConnectionClosed) -> str:
+    frame = exc.rcvd or exc.sent
+    if frame is None:
+        return "no close frame"
+    if frame.code == 1012:
+        return "relay restarting"
+    return frame.reason or f"code {frame.code}"
 
 
 async def _read_loop(ws: websockets.ClientConnection, client: FpLocalClient) -> None:
