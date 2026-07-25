@@ -147,6 +147,12 @@ class TestAgentSideDataPath:
             received.append(data)
             writer.write(b"PONG:" + data)
             await writer.drain()
+            # Must close: from 3.12, `Server.wait_closed()` waits for open
+            # connections, so a handler that returns without closing hangs
+            # `async with server` forever. On 3.11 it returned immediately and
+            # this leak was invisible.
+            writer.close()
+            await writer.wait_closed()
 
         server = await asyncio.start_server(echo, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
