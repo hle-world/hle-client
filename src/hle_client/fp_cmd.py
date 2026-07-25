@@ -76,6 +76,14 @@ _FATAL_CLOSE_CODES = frozenset({4001, 4003})
 RECONNECT_DELAY = 1.0
 MAX_RECONNECT_DELAY = 30.0
 
+# "The relay is fine, your agent just isn't there yet" is a different situation
+# from "I can't reach the relay". The relay answered, so polling it is cheap,
+# and the thing we're waiting for (an agent reconnecting) typically returns in
+# seconds. Backing this off to MAX_RECONNECT_DELAY meant the forward stayed
+# dead for up to 30s after the agent was already available again.
+AGENT_WAIT_DELAY = 2.0
+MAX_AGENT_WAIT_DELAY = 5.0
+
 
 async def _run(
     *,
@@ -106,6 +114,18 @@ async def _run(
     server = await client.serve(bind_host, bind_port)
     printed_banner = False
     delay = RECONNECT_DELAY
+    agent_wait = AGENT_WAIT_DELAY
+    # Repeating an identical line every couple of seconds reads like a fault
+    # even when the retry is working exactly as intended. Say it once, then say
+    # it again only when the situation actually changes.
+    last_notice: str | None = None
+    last_retry_delay: float | None = None
+
+    def notice(message: str, *, style: str = "yellow") -> None:
+        nonlocal last_notice
+        if message != last_notice:
+            console.print(f"[{style}]{message}[/{style}]")
+            last_notice = message
 
     async with server:
         while True:
@@ -122,10 +142,15 @@ async def _run(
                         detail = first.get("message") or first.get("code")
                         code = first.get("code")
                         if code == "agent_offline":
-                            # Worth waiting for: the agent may be restarting.
-                            console.print(f"[yellow]{detail}[/yellow] — retrying...")
-                            await asyncio.sleep(delay)
-                            delay = min(delay * 2, MAX_RECONNECT_DELAY)
+                            # The relay is reachable — only the agent is missing,
+                            # and it is probably reconnecting. Poll on its own
+                            # short schedule rather than the connection backoff.
+                            notice(f"{detail} Waiting for it to come back...")
+                            await asyncio.sleep(agent_wait)
+                            agent_wait = min(agent_wait * 2, MAX_AGENT_WAIT_DELAY)
+                            # Reaching the relay at all means the network is
+                            # healthy, so don't carry a stale connection backoff.
+                            delay = RECONNECT_DELAY
                             continue
                         console.print(f"[red]Error:[/red] {detail}")
                         raise SystemExit(1)
@@ -134,6 +159,7 @@ async def _run(
                     client.send = ws.send
                     client.connected = True
                     delay = RECONNECT_DELAY
+                    agent_wait = AGENT_WAIT_DELAY
 
                     if not printed_banner:
                         console.print(
@@ -147,12 +173,14 @@ async def _run(
                         console.print("[dim]Ctrl+C to stop.[/dim]")
                         printed_banner = True
                     else:
-                        console.print("[green]Reconnected.[/green]")
+                        console.print("[green]Reconnected.[/green] Forward is live again.")
+                    last_notice = None
+                    last_retry_delay = None
 
                     await _read_loop(ws, client)
 
                 # A clean close still means the session ended; reconnect.
-                console.print("[yellow]Connection closed by the relay[/yellow] — reconnecting...")
+                notice("Connection closed by the relay")
 
             except SystemExit:
                 raise
@@ -162,20 +190,24 @@ async def _run(
                 if exc.rcvd is not None and exc.rcvd.code in _FATAL_CLOSE_CODES:
                     console.print(f"[red]Error:[/red] {exc.rcvd.reason or 'rejected by relay'}")
                     raise SystemExit(1) from None
-                console.print(f"[yellow]Connection lost[/yellow] ({_close_reason(exc)})")
+                notice(f"Connection lost ({_close_reason(exc)})")
             except OSError as exc:
                 # DNS failure, no route, refused — typical when the laptop's
                 # network drops entirely.
-                console.print(f"[yellow]Cannot reach the relay[/yellow] ({exc})")
+                notice(f"Cannot reach the relay ({exc})")
             except Exception as exc:  # noqa: BLE001 — never surface a traceback here
-                console.print(f"[yellow]Connection problem[/yellow] ({exc})")
+                notice(f"Connection problem ({exc})")
             finally:
                 client.connected = False
                 client.send = _not_connected
                 # Streams cannot outlive the connection that carried them.
                 await client.close_all()
 
-            console.print(f"[dim]Retrying in {delay:.0f}s (Ctrl+C to stop)...[/dim]")
+            # Once this reaches the ceiling it stops changing, so printing it
+            # every pass would just be the same line forever.
+            if delay != last_retry_delay:
+                console.print(f"[dim]Retrying in {delay:.0f}s (Ctrl+C to stop)...[/dim]")
+                last_retry_delay = delay
             await asyncio.sleep(delay)
             delay = min(delay * 2, MAX_RECONNECT_DELAY)
 
