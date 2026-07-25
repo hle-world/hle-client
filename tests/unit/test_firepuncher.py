@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -80,6 +81,186 @@ class TestCloseHandling:
         from hle_client.fp_cmd import _FATAL_CLOSE_CODES
 
         assert code not in _FATAL_CLOSE_CODES
+
+
+class _ScriptedWS:
+    """One fake relay session: replies to the hello, then ends.
+
+    ``first`` is the JSON the relay sends back after ``fp_hello``. ``then``
+    is an exception to raise from the message loop, standing in for the
+    connection dropping mid-session.
+    """
+
+    def __init__(self, first: dict, then: Exception | None = None) -> None:
+        self._first = first
+        self._then = then
+        self.sent: list[str] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(raw)
+
+    async def recv(self) -> str:
+        return json.dumps(self._first)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._then is not None:
+            raise self._then
+        raise StopAsyncIteration
+
+
+class TestReconnectPacing:
+    """How `hle fp` behaves while it can't serve the forward.
+
+    Reported from a real relay deploy: the forward printed the same
+    "agent is not connected" line repeatedly and took far too long to come
+    back, because waiting for an agent shared the backoff counter used for
+    unreachable-relay retries.
+    """
+
+    async def _run_until_exhausted(self, monkeypatch, sessions, capsys):
+        """Drive _run through `sessions`, returning (sleeps, output)."""
+        from hle_client import fp_cmd
+
+        remaining = list(sessions)
+        sleeps: list[float] = []
+
+        def fake_connect(uri, **kw):
+            if not remaining:
+                raise KeyboardInterrupt  # ends the loop deterministically
+            nxt = remaining.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(fp_cmd.websockets, "connect", fake_connect)
+        monkeypatch.setattr(fp_cmd.asyncio, "sleep", fake_sleep)
+
+        with contextlib.suppress(KeyboardInterrupt):
+            await fp_cmd._run(
+                api_key="hle_x",
+                agent="rpi",
+                target_host="localhost",
+                target_port=22,
+                bind_host="127.0.0.1",
+                bind_port=0,
+                relay_host="hle.world",
+                relay_port=443,
+            )
+        return sleeps, capsys.readouterr().out
+
+    def _offline(self):
+        return _ScriptedWS(
+            {
+                "type": "fp_error",
+                "code": "agent_offline",
+                "message": "Agent 'rpi' is not connected right now.",
+            }
+        )
+
+    def _welcome(self, then=None):
+        return _ScriptedWS(
+            {"type": "fp_welcome", "agent_public_id": "abc-123", "allowed": ["localhost:*"]},
+            then=then,
+        )
+
+    async def test_waiting_for_an_agent_uses_the_short_schedule(self, monkeypatch, capsys):
+        """Not the connection backoff: the relay answered, so polling is cheap."""
+        sleeps, _ = await self._run_until_exhausted(
+            monkeypatch, [self._offline(), self._offline(), self._offline()], capsys
+        )
+        from hle_client.fp_cmd import AGENT_WAIT_DELAY, MAX_AGENT_WAIT_DELAY
+
+        assert sleeps[0] == AGENT_WAIT_DELAY
+        assert max(sleeps) <= MAX_AGENT_WAIT_DELAY
+
+    async def test_agent_wait_never_reaches_the_connection_ceiling(self, monkeypatch, capsys):
+        """The bug: an agent that returned after a blip still cost up to 30s."""
+        from hle_client.fp_cmd import MAX_RECONNECT_DELAY
+
+        sleeps, _ = await self._run_until_exhausted(
+            monkeypatch, [self._offline() for _ in range(8)], capsys
+        )
+        assert len(sleeps) == 8, sleeps
+        assert max(sleeps) < MAX_RECONNECT_DELAY, sleeps
+
+    async def test_the_offline_message_is_not_repeated(self, monkeypatch, capsys):
+        """Four identical lines read as a fault; the retry is working."""
+        _, out = await self._run_until_exhausted(
+            monkeypatch, [self._offline() for _ in range(4)], capsys
+        )
+        assert out.count("not connected right now") == 1
+
+    async def test_reaching_the_relay_clears_a_stale_connection_backoff(self, monkeypatch, capsys):
+        """A network outage then an agent wait must not inherit the old delay.
+
+        Two unreachable-relay failures grow the connection delay to 4s. Once the
+        relay answers — even with 'agent offline' — the network is demonstrably
+        fine, so the next real reconnect should start from 1s again.
+        """
+        sessions = [
+            OSError("no route to host"),
+            OSError("no route to host"),
+            self._offline(),
+            self._welcome(then=ConnectionResetError("dropped")),
+        ]
+        sleeps, _ = await self._run_until_exhausted(monkeypatch, sessions, capsys)
+        # 1s, 2s (connection backoff), 2s (agent wait), then back to 1s.
+        assert sleeps[:2] == [1.0, 2.0]
+        assert sleeps[-1] == 1.0
+
+    async def test_first_connection_prints_the_banner(self, monkeypatch, capsys):
+        _, out = await self._run_until_exhausted(
+            monkeypatch,
+            [self._offline(), self._welcome(then=ConnectionResetError("dropped"))],
+            capsys,
+        )
+        assert "Forwarding" in out
+        assert "Reconnected" not in out
+
+    async def test_recovery_after_a_drop_is_announced(self, monkeypatch, capsys):
+        """Coming back must be as visible as going away, or the user can't tell
+        whether the forward is usable again."""
+        _, out = await self._run_until_exhausted(
+            monkeypatch,
+            [
+                self._welcome(then=ConnectionResetError("dropped")),
+                self._offline(),
+                self._welcome(then=ConnectionResetError("dropped again")),
+            ],
+            capsys,
+        )
+        assert "Reconnected" in out
+
+    async def test_a_rejected_key_still_exits_rather_than_looping(self, monkeypatch, capsys):
+        from hle_client import fp_cmd
+
+        session = _ScriptedWS({"type": "fp_error", "code": "forbidden", "message": "nope"})
+        monkeypatch.setattr(fp_cmd.websockets, "connect", lambda uri, **kw: session)
+        monkeypatch.setattr(fp_cmd.asyncio, "sleep", lambda s: asyncio.sleep(0))
+
+        with pytest.raises(SystemExit):
+            await fp_cmd._run(
+                api_key="hle_x",
+                agent="rpi",
+                target_host="localhost",
+                target_port=22,
+                bind_host="127.0.0.1",
+                bind_port=0,
+                relay_host="hle.world",
+                relay_port=443,
+            )
 
 
 class TestForwardRule:
