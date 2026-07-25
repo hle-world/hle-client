@@ -2,6 +2,10 @@
 
 ## v2607.7 — 2026-07-25
 
+<!-- TODO: Fill in release notes before merging -->
+
+## v2607.7 — 2026-07-25
+
 ### Added
 
 - **`hle agent list`** — shows your agents and whether they're online:
