@@ -1,5 +1,35 @@
 # Changelog
 
+## v2607.6 — 2026-07-25
+
+### Fixed
+
+- **`hle fp` survives losing the relay.** It connected once with no recovery, so
+  a relay restart — which sends `1012 service restart`, and happens on every
+  deploy — crashed the command with a raw `ConnectionClosedError` traceback and
+  the forward was gone.
+
+  It now reconnects with backoff (1s, capped at 30s), the way the agent already
+  did. The asymmetry was the actual defect.
+
+  The listener stays bound across reconnects, so the local port doesn't
+  disappear: `ssh rpi` works again as soon as the relay returns, without
+  restarting anything. That matters most for forwards installed via
+  `hle service install --fp`, where the port is expected to simply be there.
+
+  Streams open at the moment of disconnect are closed — the far end is gone and
+  they can't be recovered, so existing SSH sessions break either way — but new
+  connections work immediately.
+
+  Connections arriving during an outage are refused straight away instead of
+  hanging until the dial timeout for a relay we already know is absent.
+
+  Close codes are classified: `4001`/`4003` mean the credential or request was
+  rejected, so retrying only repeats it and the command exits with a clear
+  message. Restarts, network loss, and a briefly-offline agent are all retried.
+
+  No failure path prints a traceback any more.
+
 ## v2607.5 — 2026-07-25
 
 ### Added
