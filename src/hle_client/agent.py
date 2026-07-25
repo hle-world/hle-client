@@ -22,6 +22,7 @@ from typing import Any
 import websockets
 
 from hle_client import __version__
+from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.tunnel import Tunnel, TunnelConfig
 from hle_common.agent_protocol import (
@@ -32,6 +33,7 @@ from hle_common.agent_protocol import (
     EndpointSpec,
     EndpointStatus,
 )
+from hle_common.discovery import DiscoveryReport
 from hle_common.fp_protocol import ForwardRule, default_rules
 
 logger = logging.getLogger(__name__)
@@ -149,10 +151,15 @@ class AgentClient:
     async def _connect_once(self) -> None:
         logger.info("Connecting agent control to %s", self.control_uri)
         async with websockets.connect(self.control_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
+            # Advertise what this agent can do so the dashboard only offers
+            # features the agent actually supports. Firepuncher is always
+            # available; discovery depends on what's detectable here.
+            capabilities = ["firepuncher"]
+            capabilities += [f"discovery:{p.name}" for p in active_providers()]
             hello = AgentHello(
                 token=self._token,
                 agent_version=__version__,
-                capabilities=["firepuncher"],
+                capabilities=capabilities,
             )
             await ws.send(hello.model_dump_json())
 
@@ -174,11 +181,14 @@ class AgentClient:
                 len(welcome.endpoints),
             )
             await self.reconcile(welcome.endpoints)
+            # Report the inventory once on connect so the dashboard has
+            # something to show immediately, then only on request.
+            await self._report_discovery(ws)
 
             status_task = asyncio.create_task(self._status_loop(ws))
             try:
                 async for raw in ws:
-                    await self._handle_message(raw)
+                    await self._handle_message(raw, ws)
             finally:
                 status_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -187,7 +197,7 @@ class AgentClient:
                     await self._fp.close_all()
                     self._fp = None
 
-    async def _handle_message(self, raw: str | bytes) -> None:
+    async def _handle_message(self, raw: str | bytes, ws: Any = None) -> None:
         try:
             msg = json.loads(raw)
         except (ValueError, TypeError):
@@ -206,10 +216,30 @@ class AgentClient:
         elif isinstance(mtype, str) and mtype.startswith("fp_"):
             if self._fp is not None:
                 await self._fp.handle(msg)
+        elif mtype == "discovery_refresh":
+            if ws is not None:
+                await self._report_discovery(ws)
         elif mtype == "pong":
             pass
         else:
             logger.debug("Unhandled agent control message: %s", mtype)
+
+    async def _report_discovery(self, ws: Any) -> None:
+        """Scan every applicable provider and report the inventory.
+
+        Best-effort: discovery failing must never take down the control
+        connection, which is what actually keeps tunnels alive.
+        """
+        try:
+            services, providers, error = await scan_all()
+        except Exception as exc:  # noqa: BLE001 — discovery is not load-bearing
+            logger.warning("Discovery scan failed: %s", exc)
+            return
+        if not providers:
+            return  # nothing to discover here; stay quiet
+        report = DiscoveryReport(services=services, providers=providers, error=error)
+        with contextlib.suppress(Exception):
+            await ws.send(report.model_dump_json())
 
     async def _status_loop(self, ws: Any) -> None:
         while True:
