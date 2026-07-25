@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://get.hle.world | sh
-#   curl -fsSL https://get.hle.world | sh -s -- --version 2607.5
+#   curl -fsSL https://get.hle.world | sh -s -- --version 2607.6
 #
 #   # Install the agent and run it as a service (prompts for the token):
 #   curl -fsSL https://get.hle.world | sh -s -- --agent
@@ -263,7 +263,7 @@ main() {
         error "Install Python from https://python.org or via your package manager."
         exit 1
     }
-    info "Found Python: $PYTHON ($($PYTHON --version 2607.5>&1))"
+    info "Found Python: $PYTHON ($($PYTHON --version 2607.6>&1))"
 
     # Try install methods in order of preference
     if command -v pipx >/dev/null 2>&1; then
