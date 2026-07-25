@@ -8,6 +8,8 @@ Docker socket or a Kubernetes cluster.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from hle_client.discovery import active_providers, scan_all
@@ -236,3 +238,38 @@ class TestKubernetesProvider:
     def test_unavailable_outside_a_cluster(self, monkeypatch):
         monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
         assert KubernetesProvider().available() is False
+
+
+class TestKubernetesTls:
+    """TLS verification must never be skipped.
+
+    The request carries the ServiceAccount bearer token, so an unverified
+    connection would hand that credential to anything able to intercept it.
+    """
+
+    def test_missing_ca_raises_instead_of_disabling_verification(self, monkeypatch):
+        import hle_client.discovery.kubernetes as k8s
+
+        monkeypatch.setattr(k8s, "CA_PATH", Path("/nonexistent/ca.crt"))
+        with pytest.raises(RuntimeError, match="refusing to talk to the API server"):
+            k8s.KubernetesProvider()._verify()
+
+    def test_verify_returns_the_ca_path_when_present(self, monkeypatch, tmp_path):
+        import hle_client.discovery.kubernetes as k8s
+
+        ca = tmp_path / "ca.crt"
+        ca.write_text("-----BEGIN CERTIFICATE-----")
+        monkeypatch.setattr(k8s, "CA_PATH", ca)
+        # A path, never False — httpx treats False as "skip verification".
+        assert k8s.KubernetesProvider()._verify() == str(ca)
+
+    def test_unavailable_without_a_ca(self, monkeypatch, tmp_path):
+        import hle_client.discovery.kubernetes as k8s
+
+        token = tmp_path / "token"
+        token.write_text("t")
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+        monkeypatch.setattr(k8s, "TOKEN_PATH", token)
+        monkeypatch.setattr(k8s, "CA_PATH", tmp_path / "missing.crt")
+        # Reported unavailable, so scan() is never reached in that state.
+        assert k8s.KubernetesProvider().available() is False

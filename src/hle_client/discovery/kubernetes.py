@@ -43,10 +43,11 @@ class KubernetesProvider:
         self._port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
 
     def available(self) -> bool:
-        # Both the injected env and the mounted token must be present; either
-        # alone means we're not really running in a pod.
+        # Env, token, *and* CA must all be present. Requiring the CA here means
+        # we never reach scan() in a state where we'd have to choose between
+        # skipping verification and failing — see _verify().
         try:
-            return bool(self._host) and TOKEN_PATH.exists()
+            return bool(self._host) and TOKEN_PATH.exists() and CA_PATH.exists()
         except OSError:
             return False
 
@@ -55,8 +56,24 @@ class KubernetesProvider:
         # cached one silently starts returning 401 after an hour or so.
         return TOKEN_PATH.read_text().strip()
 
+    def _verify(self) -> str:
+        """Path to the cluster CA bundle.
+
+        Deliberately fails rather than falling back to an unverified connection:
+        we send the ServiceAccount bearer token on this request, and skipping
+        verification would hand that credential to anything that can intercept
+        the connection. A missing CA means we aren't really in a pod, so there
+        is nothing to usefully talk to anyway.
+        """
+        if not CA_PATH.exists():
+            raise RuntimeError(
+                f"Kubernetes CA bundle not found at {CA_PATH}; refusing to talk to the "
+                "API server without TLS verification."
+            )
+        return str(CA_PATH)
+
     async def scan(self) -> list[DiscoveredService]:
-        verify: str | bool = str(CA_PATH) if CA_PATH.exists() else False
+        verify = self._verify()
         headers = {"Authorization": f"Bearer {self._token()}"}
         base = f"https://{self._host}:{self._port}"
 
