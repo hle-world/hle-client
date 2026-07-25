@@ -116,6 +116,43 @@ def build_agent_args(
     return args
 
 
+def build_fp_args(
+    *,
+    agent: str,
+    target: str,
+    bind_port: int | None = None,
+    bind_host: str | None = None,
+    relay_host: str | None = None,
+    relay_port: int | None = None,
+) -> list[str]:
+    """Build the ``fp`` argv (no secrets) for the service definition.
+
+    The API key is read at runtime from the running user's config or
+    ``HLE_API_KEY``, never written into the unit.
+    """
+    args = ["fp", "--agent", agent, "--to", target]
+    if bind_port:
+        args += ["--port", str(bind_port)]
+    if bind_host:
+        args += ["--bind", bind_host]
+    if relay_host:
+        args += ["--relay-host", relay_host]
+    if relay_port:
+        args += ["--relay-port", str(relay_port)]
+    return args
+
+
+def fp_label(agent: str, target: str) -> str:
+    """Unit label for a forward, e.g. ``fp-rpi-22`` -> ``hle-fp-rpi-22.service``.
+
+    Includes the port so several forwards through one agent can coexist.
+    """
+    port = target.rsplit(":", 1)[-1] if ":" in target else target
+    safe_agent = "".join(c if c.isalnum() or c in "-_" else "-" for c in agent)
+    safe_port = "".join(c for c in port if c.isalnum())
+    return f"fp-{safe_agent}-{safe_port}" if safe_port else f"fp-{safe_agent}"
+
+
 def resolve_user_mode(*, user_flag: bool, system_flag: bool) -> bool:
     """Decide between a per-user and a system service.
 
@@ -487,8 +524,21 @@ def service() -> None:
     default=False,
     help="Install the dashboard-driven agent (`hle agent run`) instead of a single tunnel",
 )
-@click.option("--relay-host", default=None, help="Agent mode: relay host (default hle.world)")
-@click.option("--relay-port", default=None, type=int, help="Agent mode: relay port (default 443)")
+@click.option(
+    "--fp",
+    "fp_mode",
+    is_flag=True,
+    default=False,
+    help="Install a firepuncher forward (`hle fp`) — needs --agent-name and --to",
+)
+@click.option("--agent-name", default=None, help="fp mode: agent to forward through")
+@click.option("--to", "fp_target", default=None, metavar="HOST:PORT", help="fp mode: target")
+@click.option("--port", "fp_port", default=None, type=int, help="fp mode: local port to bind")
+@click.option("--bind", "fp_bind", default=None, help="fp mode: local address to bind")
+@click.option("--relay-host", default=None, help="Agent/fp mode: relay host (default hle.world)")
+@click.option(
+    "--relay-port", default=None, type=int, help="Agent/fp mode: relay port (default 443)"
+)
 @click.option("--service", "service_url", default=None, help="Local service URL")
 @click.option("--label", default=None, help="Service label (also names the unit hle-<label>)")
 @click.option("--zone", default=None, help="Custom zone to publish under")
@@ -510,6 +560,11 @@ def service() -> None:
 @click.option("--start/--no-start", default=True, help="Enable + start the service now")
 def install(
     agent_mode: bool,
+    fp_mode: bool,
+    agent_name: str | None,
+    fp_target: str | None,
+    fp_port: int | None,
+    fp_bind: str | None,
     relay_host: str | None,
     relay_port: int | None,
     service_url: str | None,
@@ -530,9 +585,15 @@ def install(
 ) -> None:
     """Install (and start) a background service.
 
-    Default: a single tunnel (`hle expose`) — requires --service and --label.
-    With --agent: the dashboard-driven agent (`hle agent run`), which serves
-    every endpoint you declare in the dashboard from one process.
+    Three modes:
+
+    \b
+      (default)  a single tunnel — requires --service and --label
+      --agent    the dashboard-driven agent, serving every endpoint you
+                 declare in the dashboard from one process
+      --fp       a firepuncher forward, so a remote port is always
+                 available locally:
+                   hle service install --fp --agent-name rpi --to 22 --port 9922
 
     Credentials are never written into the service file. They are read at
     runtime from the running user's ~/.config/hle/ (config.toml for the API key,
@@ -546,7 +607,31 @@ def install(
     plat = _require_supported()
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
 
-    if agent_mode:
+    if agent_mode and fp_mode:
+        console.print("[red]Pass either --agent or --fp, not both.[/red]")
+        raise SystemExit(1)
+
+    if fp_mode:
+        if not agent_name or not fp_target:
+            console.print(
+                "[red]--agent-name and --to are required with --fp.[/red]\n"
+                "Example: hle service install --fp --agent-name rpi --to 22 --port 9922"
+            )
+            raise SystemExit(1)
+        label = label or fp_label(agent_name, fp_target)
+        run_args = build_fp_args(
+            agent=agent_name,
+            target=fp_target,
+            bind_port=fp_port,
+            bind_host=fp_bind,
+            relay_host=relay_host,
+            relay_port=relay_port,
+        )
+        description = f"HLE firepuncher: {agent_name} {fp_target}"
+        # A forward is only useful if it's there when you reach for it, so keep
+        # it up across relay blips rather than only on failure.
+        restart = "always"
+    elif agent_mode:
         if service_url:
             console.print("[red]--service is not used with --agent.[/red] Endpoints come from")
             console.print("the dashboard. Drop --service, or drop --agent for a single tunnel.")
@@ -605,6 +690,12 @@ def install(
         console.print(
             "\n[dim]Add endpoints at https://hle.world/dashboard — the agent picks them "
             "up within seconds, no restart needed.[/dim]"
+        )
+    elif fp_mode:
+        port_hint = fp_port or "the bound port"
+        console.print(
+            f"\n[dim]The forward is now always on. Point your client at "
+            f"{fp_bind or '127.0.0.1'}:{port_hint}.[/dim]"
         )
 
 
