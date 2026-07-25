@@ -120,6 +120,79 @@ class TestReconcile:
         assert all(t.disconnect_calls == 1 for t in created)
 
 
+class TestReconnectBackoff:
+    """The backoff must reset after a session that actually worked.
+
+    Observed in production: an agent that had been up for 19 minutes waited 8s
+    to reconnect after a relay restart, because a previous unrelated blip had
+    already doubled the delay and nothing ever reset it. Left alone, a
+    long-lived agent drifts to the 60s ceiling and every routine deploy costs a
+    full minute of downtime.
+    """
+
+    async def _delays_for(self, monkeypatch, sessions) -> list[float]:
+        """Run run() through `sessions` outcomes, returning the sleeps taken.
+
+        Each session is True (registers, then drops) or False (fails to connect).
+        """
+        client = AgentClient("hlea_x")
+        slept: list[float] = []
+        remaining = list(sessions)
+
+        async def fake_connect_once() -> None:
+            if not remaining:
+                client._running = False
+                return
+            registered = remaining.pop(0)
+            client._registered = registered
+            raise ConnectionError("relay went away")
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await client.run()
+        return slept
+
+    async def test_backoff_grows_while_connections_keep_failing(self, monkeypatch):
+        delays = await self._delays_for(monkeypatch, [False, False, False])
+        assert delays[:3] == [1.0, 2.0, 4.0]
+
+    async def test_backoff_resets_after_a_registered_session(self, monkeypatch):
+        # Two failures grow the delay to 1s, 2s. The third session registers
+        # before dropping, so the next wait is 1s again rather than 4s — the
+        # 4.0 in the failure-only case above is exactly what must not appear.
+        delays = await self._delays_for(monkeypatch, [False, False, True, False])
+        assert delays[:4] == [1.0, 2.0, 1.0, 2.0]
+
+    async def test_a_session_that_never_registered_does_not_reset(self, monkeypatch):
+        # Connecting but dying before the welcome is not evidence of health.
+        delays = await self._delays_for(monkeypatch, [False, False, False])
+        assert delays[2] == 4.0
+
+    async def test_backoff_is_capped(self, monkeypatch):
+        client = AgentClient("hlea_x", reconnect_delay=1.0, max_reconnect_delay=5.0)
+        slept: list[float] = []
+        count = 0
+
+        async def fake_connect_once() -> None:
+            nonlocal count
+            count += 1
+            if count > 6:
+                client._running = False
+                return
+            raise ConnectionError("nope")
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await client.run()
+        assert max(slept) == 5.0
+
+
 class TestControlUri:
     def test_wss_for_remote(self):
         client = AgentClient("hlea_x", relay_host="hle.world", relay_port=443)

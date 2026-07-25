@@ -93,6 +93,17 @@ class ApiClient:
             result: list[dict[str, Any]] = resp.json()
             return result
 
+    async def list_agents(self) -> list[dict[str, Any]]:
+        """List the authenticated user's agents."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{self._base_url}/api/agents",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            result: list[dict[str, Any]] = resp.json()
+            return result
+
     async def list_access_rules(self, subdomain: str) -> list[dict[str, Any]]:
         """List access rules for a subdomain."""
         async with httpx.AsyncClient() as client:

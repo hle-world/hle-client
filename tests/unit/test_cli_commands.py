@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch
 if typing.TYPE_CHECKING:
     from pathlib import Path
 
+from datetime import UTC
+
 from click.testing import CliRunner
 
 from hle_client.cli import main
@@ -510,3 +512,109 @@ class TestExposeNoAutoSave:
             )
         assert result.exit_code == 0
         assert mock_run.called
+
+
+class TestAgentList:
+    """`hle agent list` — the lookup for what to pass to `hle fp --agent`."""
+
+    def _invoke(self, agents, extra=None):
+        runner = CliRunner()
+        mock_client = AsyncMock()
+        mock_client.list_agents.return_value = agents
+        with patch("hle_client.api.ApiClient", return_value=mock_client):
+            return runner.invoke(main, ["agent", "list", "--api-key", _KEY, *(extra or [])])
+
+    def test_shows_name_status_and_endpoints(self) -> None:
+        result = self._invoke(
+            [
+                {
+                    "name": "trikala",
+                    "online": True,
+                    "endpoint_count": 2,
+                    "agent_version": "2607.6",
+                    "last_seen_at": None,
+                }
+            ]
+        )
+        assert result.exit_code == 0
+        assert "trikala" in result.output
+        assert "online" in result.output
+
+    def test_offline_agent_is_marked(self) -> None:
+        result = self._invoke([{"name": "nas", "online": False, "endpoint_count": 0}])
+        assert result.exit_code == 0
+        assert "offline" in result.output
+
+    def test_empty_list_explains_what_to_do(self) -> None:
+        result = self._invoke([])
+        assert result.exit_code == 0
+        assert "No agents yet" in result.output
+
+    def test_json_output_is_machine_readable(self) -> None:
+        import json
+
+        agents = [{"name": "rpi", "online": True, "endpoint_count": 1}]
+        result = self._invoke(agents, ["--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == agents
+
+    def test_missing_key_is_a_clear_error(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli._load_api_key", return_value=None):
+            result = runner.invoke(main, ["agent", "list"])
+        assert result.exit_code == 1
+        assert "No API key" in result.output
+
+    def test_disabled_feature_is_explained_not_a_traceback(self) -> None:
+        import httpx
+
+        runner = CliRunner()
+        mock_client = AsyncMock()
+        mock_client.list_agents.side_effect = httpx.HTTPStatusError(
+            "404",
+            request=httpx.Request("GET", "https://hle.world/api/agents"),
+            response=httpx.Response(404),
+        )
+        with patch("hle_client.api.ApiClient", return_value=mock_client):
+            result = runner.invoke(main, ["agent", "list", "--api-key", _KEY])
+        assert result.exit_code == 1
+        assert "not enabled" in result.output
+
+
+class TestHumanizeLastSeen:
+    def test_never(self) -> None:
+        from hle_client.cli import _humanize_last_seen
+
+        assert _humanize_last_seen(None) == "never"
+
+    def test_recent_is_seconds(self) -> None:
+        from datetime import datetime, timedelta
+
+        from hle_client.cli import _humanize_last_seen
+
+        ts = (datetime.now(UTC) - timedelta(seconds=20)).isoformat()
+        assert _humanize_last_seen(ts).endswith("s ago")
+
+    def test_hours(self) -> None:
+        from datetime import datetime, timedelta
+
+        from hle_client.cli import _humanize_last_seen
+
+        ts = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+        assert _humanize_last_seen(ts) == "5h ago"
+
+    def test_naive_timestamp_is_treated_as_utc(self) -> None:
+        """The server serialises without a tz suffix; subtracting a naive from
+        an aware datetime raises, so this would crash the table not misformat it.
+        """
+        from datetime import datetime, timedelta
+
+        from hle_client.cli import _humanize_last_seen
+
+        ts = (datetime.now(UTC) - timedelta(minutes=10)).replace(tzinfo=None).isoformat()
+        assert _humanize_last_seen(ts) == "10m ago"
+
+    def test_unparseable_falls_back_to_the_raw_value(self) -> None:
+        from hle_client.cli import _humanize_last_seen
+
+        assert _humanize_last_seen("not-a-date") == "not-a-date"
