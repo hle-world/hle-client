@@ -2,7 +2,33 @@
 
 ## v2607.4 — 2026-07-25
 
-<!-- TODO: Fill in release notes before merging -->
+### Added
+- **`hle service install --agent`** — install the dashboard-managed agent as a
+  background service, so every endpoint you declare in the dashboard survives
+  reboots. Unit is `hle-agent.service` (systemd) / `world.hle.agent` (launchd),
+  with `Restart=always`.
+  - `hle service uninstall --agent` and `hle service status --agent` target it
+    without needing to remember the label.
+  - The enrollment token is read at runtime from `~/.config/hle/agent.toml` or
+    `HLE_AGENT_TOKEN` — never written into the service file.
+- **Service scope auto-detection** — with neither `--user` nor `--system`, root
+  installs a system service and a normal user installs a per-user one (with a
+  `loginctl enable-linger` hint). Both flags remain available to force it.
+- **Installer agent flags** — `--agent`, `--token`, `--no-service`, `--user`,
+  `--system`, and `--help`. `--agent` installs the client, enrolls the machine,
+  and installs the service in one command; without `--token` it prompts on the
+  terminal.
+
+### Fixed
+- Installer prompts read from `/dev/tty` instead of stdin. When the installer is
+  piped from the network, stdin is the script itself, so the "add ~/.local/bin to
+  PATH?" prompt consumed script text rather than the user's answer.
+
+### Changed
+- Internal: `service_cmd` now builds `run_args` (was `expose_args`) and takes
+  `description` / `restart`, so single-tunnel and agent modes share the systemd
+  and launchd backends. No change to existing `hle expose` or
+  `hle service install` behaviour.
 
 ## v2607.3 — 2026-07-17
 
