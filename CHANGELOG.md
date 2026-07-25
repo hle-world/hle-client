@@ -2,7 +2,29 @@
 
 ## v2607.8 — 2026-07-25
 
-<!-- TODO: Fill in release notes before merging -->
+### Fixed
+
+- **`hle fp` recovers quickly when the agent is briefly offline.** Waiting for
+  an agent shared the backoff counter that unreachable-relay retries grow, so
+  after a relay deploy it was already at 8s and kept doubling toward 30s — the
+  forward stayed dead for up to half a minute after the agent was back.
+
+  Those two situations aren't alike. If the relay answered "that agent isn't
+  connected", the network is demonstrably fine and only the agent is missing —
+  usually for a few seconds while it reconnects. That now polls on its own
+  schedule (2s, capped at 5s), and reaching the relay clears any stale
+  connection backoff.
+
+- **Status lines no longer repeat.** The same line every couple of seconds with
+  no countdown read like a fault rather than a retry working as intended:
+
+  ```
+  Agent 'rpi trikala' is not connected right now. — retrying...
+  Agent 'rpi trikala' is not connected right now. — retrying...
+  ```
+
+  Each message is printed once and repeated only when the situation changes.
+  Recovery is announced with `Reconnected. Forward is live again.`
 
 ## v2607.7 — 2026-07-25
 
