@@ -2,13 +2,90 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hle_client.service_cmd import (
+    AGENT_LABEL,
+    build_agent_args,
     build_expose_args,
     launchd_label,
     render_launchd_plist,
     render_unit,
+    resolve_user_mode,
     unit_name,
 )
+
+
+class TestBuildAgentArgs:
+    def test_minimal(self):
+        assert build_agent_args() == ["agent", "run"]
+
+    def test_relay_override(self):
+        assert build_agent_args(relay_host="staging.hle.world", relay_port=8443) == [
+            "agent",
+            "run",
+            "--relay-host",
+            "staging.hle.world",
+            "--relay-port",
+            "8443",
+        ]
+
+    def test_never_contains_a_token(self):
+        # The enrollment token is read at runtime, never baked into the unit.
+        assert not any(a.startswith("hlea_") for a in build_agent_args())
+
+
+class TestResolveUserMode:
+    def test_explicit_user_wins(self, monkeypatch):
+        monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
+        assert resolve_user_mode(user_flag=True, system_flag=False) is True
+
+    def test_explicit_system_wins(self, monkeypatch):
+        monkeypatch.setattr("os.geteuid", lambda: 1000, raising=False)
+        assert resolve_user_mode(user_flag=False, system_flag=True) is False
+
+    def test_autodetect_root_is_system(self, monkeypatch):
+        monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
+        assert resolve_user_mode(user_flag=False, system_flag=False) is False
+
+    def test_autodetect_nonroot_is_user(self, monkeypatch):
+        monkeypatch.setattr("os.geteuid", lambda: 1000, raising=False)
+        assert resolve_user_mode(user_flag=False, system_flag=False) is True
+
+    def test_both_flags_rejected(self):
+        with pytest.raises(SystemExit):
+            resolve_user_mode(user_flag=True, system_flag=True)
+
+
+class TestAgentUnit:
+    def test_unit_name_and_restart_always(self):
+        assert unit_name(AGENT_LABEL) == "hle-agent.service"
+        unit = render_unit(
+            label=AGENT_LABEL,
+            hle_path="/usr/local/bin/hle",
+            run_args=build_agent_args(),
+            user_mode=False,
+            run_as_user="homelab",
+            description="HLE agent (dashboard-managed tunnels)",
+            restart="always",
+        )
+        assert "ExecStart=/usr/local/bin/hle agent run" in unit
+        assert "Restart=always" in unit
+        assert "Description=HLE agent (dashboard-managed tunnels)" in unit
+        assert "User=homelab" in unit
+
+    def test_launchd_plist(self):
+        plist = render_launchd_plist(
+            label=AGENT_LABEL,
+            plist_label=launchd_label(AGENT_LABEL),
+            hle_path="/usr/local/bin/hle",
+            run_args=build_agent_args(),
+            run_as_user=None,
+            log_dir="/tmp/logs",
+        )
+        assert "<string>world.hle.agent</string>" in plist
+        assert "<string>agent</string>" in plist
+        assert "<string>run</string>" in plist
 
 
 class TestUnitName:
@@ -68,7 +145,7 @@ class TestRenderUnit:
         unit = render_unit(
             label="tv",
             hle_path="/root/.local/bin/hle",
-            expose_args=["expose", "--service", "http://localhost:9998", "--label", "tv"],
+            run_args=["expose", "--service", "http://localhost:9998", "--label", "tv"],
             user_mode=False,
             run_as_user="ian",
         )
@@ -85,7 +162,7 @@ class TestRenderUnit:
         unit = render_unit(
             label="tv",
             hle_path="/home/ian/.local/bin/hle",
-            expose_args=["expose", "--service", "http://localhost:9998", "--label", "tv"],
+            run_args=["expose", "--service", "http://localhost:9998", "--label", "tv"],
             user_mode=True,
             run_as_user="ian",
         )
@@ -96,7 +173,7 @@ class TestRenderUnit:
         unit = render_unit(
             label="tv",
             hle_path="/opt/hle bin/hle",
-            expose_args=["expose", "--option", "note=hello world"],
+            run_args=["expose", "--option", "note=hello world"],
             user_mode=True,
             run_as_user=None,
         )
@@ -121,7 +198,7 @@ class TestRenderLaunchdPlist:
             label="tv",
             plist_label="world.hle.tv",
             hle_path="/usr/local/bin/hle",
-            expose_args=["expose", "--service", "http://localhost:9998", "--label", "tv"],
+            run_args=["expose", "--service", "http://localhost:9998", "--label", "tv"],
             run_as_user="ian",
             log_dir="/var/log",
         )
@@ -139,7 +216,7 @@ class TestRenderLaunchdPlist:
             label="tv",
             plist_label="world.hle.tv",
             hle_path="/opt/homebrew/bin/hle",
-            expose_args=["expose", "--service", "http://localhost:9998"],
+            run_args=["expose", "--service", "http://localhost:9998"],
             run_as_user=None,
             log_dir="/Users/ian/Library/Logs/hle",
         )
@@ -150,7 +227,7 @@ class TestRenderLaunchdPlist:
             label="tv",
             plist_label="world.hle.tv",
             hle_path="/usr/local/bin/hle",
-            expose_args=["expose", "--option", "note=a&b<c"],
+            run_args=["expose", "--option", "note=a&b<c"],
             run_as_user=None,
             log_dir="/var/log",
         )
