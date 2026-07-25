@@ -8,12 +8,54 @@ from hle_client.service_cmd import (
     AGENT_LABEL,
     build_agent_args,
     build_expose_args,
+    build_fp_args,
+    fp_label,
     launchd_label,
     render_launchd_plist,
     render_unit,
     resolve_user_mode,
     unit_name,
 )
+
+
+class TestBuildFpArgs:
+    def test_minimal(self):
+        assert build_fp_args(agent="rpi", target="22") == ["fp", "--agent", "rpi", "--to", "22"]
+
+    def test_full(self):
+        assert build_fp_args(
+            agent="rpi", target="localhost:22", bind_port=9922, bind_host="127.0.0.1"
+        ) == [
+            "fp",
+            "--agent",
+            "rpi",
+            "--to",
+            "localhost:22",
+            "--port",
+            "9922",
+            "--bind",
+            "127.0.0.1",
+        ]
+
+    def test_never_contains_a_key(self):
+        # The API key is read at runtime, never baked into the unit.
+        assert not any(a.startswith("hle_") for a in build_fp_args(agent="rpi", target="22"))
+
+
+class TestFpLabel:
+    def test_includes_port_so_forwards_coexist(self):
+        assert fp_label("rpi", "22") == "fp-rpi-22"
+        assert fp_label("rpi", "localhost:5432") == "fp-rpi-5432"
+        # Two forwards through one agent must not collide on the unit name.
+        assert fp_label("rpi", "22") != fp_label("rpi", "5432")
+
+    def test_unit_name(self):
+        assert unit_name(fp_label("rpi", "22")) == "hle-fp-rpi-22.service"
+
+    def test_sanitizes_unsafe_characters(self):
+        # Agent names are user-supplied; they must not escape into the filename.
+        assert "/" not in fp_label("a/b", "22")
+        assert fp_label("a/b", "22") == "fp-a-b-22"
 
 
 class TestBuildAgentArgs:

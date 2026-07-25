@@ -15,7 +15,12 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-AGENT_PROTOCOL_VERSION = "1.0"
+# Runtime import, not just typing: pydantic resolves this to build the model.
+from hle_common.fp_protocol import ForwardRule  # noqa: TC001
+
+# 1.1 adds firepuncher: `forward_rules` on welcome/state_sync, and `fp_*` frames
+# multiplexed onto this same control connection.
+AGENT_PROTOCOL_VERSION = "1.1"
 
 
 class AgentMsgType(StrEnum):
@@ -65,11 +70,15 @@ class AgentWelcome(BaseModel):
     # server so a single enrollment yields both control + data-plane auth.
     api_key: str | None = None
     endpoints: list[EndpointSpec] = Field(default_factory=list)
+    # Firepuncher allowlist. None means "server said nothing" — the agent keeps
+    # its safe default (loopback only) rather than assuming everything is open.
+    forward_rules: list[ForwardRule] | None = None
 
 
 class AgentStateSync(BaseModel):
     type: AgentMsgType = AgentMsgType.STATE_SYNC
     endpoints: list[EndpointSpec] = Field(default_factory=list)
+    forward_rules: list[ForwardRule] | None = None
 
 
 class EndpointStatus(BaseModel):
