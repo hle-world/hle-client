@@ -108,6 +108,8 @@ class AgentClient:
         self._reconnect_delay = reconnect_delay
         self._max_reconnect_delay = max_reconnect_delay
         self._running = False
+        # True once the current session reached "registered"; see run().
+        self._registered = False
         self._endpoints: dict[str, _Running] = {}
         self._api_key: str | None = None
         self._base_domain: str | None = None
@@ -127,14 +129,21 @@ class AgentClient:
         self._running = True
         delay = self._reconnect_delay
         while self._running:
+            self._registered = False
             try:
                 await self._connect_once()
-                delay = self._reconnect_delay  # reset after a clean session
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001 — control conn is best-effort
                 logger.warning("Agent control connection lost: %s", exc)
             finally:
+                # Reset on any session that got as far as registering, not just
+                # one that ended cleanly. Relay restarts end the session with an
+                # exception, so keying off a clean exit meant the backoff only
+                # ever grew: a healthy agent that saw three unrelated blips over
+                # a week would then wait 30s to recover from a routine deploy.
+                if self._registered:
+                    delay = self._reconnect_delay
                 await self._stop_all()
             if not self._running:
                 break
@@ -175,6 +184,9 @@ class AgentClient:
                 send=ws.send,
                 rules=self._forward_rules,
             )
+            # Marks the session as having worked, so the reconnect backoff in
+            # run() starts over rather than compounding across the process life.
+            self._registered = True
             logger.info(
                 "Agent registered: public_id=%s endpoints=%d",
                 welcome.agent_public_id,

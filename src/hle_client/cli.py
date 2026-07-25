@@ -7,6 +7,8 @@ import logging
 import os
 import re
 import webbrowser
+from datetime import UTC
+from typing import Any
 
 import click
 from rich.console import Console
@@ -440,6 +442,107 @@ def agent_status() -> None:
         console.print(f"Token: [dim]{masked}[/dim]")
     else:
         console.print("[dim]No agent token configured. Run 'hle agent enroll'.[/dim]")
+
+
+@agent.command("list")
+@click.option("--api-key", "api_key", default=None, help="API key (else env/config)")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output")
+def agent_list(api_key: str | None, as_json: bool) -> None:
+    """List the agents on your account, and whether they're online.
+
+    Unlike 'hle agent status', which only inspects this machine, this asks the
+    relay. The Name column is what 'hle fp --agent' expects.
+    """
+    import json as _json
+
+    import httpx
+    from rich.table import Table
+
+    from hle_client.api import ApiClient, ApiClientConfig
+
+    key = api_key or _load_api_key()
+    if not key:
+        console.print("[red]Error:[/red] No API key. Run [cyan]hle auth login[/cyan] first.")
+        raise SystemExit(1)
+
+    async def _fetch() -> list[dict[str, Any]]:
+        return await ApiClient(ApiClientConfig(api_key=key)).list_agents()
+
+    try:
+        agents = asyncio.run(_fetch())
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 401:
+            console.print("[red]Error:[/red] API key rejected. Run [cyan]hle auth login[/cyan].")
+        elif status == 404:
+            # The endpoint 404s (rather than 403s) when the feature flag is off.
+            console.print("[yellow]Agents are not enabled on this server.[/yellow]")
+        else:
+            console.print(f"[red]Error:[/red] server returned {status}")
+        raise SystemExit(1) from None
+    except httpx.HTTPError as exc:
+        console.print(f"[red]Error:[/red] could not reach the relay — {exc}")
+        raise SystemExit(1) from None
+
+    if as_json:
+        console.print(_json.dumps(agents, indent=2))
+        return
+
+    if not agents:
+        console.print("[dim]No agents yet.[/dim]")
+        console.print(
+            "[dim]Create one at https://hle.world/dashboard → Agents, "
+            "then run 'hle agent enroll <token>'.[/dim]"
+        )
+        return
+
+    table = Table(title="Agents")
+    table.add_column("Name", style="cyan")
+    table.add_column("Status")
+    table.add_column("Endpoints", justify="right")
+    table.add_column("Version", style="dim")
+    table.add_column("Last seen", style="dim")
+    for a in sorted(agents, key=lambda a: str(a.get("name", ""))):
+        online = a.get("online", False)
+        state = "[green]online[/green]" if online else "[dim]offline[/dim]"
+        if not a.get("is_active", True):
+            state = "[yellow]disabled[/yellow]"
+        table.add_row(
+            str(a.get("name", "?")),
+            state,
+            str(a.get("endpoint_count", 0)),
+            a.get("agent_version") or "-",
+            _humanize_last_seen(a.get("last_seen_at")),
+        )
+    console.print(table)
+
+
+def _humanize_last_seen(value: str | None) -> str:
+    """Render an ISO timestamp as a rough age. Falls back to the raw string.
+
+    Exact timestamps aren't the useful thing here — "3m ago" answers "did this
+    agent just drop?" at a glance, which is what you want when a forward fails.
+    """
+    if not value:
+        return "never"
+    from datetime import datetime
+
+    try:
+        seen = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=UTC)
+    seconds = (datetime.now(UTC) - seen).total_seconds()
+    if seconds < 0:
+        return "just now"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
 
 
 @agent.command("services")
