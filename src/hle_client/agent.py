@@ -22,6 +22,7 @@ from typing import Any
 import websockets
 
 from hle_client import __version__
+from hle_client.firepuncher import FpAgentSide
 from hle_client.tunnel import Tunnel, TunnelConfig
 from hle_common.agent_protocol import (
     AgentHello,
@@ -31,6 +32,7 @@ from hle_common.agent_protocol import (
     EndpointSpec,
     EndpointStatus,
 )
+from hle_common.fp_protocol import ForwardRule, default_rules
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,9 @@ class AgentClient:
         self._endpoints: dict[str, _Running] = {}
         self._api_key: str | None = None
         self._base_domain: str | None = None
+        self._fp: FpAgentSide | None = None
+        # Until the server tells us otherwise, only loopback is forwardable.
+        self._forward_rules: list[ForwardRule] = default_rules()
 
     # -- public API ----------------------------------------------------------
 
@@ -144,13 +149,25 @@ class AgentClient:
     async def _connect_once(self) -> None:
         logger.info("Connecting agent control to %s", self.control_uri)
         async with websockets.connect(self.control_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
-            hello = AgentHello(token=self._token, agent_version=__version__)
+            hello = AgentHello(
+                token=self._token,
+                agent_version=__version__,
+                capabilities=["firepuncher"],
+            )
             await ws.send(hello.model_dump_json())
 
             raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
             welcome = AgentWelcome.model_validate_json(raw)
             self._api_key = welcome.api_key
             self._base_domain = welcome.base_domain
+            if welcome.forward_rules:
+                self._forward_rules = list(welcome.forward_rules)
+            # Firepuncher frames arrive on this same control connection, so the
+            # handler is rebuilt per session and torn down with it.
+            self._fp = FpAgentSide(
+                send=ws.send,
+                rules=self._forward_rules,
+            )
             logger.info(
                 "Agent registered: public_id=%s endpoints=%d",
                 welcome.agent_public_id,
@@ -166,6 +183,9 @@ class AgentClient:
                 status_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await status_task
+                if self._fp is not None:
+                    await self._fp.close_all()
+                    self._fp = None
 
     async def _handle_message(self, raw: str | bytes) -> None:
         try:
@@ -176,7 +196,16 @@ class AgentClient:
         mtype = msg.get("type") if isinstance(msg, dict) else None
         if mtype == "state_sync":
             sync = AgentStateSync.model_validate(msg)
+            if sync.forward_rules is not None:
+                self._forward_rules = list(sync.forward_rules)
+                if self._fp is not None:
+                    # Rules are swapped live: revoking access shouldn't require
+                    # the operator to restart the agent.
+                    self._fp.rules = self._forward_rules
             await self.reconcile(sync.endpoints)
+        elif isinstance(mtype, str) and mtype.startswith("fp_"):
+            if self._fp is not None:
+                await self._fp.handle(msg)
         elif mtype == "pong":
             pass
         else:
