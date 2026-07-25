@@ -199,6 +199,10 @@ class FpLocalClient:
     # How long to wait for the agent to confirm a stream. Defaults to the dial
     # timeout plus headroom for the round trip through the relay.
     ready_timeout: float = DIAL_TIMEOUT + 5.0
+    # False while the relay connection is down. The listener stays bound across
+    # reconnects so the local port doesn't vanish, but connections arriving in
+    # the gap are refused immediately rather than hanging until they time out.
+    connected: bool = False
     _streams: dict[str, _Stream] = field(default_factory=dict)
     _ready: dict[str, asyncio.Event] = field(default_factory=dict)
     _errors: dict[str, str] = field(default_factory=dict)
@@ -237,6 +241,15 @@ class FpLocalClient:
             await self._drop(sid)
 
     async def _on_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if not self.connected:
+            # Fail fast instead of making the caller wait out ready_timeout for
+            # a relay we already know isn't there.
+            logger.debug("Refusing local connection: relay not connected")
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+            return
+
         stream_id = uuid.uuid4().hex
         ready = asyncio.Event()
         self._ready[stream_id] = ready

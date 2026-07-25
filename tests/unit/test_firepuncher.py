@@ -6,6 +6,7 @@ import asyncio
 import json
 
 import pytest
+import websockets
 
 from hle_client.firepuncher import FpAgentSide, FpLocalClient
 from hle_common.fp_protocol import (
@@ -34,6 +35,51 @@ class Collector:
     def first(self, mtype: str) -> dict | None:
         found = self.of_type(mtype)
         return found[0] if found else None
+
+
+class TestCloseHandling:
+    """Losing the relay must not produce a traceback.
+
+    A relay restart used to crash `hle fp` with a raw
+    ConnectionClosedError. Deployments are routine, so the forward has to ride
+    through them the way the agent already does.
+    """
+
+    def test_relay_restart_is_described_in_plain_words(self):
+        from websockets.frames import Close
+
+        from hle_client.fp_cmd import _close_reason
+
+        exc = websockets.exceptions.ConnectionClosedError(Close(1012, "service restart"), None)
+        assert _close_reason(exc) == "relay restarting"
+
+    def test_reason_falls_back_to_the_code(self):
+        from websockets.frames import Close
+
+        from hle_client.fp_cmd import _close_reason
+
+        exc = websockets.exceptions.ConnectionClosedError(Close(1006, ""), None)
+        assert "1006" in _close_reason(exc)
+
+    def test_no_close_frame_is_handled(self):
+        from hle_client.fp_cmd import _close_reason
+
+        exc = websockets.exceptions.ConnectionClosedError(None, None)
+        assert _close_reason(exc) == "no close frame"
+
+    @pytest.mark.parametrize("code", [4001, 4003])
+    def test_credential_failures_are_fatal(self, code):
+        """Retrying a rejected key just repeats the rejection."""
+        from hle_client.fp_cmd import _FATAL_CLOSE_CODES
+
+        assert code in _FATAL_CLOSE_CODES
+
+    @pytest.mark.parametrize("code", [1012, 1006, 1001, 4404])
+    def test_transient_failures_are_retried(self, code):
+        """Restarts, network drops, and an offline agent are all recoverable."""
+        from hle_client.fp_cmd import _FATAL_CLOSE_CODES
+
+        assert code not in _FATAL_CLOSE_CODES
 
 
 class TestForwardRule:
@@ -186,7 +232,7 @@ class TestAgentSideDataPath:
 class TestLocalClient:
     async def test_accepted_connection_opens_a_stream_and_forwards(self):
         out = Collector()
-        client = FpLocalClient(send=out, target_host="localhost", target_port=22)
+        client = FpLocalClient(send=out, target_host="localhost", target_port=22, connected=True)
         server = await client.serve("127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
 
@@ -217,6 +263,26 @@ class TestLocalClient:
             writer.close()
             await client.close_all()
 
+    async def test_connections_are_refused_while_the_relay_is_down(self):
+        """The port stays bound across a reconnect, but doesn't accept blindly.
+
+        Keeping the listener up means `ssh rpi` works again the moment the relay
+        returns, without restarting `hle fp`. Accepting connections while
+        disconnected would instead leave the caller hanging until the ready
+        timeout for a relay we already know isn't there.
+        """
+        out = Collector()
+        client = FpLocalClient(send=out, target_host="localhost", target_port=22, connected=False)
+        server = await client.serve("127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        async with server:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            # Dropped immediately, and no fp_open was sent to a dead connection.
+            assert await asyncio.wait_for(reader.read(), timeout=2) == b""
+            assert out.frames == []
+            writer.close()
+
     async def test_stream_that_never_gets_ready_times_out(self):
         """A silent agent must not wedge the local connection forever."""
         out = Collector()
@@ -238,6 +304,7 @@ class TestLocalClient:
             target_host="nope",
             target_port=5432,
             on_error=seen.append,
+            connected=True,
         )
         server = await client.serve("127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
