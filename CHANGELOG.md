@@ -2,7 +2,45 @@
 
 ## v2608.2 — 2026-08-04
 
-<!-- TODO: Fill in release notes before merging -->
+### Changed
+
+- **The client no longer depends on `pydantic`, so it installs without a
+  compiler.** `pydantic-core` is compiled Rust and publishes no FreeBSD wheel,
+  so `pip install hle-client` tried to build it from source. On a pfSense box
+  that meant downloading a Rust toolchain onto a firewall:
+
+  ```
+  Collecting pydantic-core==2.46.4
+    Downloading pydantic_core-2.46.4.tar.gz (471 kB)
+        Unsupported platform: 311
+        Rust not found, installing into a temporary directory
+  ```
+
+  The remaining four dependencies — `click`, `rich`, `httpx`, `websockets` —
+  are pure Python and install there without complaint. This one library was the
+  entire reason the agent could not run on pfSense, or on anything else with a
+  stock interpreter and no build tools.
+
+  The shared protocol models are now stdlib dataclasses over a small
+  serialisation base (`hle_common.wire`). Outside `TunnelRegistration` they were
+  plain data containers with no validators, used only for JSON in and out. The
+  method names are unchanged, so this is invisible to callers.
+
+  **The wire format is byte-for-byte identical.** A baseline captured while the
+  models were still pydantic is asserted against on every test run, covering all
+  39 message types: same JSON, same round-trip, same tolerance of unknown fields
+  from a newer peer. Old clients and old servers are unaffected.
+
+  `TunnelRegistration` keeps all four of its validators, including the
+  `service_label` normalisation. The two `Literal` fields that cross the wire
+  keep their checks, since dataclasses ignore `Literal`.
+
+  Two deliberate differences: constructing a model with an unknown keyword now
+  raises instead of silently dropping it, and a missing required argument raises
+  `TypeError` rather than `ValueError` — parsing from the wire still raises
+  `ValueError`.
+
+  On FreeBSD, `pkg install python311` is now the only prerequisite.
 
 ## v2608.1 — 2026-08-04
 
