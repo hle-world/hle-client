@@ -312,7 +312,7 @@ main() {
             error "Install Python from https://python.org or via your package manager."
             exit 1
         }
-        info "Found Python: $PYTHON ($($PYTHON --version 2607.8>&1))"
+        info "Found Python: $PYTHON ($($PYTHON --version 2>&1))"
 
         # Try install methods in order of preference
         if command -v pipx >/dev/null 2>&1; then
