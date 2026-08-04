@@ -11,12 +11,12 @@ the agent reconciles its running tunnels to match. Reconnects resend the snapsho
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import StrEnum
-
-from pydantic import BaseModel, Field
 
 # Runtime import, not just typing: pydantic resolves this to build the model.
 from hle_common.fp_protocol import ForwardRule  # noqa: TC001
+from hle_common.wire import WireModel
 
 # 1.1 adds firepuncher: `forward_rules` on welcome/state_sync, and `fp_*` frames
 # multiplexed onto this same control connection.
@@ -33,7 +33,8 @@ class AgentMsgType(StrEnum):
     ERROR = "error"
 
 
-class EndpointSpec(BaseModel):
+@dataclass(kw_only=True)
+class EndpointSpec(WireModel):
     """One endpoint the agent should run."""
 
     id: int
@@ -55,39 +56,44 @@ class EndpointSpec(BaseModel):
         )
 
 
-class AgentHello(BaseModel):
+@dataclass(kw_only=True)
+class AgentHello(WireModel):
     type: AgentMsgType = AgentMsgType.HELLO
     token: str
     agent_version: str | None = None
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
 
 
-class AgentWelcome(BaseModel):
+@dataclass(kw_only=True)
+class AgentWelcome(WireModel):
     type: AgentMsgType = AgentMsgType.WELCOME
     agent_public_id: str
     base_domain: str
     # Data-plane credential the agent uses to register its tunnels. Sent by the
     # server so a single enrollment yields both control + data-plane auth.
     api_key: str | None = None
-    endpoints: list[EndpointSpec] = Field(default_factory=list)
+    endpoints: list[EndpointSpec] = field(default_factory=list)
     # Firepuncher allowlist. None means "server said nothing" — the agent keeps
     # its safe default (loopback only) rather than assuming everything is open.
     forward_rules: list[ForwardRule] | None = None
 
 
-class AgentStateSync(BaseModel):
+@dataclass(kw_only=True)
+class AgentStateSync(WireModel):
     type: AgentMsgType = AgentMsgType.STATE_SYNC
-    endpoints: list[EndpointSpec] = Field(default_factory=list)
+    endpoints: list[EndpointSpec] = field(default_factory=list)
     forward_rules: list[ForwardRule] | None = None
 
 
-class EndpointStatus(BaseModel):
+@dataclass(kw_only=True)
+class EndpointStatus(WireModel):
     label: str
     connected: bool = False
     public_url: str | None = None
     error: str | None = None
 
 
-class AgentStatus(BaseModel):
+@dataclass(kw_only=True)
+class AgentStatus(WireModel):
     type: AgentMsgType = AgentMsgType.STATUS
-    endpoints: list[EndpointStatus] = Field(default_factory=list)
+    endpoints: list[EndpointStatus] = field(default_factory=list)

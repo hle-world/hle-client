@@ -1,15 +1,20 @@
-"""Shared Pydantic models used by both the HLE client and server.
+"""Shared wire models used by both the HLE client and server.
 
 These models define the data structures carried inside ``ProtocolMessage.payload``
 for tunnel registration, HTTP proxying, and WebSocket stream multiplexing.
+
+They are dataclasses built on :class:`hle_common.wire.WireModel` rather than
+pydantic models, so the client installs on platforms with no compiler — see that
+module for why. ``TunnelRegistration`` keeps its validation in ``__post_init__``.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from hle_common.wire import WireModel
 
 # ---------------------------------------------------------------------------
 # Tunnel registration (client -> server -> client)
@@ -28,7 +33,8 @@ _MAX_OPTION_VALUE_LEN = 1024
 _OPTION_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 
 
-class TunnelRegistration(BaseModel):
+@dataclass(kw_only=True)
+class TunnelRegistration(WireModel):
     """Payload the client sends when requesting a new tunnel."""
 
     service_url: str
@@ -40,7 +46,7 @@ class TunnelRegistration(BaseModel):
     protocol_version: str | None = None  # sent by clients >= 0.5.0
     websocket_enabled: bool = True
     auth_mode: str = "none"  # SSO not in POC scope
-    capabilities: list[str] = []  # e.g. ["chunked_response"]
+    capabilities: list[str] = field(default_factory=list)  # e.g. ["chunked_response"]
     zone: str | None = None  # custom zone domain for enterprise routing
     managed_by: str | None = None  # e.g. "hle-operator" for K8s operator tunnels
     webhook_path: str | None = None  # e.g. "/webhook/github" — restricts to this path prefix
@@ -50,76 +56,78 @@ class TunnelRegistration(BaseModel):
     # them; the server defines the vocabulary and validates. This lets the
     # server gain features without requiring a client release. Client→server
     # intent only — the client must never act on server-returned config.
-    options: dict[str, str] = {}
+    options: dict[str, str] = field(default_factory=dict)
 
-    @field_validator("webhook_path")
-    @classmethod
-    def validate_webhook_path(cls, v: str | None) -> str | None:
-        if v is not None:
-            if not v or v == "/":
-                raise ValueError("webhook_path must be a non-root absolute path")
-            if not v.startswith("/"):
-                raise ValueError("webhook_path must start with /")
-            # Normalize and reject traversal
-            import posixpath
-
-            normalized = posixpath.normpath(v)
-            if normalized != v.rstrip("/"):
-                raise ValueError("webhook_path must not contain '..' or redundant separators")
-            if len(v) > 255:
-                raise ValueError("webhook_path too long (max 255)")
-        return v
-
-    @field_validator("service_label")
-    @classmethod
-    def validate_service_label(cls, v: str | None) -> str | None:
-        # Empty/None is allowed here; the apex-vs-label rule is enforced in the
-        # model validator below so the wire contract states the rule explicitly.
-        if v is None:
-            return None
-        # Auto-sanitize: lowercase, replace common separators with
-        # hyphens, strip invalid characters, collapse runs.
-        v = v.lower()
-        v = re.sub(r"[_ .]+", "-", v)
-        v = re.sub(r"[^a-z0-9-]", "", v)
-        v = re.sub(r"-{2,}", "-", v)
-        v = v.strip("-")
-        if not v:
-            return None
-        if len(v) > 63:
-            v = v[:63].rstrip("-")
-        if not _SERVICE_LABEL_RE.match(v):
-            raise ValueError(f"service_label '{v}' does not match required format")
-        return v
-
-    @field_validator("options")
-    @classmethod
-    def validate_options(cls, v: dict[str, str]) -> dict[str, str]:
-        # Transport-level guardrails only — the server owns the vocabulary and
-        # rejects keys it doesn't recognize. This keeps a malicious or buggy
-        # client from flooding the bag, without the contract needing to know
-        # which keys exist.
-        if len(v) > _MAX_OPTIONS:
-            raise ValueError(f"too many options (max {_MAX_OPTIONS})")
-        for key, val in v.items():
-            if not isinstance(key, str) or not isinstance(val, str):
-                raise ValueError("option keys and values must be strings")
-            if not _OPTION_KEY_RE.match(key) or len(key) > _MAX_OPTION_KEY_LEN:
-                raise ValueError(f"invalid option key: {key!r}")
-            if len(val) > _MAX_OPTION_VALUE_LEN:
-                raise ValueError(f"option {key!r} value too long (max {_MAX_OPTION_VALUE_LEN})")
-        return v
-
-    @model_validator(mode="after")
-    def validate_label_or_apex(self) -> TunnelRegistration:
-        # A tunnel is addressed either by a label (a subdomain) or by the apex.
-        # Exactly the absence of a label requires apex to be set.
+    def __post_init__(self) -> None:
+        # Ordered as pydantic ran these: per-field checks first, then the
+        # cross-field rule. `service_label` is normalised rather than merely
+        # checked, so callers keep getting the sanitised value back.
+        self.webhook_path = _validate_webhook_path(self.webhook_path)
+        self.service_label = _normalise_service_label(self.service_label)
+        _validate_options(self.options)
         if not self.service_label and not self.apex:
+            # A tunnel is addressed either by a label (a subdomain) or by the
+            # apex. Exactly the absence of a label requires apex to be set.
             raise ValueError("service_label is required unless apex is set")
-        return self
 
 
-class TunnelRegistrationResponse(BaseModel):
+def _validate_webhook_path(v: str | None) -> str | None:
+    if v is None:
+        return None
+    if not v or v == "/":
+        raise ValueError("webhook_path must be a non-root absolute path")
+    if not v.startswith("/"):
+        raise ValueError("webhook_path must start with /")
+    # Normalize and reject traversal
+    import posixpath
+
+    normalized = posixpath.normpath(v)
+    if normalized != v.rstrip("/"):
+        raise ValueError("webhook_path must not contain '..' or redundant separators")
+    if len(v) > 255:
+        raise ValueError("webhook_path too long (max 255)")
+    return v
+
+
+def _normalise_service_label(v: str | None) -> str | None:
+    # Empty/None is allowed here; the apex-vs-label rule is enforced by the
+    # caller so the wire contract states the rule explicitly.
+    if v is None:
+        return None
+    # Auto-sanitize: lowercase, replace common separators with
+    # hyphens, strip invalid characters, collapse runs.
+    v = v.lower()
+    v = re.sub(r"[_ .]+", "-", v)
+    v = re.sub(r"[^a-z0-9-]", "", v)
+    v = re.sub(r"-{2,}", "-", v)
+    v = v.strip("-")
+    if not v:
+        return None
+    if len(v) > 63:
+        v = v[:63].rstrip("-")
+    if not _SERVICE_LABEL_RE.match(v):
+        raise ValueError(f"service_label '{v}' does not match required format")
+    return v
+
+
+def _validate_options(v: dict[str, str]) -> None:
+    # Transport-level guardrails only — the server owns the vocabulary and
+    # rejects keys it doesn't recognize. This keeps a malicious or buggy
+    # client from flooding the bag, without the contract needing to know
+    # which keys exist.
+    if len(v) > _MAX_OPTIONS:
+        raise ValueError(f"too many options (max {_MAX_OPTIONS})")
+    for key, val in v.items():
+        if not isinstance(key, str) or not isinstance(val, str):
+            raise ValueError("option keys and values must be strings")
+        if not _OPTION_KEY_RE.match(key) or len(key) > _MAX_OPTION_KEY_LEN:
+            raise ValueError(f"invalid option key: {key!r}")
+        if len(val) > _MAX_OPTION_VALUE_LEN:
+            raise ValueError(f"option {key!r} value too long (max {_MAX_OPTION_VALUE_LEN})")
+
+
+@dataclass(kw_only=True)
+class TunnelRegistrationResponse(WireModel):
     """Server response after a tunnel has been successfully registered."""
 
     tunnel_id: str
@@ -128,11 +136,12 @@ class TunnelRegistrationResponse(BaseModel):
     websocket_enabled: bool
     user_code: str
     service_label: str
-    server_capabilities: list[str] = []  # e.g. ["chunked_response"]
+    server_capabilities: list[str] = field(default_factory=list)  # e.g. ["chunked_response"]
     zone: str | None = None  # custom zone domain if tunnel uses one
 
 
-class RelayDiscoveryResponse(BaseModel):
+@dataclass(kw_only=True)
+class RelayDiscoveryResponse(WireModel):
     """Server response from the relay discovery endpoint (GET /api/v1/connect).
 
     Tells the client which relay server to connect to.  Only ``relay_url`` is
@@ -143,8 +152,8 @@ class RelayDiscoveryResponse(BaseModel):
     relay_url: str  # e.g. "wss://us-east.hle.world:443/_hle/tunnel"
     relay_region: str = ""  # informational, e.g. "us-east-1"
     ttl: int = 300  # seconds the assignment is considered valid
-    fallback_urls: list[str] = []  # backup relay URLs for future failover
-    metadata: dict[str, str] = {}  # reserved for future use
+    fallback_urls: list[str] = field(default_factory=list)  # backup relay URLs for future failover
+    metadata: dict[str, str] = field(default_factory=dict)  # reserved for future use
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +161,8 @@ class RelayDiscoveryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class ProxiedHttpRequest(BaseModel):
+@dataclass(kw_only=True)
+class ProxiedHttpRequest(WireModel):
     """HTTP request being forwarded through the tunnel (used internally)."""
 
     request_id: str
@@ -163,7 +173,8 @@ class ProxiedHttpRequest(BaseModel):
     query_string: str = ""
 
 
-class ProxiedHttpResponse(BaseModel):
+@dataclass(kw_only=True)
+class ProxiedHttpResponse(WireModel):
     """HTTP response coming back through the tunnel."""
 
     request_id: str
@@ -172,7 +183,8 @@ class ProxiedHttpResponse(BaseModel):
     body: str | None = None  # base64 encoded
 
 
-class HttpResponseStart(BaseModel):
+@dataclass(kw_only=True)
+class HttpResponseStart(WireModel):
     """First frame of a chunked HTTP response — headers and status, no body."""
 
     request_id: str
@@ -180,7 +192,8 @@ class HttpResponseStart(BaseModel):
     headers: dict[str, str | list[str]]
 
 
-class HttpResponseChunk(BaseModel):
+@dataclass(kw_only=True)
+class HttpResponseChunk(WireModel):
     """One body segment of a chunked HTTP response."""
 
     request_id: str
@@ -188,7 +201,8 @@ class HttpResponseChunk(BaseModel):
     data: str  # base64-encoded bytes
 
 
-class HttpResponseEnd(BaseModel):
+@dataclass(kw_only=True)
+class HttpResponseEnd(WireModel):
     """Terminal frame signalling the chunked response is complete."""
 
     request_id: str
@@ -200,15 +214,17 @@ class HttpResponseEnd(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class WsStreamOpen(BaseModel):
+@dataclass(kw_only=True)
+class WsStreamOpen(WireModel):
     """Open a new WebSocket stream through the tunnel."""
 
     stream_id: str
     path: str
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = field(default_factory=dict)
 
 
-class WsStreamAccept(BaseModel):
+@dataclass(kw_only=True)
+class WsStreamAccept(WireModel):
     """Client → server: upstream WS handshake completed, report selected subprotocol.
 
     Sent immediately after the client successfully opens the WebSocket to the
@@ -221,7 +237,8 @@ class WsStreamAccept(BaseModel):
     subprotocol: str | None = None
 
 
-class WsStreamFrame(BaseModel):
+@dataclass(kw_only=True)
+class WsStreamFrame(WireModel):
     """A single WebSocket frame in a proxied stream."""
 
     stream_id: str
@@ -229,7 +246,8 @@ class WsStreamFrame(BaseModel):
     is_binary: bool = False
 
 
-class WsStreamClose(BaseModel):
+@dataclass(kw_only=True)
+class WsStreamClose(WireModel):
     """Close a proxied WebSocket stream."""
 
     stream_id: str
@@ -242,7 +260,8 @@ class WsStreamClose(BaseModel):
     diagnostics: dict[str, Any] | None = None
 
 
-class LogConfig(BaseModel):
+@dataclass(kw_only=True)
+class LogConfig(WireModel):
     """Server → client: adjust per-tunnel log verbosity and diagnostics.
 
     Sent at any time by the relay (typically toggled by an admin panel).
@@ -253,8 +272,16 @@ class LogConfig(BaseModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     diagnostics: bool = False
 
+    def __post_init__(self) -> None:
+        # Server-controlled and fed straight into logging config, so an
+        # unexpected value must not get that far. Dataclasses ignore Literal.
+        allowed = ("DEBUG", "INFO", "WARNING", "ERROR")
+        if self.level not in allowed:
+            raise ValueError(f"level must be one of {allowed}, got {self.level!r}")
 
-class DiagnosticEvent(BaseModel):
+
+@dataclass(kw_only=True)
+class DiagnosticEvent(WireModel):
     """Client → server: structured diagnostic event for live debugging.
 
     The client only emits these while the server has enabled them via
@@ -268,7 +295,7 @@ class DiagnosticEvent(BaseModel):
     """
 
     event: str
-    data: dict[str, Any] = {}
+    data: dict[str, Any] = field(default_factory=dict)
     ts: float | None = None
 
 
@@ -277,7 +304,8 @@ class DiagnosticEvent(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class SpeedTestData(BaseModel):
+@dataclass(kw_only=True)
+class SpeedTestData(WireModel):
     """Payload for speed test data chunks."""
 
     test_id: str
@@ -288,7 +316,8 @@ class SpeedTestData(BaseModel):
     chunk_size_bytes: int | None = None  # hint for upload start signal
 
 
-class SpeedTestResult(BaseModel):
+@dataclass(kw_only=True)
+class SpeedTestResult(WireModel):
     """Result of a speed test measurement."""
 
     test_id: str
