@@ -1,7 +1,6 @@
 """Tests for the HLE wire protocol."""
 
 import pytest
-from pydantic import ValidationError
 
 from hle_common.protocol import (
     PROTOCOL_VERSION,
@@ -107,11 +106,11 @@ class TestErrorPayload:
         assert err.request_id == "r-99"
 
     def test_missing_code_raises(self):
-        with pytest.raises((TypeError, ValidationError)):
+        with pytest.raises((TypeError, ValueError)):
             ErrorPayload(message="oops")
 
     def test_missing_message_raises(self):
-        with pytest.raises((TypeError, ValidationError)):
+        with pytest.raises((TypeError, ValueError)):
             ErrorPayload(code="bad")
 
     def test_roundtrip_serialization(self):
@@ -134,7 +133,7 @@ class TestNoticePayload:
             assert n.level == lvl
 
     def test_invalid_level_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueError):
             NoticePayload(level="critical", code="c", message="m")
 
     def test_with_details_and_url(self):
