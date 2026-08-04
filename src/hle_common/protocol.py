@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from hle_common.wire import WireModel
 
 # Protocol version — bump on wire-format changes.
 # Major bump (1.0 → 2.0): breaking change, server must support both during deprecation.
@@ -81,7 +82,8 @@ class MessageType(StrEnum):
     DIAGNOSTIC = "diagnostic"
 
 
-class ProtocolMessage(BaseModel):
+@dataclass(kw_only=True)
+class ProtocolMessage(WireModel):
     """Base message for the HLE wire protocol."""
 
     type: MessageType
@@ -90,7 +92,8 @@ class ProtocolMessage(BaseModel):
     payload: dict[str, Any] | None = None
 
 
-class ErrorPayload(BaseModel):
+@dataclass(kw_only=True)
+class ErrorPayload(WireModel):
     """Error payload included in ERROR messages."""
 
     code: str
@@ -98,7 +101,8 @@ class ErrorPayload(BaseModel):
     request_id: str | None = None
 
 
-class NoticePayload(BaseModel):
+@dataclass(kw_only=True)
+class NoticePayload(WireModel):
     """Server → client informational message payload."""
 
     level: Literal["info", "success", "warning", "error"] = "info"
@@ -106,3 +110,10 @@ class NoticePayload(BaseModel):
     message: str
     details: dict[str, Any] | None = None
     url: str | None = None
+
+    def __post_init__(self) -> None:
+        # Dataclasses don't enforce Literal, and this one crosses the wire —
+        # an unexpected level would otherwise reach the client's renderer.
+        allowed = ("info", "success", "warning", "error")
+        if self.level not in allowed:
+            raise ValueError(f"level must be one of {allowed}, got {self.level!r}")

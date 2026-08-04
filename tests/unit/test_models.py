@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from hle_common.models import (
     ProxiedHttpRequest,
@@ -68,7 +67,7 @@ class TestTunnelRegistration:
         assert reg.auth_mode == "token"
 
     def test_tunnel_registration_requires_api_key(self):
-        with pytest.raises(ValueError):
+        with pytest.raises((TypeError, ValueError)):
             TunnelRegistration(service_url="http://localhost:5000")
 
     def test_label_optional_when_apex(self):
@@ -147,7 +146,7 @@ class TestTunnelRegistration:
         assert reg.service_label == "my-app"
 
         # All-invalid chars → raises ValueError (label is required)
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueError):
             TunnelRegistration(
                 service_url="http://localhost:5000",
                 api_key="hle_key",
@@ -180,7 +179,7 @@ class TestRelayDiscoveryResponse:
         assert resp.metadata == {}
 
     def test_requires_relay_url(self):
-        with pytest.raises(ValueError):
+        with pytest.raises((TypeError, ValueError)):
             RelayDiscoveryResponse()
 
     def test_roundtrip(self):

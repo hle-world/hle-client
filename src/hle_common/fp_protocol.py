@@ -30,9 +30,10 @@ general-purpose pivot into the private network behind it.
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass, field
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from hle_common.wire import WireModel
 
 FP_PROTOCOL_VERSION = "1.0"
 
@@ -60,7 +61,8 @@ class FpErrorCode(StrEnum):
     INTERNAL = "internal"
 
 
-class FpOpen(BaseModel):
+@dataclass(kw_only=True)
+class FpOpen(WireModel):
     """Ask the agent to dial ``target_host:target_port`` for a new stream."""
 
     type: FpMsgType = FpMsgType.OPEN
@@ -69,12 +71,14 @@ class FpOpen(BaseModel):
     target_port: int
 
 
-class FpReady(BaseModel):
+@dataclass(kw_only=True)
+class FpReady(WireModel):
     type: FpMsgType = FpMsgType.READY
     stream_id: str
 
 
-class FpData(BaseModel):
+@dataclass(kw_only=True)
+class FpData(WireModel):
     type: FpMsgType = FpMsgType.DATA
     stream_id: str
     data: str  # base64
@@ -87,20 +91,23 @@ class FpData(BaseModel):
         return base64.b64decode(self.data)
 
 
-class FpClose(BaseModel):
+@dataclass(kw_only=True)
+class FpClose(WireModel):
     type: FpMsgType = FpMsgType.CLOSE
     stream_id: str
     reason: str | None = None
 
 
-class FpError(BaseModel):
+@dataclass(kw_only=True)
+class FpError(WireModel):
     type: FpMsgType = FpMsgType.ERROR
     stream_id: str
     code: FpErrorCode = FpErrorCode.INTERNAL
     message: str | None = None
 
 
-class FpHello(BaseModel):
+@dataclass(kw_only=True)
+class FpHello(WireModel):
     """First frame from an ``hle fp`` client to the relay."""
 
     type: str = "fp_hello"
@@ -110,15 +117,17 @@ class FpHello(BaseModel):
     client_version: str | None = None
 
 
-class FpWelcome(BaseModel):
+@dataclass(kw_only=True)
+class FpWelcome(WireModel):
     type: str = "fp_welcome"
     agent_public_id: str
     # Echoed back so the CLI can show what it is actually allowed to reach,
     # rather than failing per-connection with a confusing refusal.
-    allowed: list[str] = Field(default_factory=list)
+    allowed: list[str] = field(default_factory=list)
 
 
-class ForwardRule(BaseModel):
+@dataclass(kw_only=True)
+class ForwardRule(WireModel):
     """One allowlist entry, e.g. ``localhost:22`` or ``192.168.1.50:*``.
 
     ``port`` of ``None`` means any port on that host.
