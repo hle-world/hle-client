@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://get.hle.world | sh
-#   curl -fsSL https://get.hle.world | sh -s -- --version 2608.1
+#   curl -fsSL https://get.hle.world | sh -s -- --version 2608.2
 #
 #   # Install the agent and run it as a service (prompts for the token):
 #   curl -fsSL https://get.hle.world | sh -s -- --agent
@@ -93,32 +93,10 @@ detect_os() {
     esac
 }
 
-# FreeBSD (and therefore pfSense/OPNsense) has no prebuilt pydantic-core wheel
-# on PyPI, so a plain `pip install` would try to compile Rust on the firewall.
-# The dependencies are installed from pkg instead and the venv is given access
-# to them; pip then only has to place pure-Python code.
-FREEBSD_PKGS="python311 py311-pydantic2 py311-httpx py311-websockets py311-click py311-rich"
-
-freebsd_preflight() {
-    PYTHON="$1"
-    missing=""
-    for mod in pydantic httpx websockets click rich; do
-        "$PYTHON" -c "import $mod" >/dev/null 2>&1 || missing="$missing $mod"
-    done
-    [ -z "$missing" ] && return 0
-
-    error "Missing Python modules from pkg:$missing"
-    echo ""
-    echo "  Install them first (they ship as prebuilt packages, no compiler needed):"
-    echo ""
-    echo "    pkg install $FREEBSD_PKGS"
-    echo ""
-    echo "  If pkg reports any of these as unavailable, check your repo with:"
-    echo ""
-    echo "    pkg search py311-pydantic2"
-    echo ""
-    return 1
-}
+# FreeBSD (and therefore pfSense/OPNsense) ships no Python by default, but every
+# dependency is pure Python as of 2608.2, so pip can install them from PyPI with
+# no compiler involved. The interpreter is the only prerequisite.
+FREEBSD_PKGS="python311"
 
 # Find Python 3.11+
 find_python() {
@@ -203,16 +181,9 @@ install_with_venv() {
 
     info "Installing in isolated venv at $VENV_DIR..."
     rm -rf "$VENV_DIR"
-    if [ "$(detect_os)" = "freebsd" ]; then
-        # Reuse the pkg-installed dependencies rather than rebuilding them.
-        "$PYTHON" -m venv --system-site-packages "$VENV_DIR"
-        "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-        "$VENV_DIR/bin/pip" install --quiet --no-deps "$INSTALL_SPEC"
-    else
-        "$PYTHON" -m venv "$VENV_DIR"
-        "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-        "$VENV_DIR/bin/pip" install --quiet "$INSTALL_SPEC"
-    fi
+    "$PYTHON" -m venv "$VENV_DIR"
+    "$VENV_DIR/bin/pip" install --quiet --upgrade pip
+    "$VENV_DIR/bin/pip" install --quiet "$INSTALL_SPEC"
 
     # Verify before symlinking
     verify_install "$VENV_DIR/bin/python"
@@ -302,9 +273,8 @@ main() {
             exit 1
         }
         info "Found Python: $PYTHON ($($PYTHON --version 2>&1))"
-        freebsd_preflight "$PYTHON" || exit 1
-        # pipx/uv would each rebuild the dependency tree from PyPI, which is the
-        # thing that needs a Rust toolchain here. Always take the venv path.
+        # pipx and uv are rarely packaged here; the venv path needs nothing but
+        # the interpreter, and every dependency is pure Python.
         install_with_venv "$PYTHON"
     else
         PYTHON=$(find_python) || {
