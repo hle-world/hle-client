@@ -2,7 +2,32 @@
 
 ## v2608.1 — 2026-08-04
 
-<!-- TODO: Fill in release notes before merging -->
+### Added
+
+- **The agent runs as a service on FreeBSD, pfSense and OPNsense.**
+  `hle service install --agent` previously knew only systemd and launchd, so on
+  a FreeBSD-based firewall the agent had to be started by hand and did not
+  survive a reboot. It now generates an rc.d script, enabled through `sysrc`
+  and supervised by `daemon(8)`, which restarts it if it exits — the same
+  behaviour the systemd unit has. `uninstall`, `status` and `list` work there
+  too. rc.d has no per-user services, so `--user` is rejected with an
+  explanation rather than failing later on a permission error.
+- **The installer handles FreeBSD.** `pydantic` has no FreeBSD wheel on PyPI,
+  so a plain `pip install` would try to build Rust on the firewall. On FreeBSD
+  the dependencies now come from `pkg` as prebuilt packages, the venv is
+  created with `--system-site-packages` to see them, and pip installs the
+  client with `--no-deps` — pure Python only, no compiler. Missing packages are
+  reported up front with the exact `pkg install` line.
+
+  See the [pfSense guide](https://hle.world/docs/integrations/pfsense/).
+
+### Fixed
+
+- **The release script no longer corrupts shell redirects.** Its version bump
+  matched the `2` in `$($PYTHON --version 2>&1)` and rewrote it to
+  `--version 2607.8>&1`, which `install.sh` had been shipping since an earlier
+  release. The pattern is now anchored to a full CalVer, and the mangled line
+  is repaired.
 
 ## v2607.8 — 2026-07-25
 
