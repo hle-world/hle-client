@@ -88,8 +88,36 @@ detect_os() {
     case "$(uname -s)" in
         Linux*) echo "linux" ;;
         Darwin*) echo "macos" ;;
+        FreeBSD*) echo "freebsd" ;;
         *) error "Unsupported OS: $(uname -s)"; exit 1 ;;
     esac
+}
+
+# FreeBSD (and therefore pfSense/OPNsense) has no prebuilt pydantic-core wheel
+# on PyPI, so a plain `pip install` would try to compile Rust on the firewall.
+# The dependencies are installed from pkg instead and the venv is given access
+# to them; pip then only has to place pure-Python code.
+FREEBSD_PKGS="python311 py311-pydantic2 py311-httpx py311-websockets py311-click py311-rich"
+
+freebsd_preflight() {
+    PYTHON="$1"
+    missing=""
+    for mod in pydantic httpx websockets click rich; do
+        "$PYTHON" -c "import $mod" >/dev/null 2>&1 || missing="$missing $mod"
+    done
+    [ -z "$missing" ] && return 0
+
+    error "Missing Python modules from pkg:$missing"
+    echo ""
+    echo "  Install them first (they ship as prebuilt packages, no compiler needed):"
+    echo ""
+    echo "    pkg install $FREEBSD_PKGS"
+    echo ""
+    echo "  If pkg reports any of these as unavailable, check your repo with:"
+    echo ""
+    echo "    pkg search py311-pydantic2"
+    echo ""
+    return 1
 }
 
 # Find Python 3.11+
@@ -175,9 +203,16 @@ install_with_venv() {
 
     info "Installing in isolated venv at $VENV_DIR..."
     rm -rf "$VENV_DIR"
-    "$PYTHON" -m venv "$VENV_DIR"
-    "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-    "$VENV_DIR/bin/pip" install --quiet "$INSTALL_SPEC"
+    if [ "$(detect_os)" = "freebsd" ]; then
+        # Reuse the pkg-installed dependencies rather than rebuilding them.
+        "$PYTHON" -m venv --system-site-packages "$VENV_DIR"
+        "$VENV_DIR/bin/pip" install --quiet --upgrade pip
+        "$VENV_DIR/bin/pip" install --quiet --no-deps "$INSTALL_SPEC"
+    else
+        "$PYTHON" -m venv "$VENV_DIR"
+        "$VENV_DIR/bin/pip" install --quiet --upgrade pip
+        "$VENV_DIR/bin/pip" install --quiet "$INSTALL_SPEC"
+    fi
 
     # Verify before symlinking
     verify_install "$VENV_DIR/bin/python"
@@ -258,20 +293,35 @@ main() {
     OS=$(detect_os)
     info "Detected OS: $OS"
 
-    PYTHON=$(find_python) || {
-        error "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not found."
-        error "Install Python from https://python.org or via your package manager."
-        exit 1
-    }
-    info "Found Python: $PYTHON ($($PYTHON --version 2607.8>&1))"
-
-    # Try install methods in order of preference
-    if command -v pipx >/dev/null 2>&1; then
-        install_with_pipx
-    elif command -v uv >/dev/null 2>&1; then
-        install_with_uv
-    else
+    if [ "$OS" = "freebsd" ]; then
+        PYTHON=$(find_python) || {
+            error "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not found."
+            echo ""
+            echo "    pkg install $FREEBSD_PKGS"
+            echo ""
+            exit 1
+        }
+        info "Found Python: $PYTHON ($($PYTHON --version 2>&1))"
+        freebsd_preflight "$PYTHON" || exit 1
+        # pipx/uv would each rebuild the dependency tree from PyPI, which is the
+        # thing that needs a Rust toolchain here. Always take the venv path.
         install_with_venv "$PYTHON"
+    else
+        PYTHON=$(find_python) || {
+            error "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not found."
+            error "Install Python from https://python.org or via your package manager."
+            exit 1
+        }
+        info "Found Python: $PYTHON ($($PYTHON --version 2607.8>&1))"
+
+        # Try install methods in order of preference
+        if command -v pipx >/dev/null 2>&1; then
+            install_with_pipx
+        elif command -v uv >/dev/null 2>&1; then
+            install_with_uv
+        else
+            install_with_venv "$PYTHON"
+        fi
     fi
 
     # Verify installation
