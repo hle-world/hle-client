@@ -115,7 +115,7 @@ echo "Updating README.md..."
 if $DRY_RUN; then
   grep -n "\-\-version" README.md || true
 else
-  sed -i '' "s/--version [0-9][0-9.]*/--version $VERSION/g" README.md
+  sed -i '' "s/--version [0-9]\{4\}\.[0-9][0-9.]*/--version $VERSION/g" README.md
   FILES_CHANGED+=(README.md)
 fi
 
@@ -124,7 +124,10 @@ echo "Updating install.sh..."
 if $DRY_RUN; then
   grep -n "\-\-version" install.sh || true
 else
-  sed -i '' "s/--version [0-9][0-9.]*/--version $VERSION/g" install.sh
+  # Anchored to a full CalVer (YYMM.N) so it can't match the "2" in a shell
+  # redirect like `--version 2>&1`, which it previously rewrote into
+  # `--version 2607.8>&1`.
+  sed -i '' "s/--version [0-9]\{4\}\.[0-9][0-9.]*/--version $VERSION/g" install.sh
   FILES_CHANGED+=(install.sh)
 fi
 
