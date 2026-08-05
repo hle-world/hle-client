@@ -235,6 +235,7 @@ def render_unit(
     run_args: list[str],
     user_mode: bool,
     run_as_user: str | None,
+    agent_config: str | None = None,
     description: str | None = None,
     restart: str = "on-failure",
 ) -> str:
@@ -252,6 +253,11 @@ def render_unit(
         f"Restart={restart}",
         "RestartSec=5",
     ]
+    # The token file by absolute path, resolved while running as whoever
+    # enrolled. A system unit runs as root with its own HOME, so deriving the
+    # path at runtime finds the wrong one whenever those differ.
+    if agent_config:
+        lines.append(f"Environment=HLE_AGENT_CONFIG={agent_config}")
     # System units run as root by default; pin an explicit user when asked so
     # the tunnel reads that user's ~/.config/hle/config.toml (API key).
     if not user_mode and run_as_user:
@@ -291,12 +297,14 @@ def _systemd_install(
     start: bool,
     description: str | None = None,
     restart: str = "on-failure",
+    agent_config: str | None = None,
 ) -> None:
     run_as_user = run_as or (None if user_mode else getpass.getuser())
     unit = render_unit(
         label=label,
         hle_path=find_hle_path(),
         run_args=run_args,
+        agent_config=agent_config,
         user_mode=user_mode,
         run_as_user=run_as_user,
         description=description,
@@ -369,6 +377,7 @@ def render_launchd_plist(
     run_args: list[str],
     run_as_user: str | None,
     log_dir: str,
+    agent_config: str | None = None,
 ) -> str:
     """Render a launchd plist. Pure function (unit-testable).
 
@@ -398,6 +407,17 @@ def render_launchd_plist(
     ]
     if run_as_user:
         lines += ["    <key>UserName</key>", f"    <string>{_xml_escape(run_as_user)}</string>"]
+    # The token file by absolute path. launchd hands a daemon its own
+    # environment, so deriving the path from HOME at runtime can resolve
+    # somewhere the enrolling user never wrote to.
+    if agent_config:
+        lines += [
+            "    <key>EnvironmentVariables</key>",
+            "    <dict>",
+            "        <key>HLE_AGENT_CONFIG</key>",
+            f"        <string>{_xml_escape(agent_config)}</string>",
+            "    </dict>",
+        ]
     lines += [
         "    <key>StandardOutPath</key>",
         f"    <string>{_xml_escape(out_log)}</string>",
@@ -438,6 +458,7 @@ def _launchd_install(
     user_mode: bool,
     run_as: str | None,
     start: bool,
+    agent_config: str | None = None,
 ) -> None:
     # Per-user agents run as the invoking user already; only system daemons
     # need an explicit UserName so the tunnel reads that user's config.
@@ -450,6 +471,7 @@ def _launchd_install(
         run_args=run_args,
         run_as_user=run_as_user,
         log_dir=_launchd_log_dir(user_mode),
+        agent_config=agent_config,
     )
     path = _launchd_dir(user_mode) / f"{plabel}.plist"
     try:
@@ -538,6 +560,7 @@ def render_rc_script(
     run_args: list[str],
     run_as_user: str | None = None,
     home: str | None = None,
+    agent_config: str | None = None,
     name: str | None = None,
     description: str | None = None,
     restart: bool = True,
@@ -579,6 +602,11 @@ def render_rc_script(
         f': ${{{svc}_user:="{user}"}}',
         # Overridable via sysrc, e.g. after moving the config to another user.
         f": ${{{svc}_home:={_rc_quote(home_dir)}}}",
+        # The token file as found at install time, by absolute path. HOME alone
+        # was not enough: enrolment and the service can run with different
+        # environments, and then the agent restarts forever looking for a file
+        # that exists somewhere else.
+        f": ${{{svc}_config:={_rc_quote(agent_config or '')}}}",
         "",
         'pidfile="/var/run/${name}.pid"',
         'logfile="/var/log/${name}.log"',
@@ -590,6 +618,7 @@ def render_rc_script(
         # env(1) supplies HOME because rc.d does not.
         f'command_args="{daemon_flags} -P ${{pidfile}} -p /var/run/${{name}}.child.pid '
         f"-o ${{logfile}} /usr/bin/env HOME=${{{svc}_home}} "
+        f"HLE_AGENT_CONFIG=${{{svc}_config}} "
         f'${{hle_command}} {args}"',
         'procname="/usr/sbin/daemon"',
         "",
@@ -630,6 +659,7 @@ def _rcd_install(
     start: bool,
     description: str | None = None,
     restart: bool = True,
+    agent_config: str | None = None,
 ) -> None:
     svc = rc_service_name(label, name)
     script = render_rc_script(
@@ -637,6 +667,7 @@ def _rcd_install(
         hle_path=find_hle_path(),
         run_args=run_args,
         run_as_user=run_as,
+        agent_config=agent_config,
         name=name,
         description=description,
         restart=restart,
@@ -861,6 +892,20 @@ def install(
         description = f"HLE tunnel: {label}"
         restart = "on-failure"
 
+    # Resolve the token file here, while still running as the user who enrolled,
+    # and hand the service an absolute path. Deriving it later from whatever
+    # environment the service manager supplies is what left agents restarting
+    # forever next to a token file they could not see.
+    from hle_client.agent import agent_config_path
+
+    agent_config = str(agent_config_path()) if agent_mode else None
+    if agent_mode and not Path(str(agent_config)).exists():
+        console.print(
+            f"[yellow]No agent token at {agent_config}.[/yellow] "
+            "The service will start and immediately exit until you run "
+            "[cyan]hle agent enroll <token>[/cyan]."
+        )
+
     if plat == "freebsd":
         _rcd_reject_user_mode(user_mode)
         _rcd_install(
@@ -871,6 +916,7 @@ def install(
             start=start,
             description=description,
             restart=restart != "no",
+            agent_config=agent_config,
         )
     elif plat == "darwin":
         _launchd_install(
@@ -880,6 +926,7 @@ def install(
             user_mode=user_mode,
             run_as=run_as,
             start=start,
+            agent_config=agent_config,
         )
     else:
         _systemd_install(
@@ -891,6 +938,7 @@ def install(
             start=start,
             description=description,
             restart=restart,
+            agent_config=agent_config,
         )
 
     if agent_mode:
@@ -952,6 +1000,19 @@ def status(
         _launchd_status(label=label, name=name, user_mode=user_mode)
     else:
         _systemd_status(label=label, name=name, user_mode=user_mode)
+
+    # A service manager reports on a process, not on whether it works. An agent
+    # with no token exits immediately and is restarted forever, so "running as
+    # pid 87998" is true, reassuring, and useless. Say the part it cannot know.
+    if agent_mode:
+        from hle_client.agent import load_agent_token
+
+        if not os.environ.get("HLE_AGENT_TOKEN") and load_agent_token() is None:
+            console.print(
+                "\n[yellow]No agent token is configured[/yellow] — if the service is "
+                "running it is restarting in a loop."
+            )
+            console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
 
 
 @service.command("list")
