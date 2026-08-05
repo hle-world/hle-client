@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from hle_client.discovery import active_providers, scan_all
-from hle_client.discovery.docker import DockerProvider, _network_alias, _usable_ports
+from hle_client.discovery.docker import DockerProvider, _dns_names, _usable_ports
 from hle_client.discovery.kubernetes import KubernetesProvider
 from hle_common.discovery import DiscoveredService
 
@@ -120,31 +120,44 @@ class TestDockerProvider:
         base.update(overrides)
         return base
 
-    def test_maps_a_container_to_a_service(self):
-        svc = DockerProvider()._to_service(self._container())
-        assert svc is not None
+    def _provider(self, *, reachable=None, in_container=False) -> DockerProvider:
+        """A provider whose probe answers from a set instead of the network.
+
+        Address *choice* is covered in test_docker_discovery_address.py; these
+        tests only care that a container maps to a service at all.
+        """
+        allowed = reachable if reachable is not None else set()
+
+        async def probe(host: str, port: int) -> bool:
+            return (host, port) in allowed
+
+        return DockerProvider(probe=probe, in_container=in_container)
+
+    async def test_maps_a_container_to_a_service(self):
+        provider = self._provider(reachable={("127.0.0.1", 8096)})
+        (svc,) = await provider.services_from([self._container()])
         assert svc.provider == "docker"
         assert svc.name == "jellyfin"
-        # Reached by network alias, which works whether or not a port is published.
-        assert svc.address == "http://jellyfin:8096"
+        # The published host port, not the container name: an agent on the host
+        # has no Docker DNS to resolve "jellyfin" with.
+        assert svc.address == "http://127.0.0.1:8096"
         assert svc.namespace == "media"
         assert "build.irrelevant" not in svc.labels
 
-    def test_skips_containers_without_ports(self):
-        assert DockerProvider()._to_service(self._container(Ports=[])) is None
+    async def test_skips_containers_without_ports(self):
+        assert await self._provider().services_from([self._container(Ports=[])]) == []
 
-    def test_skips_hle_own_containers(self):
+    async def test_skips_hle_own_containers(self):
         # Exposing HLE through HLE is a confusing loop.
-        assert (
-            DockerProvider()._to_service(
-                self._container(Image="ghcr.io/hle-world/hle-docker:latest")
-            )
-            is None
-        )
+        containers = [self._container(Image="ghcr.io/hle-world/hle-docker:latest")]
+        assert await self._provider().services_from(containers) == []
 
-    def test_falls_back_to_container_name_without_alias(self):
-        svc = DockerProvider()._to_service(self._container(NetworkSettings={"Networks": {}}))
+    async def test_container_name_is_still_offered_when_nothing_else_answers(self):
+        """The old sole behaviour, demoted to a last resort rather than removed."""
+        provider = self._provider(reachable={("jellyfin", 8096)})
+        (svc,) = await provider.services_from([self._container(NetworkSettings={"Networks": {}})])
         assert svc.address == "http://jellyfin:8096"
+        assert svc.labels["hle.discovery.address_source"] == "container_dns"
 
     def test_unavailable_when_socket_missing(self):
         assert DockerProvider(socket_path="/nonexistent/docker.sock").available() is False
@@ -172,9 +185,19 @@ class TestDockerPortSelection:
         )
         assert ports == [80]
 
-    def test_alias_extraction(self):
-        assert _network_alias({"NetworkSettings": {"Networks": {"n": {"Aliases": ["a"]}}}}) == "a"
-        assert _network_alias({"NetworkSettings": {"Networks": {}}}) is None
+    def test_dns_names_include_every_alias_then_the_container_name(self):
+        names = _dns_names(
+            {
+                "Names": ["/jellyfin"],
+                "NetworkSettings": {"Networks": {"n": {"Aliases": ["a", "b"]}}},
+            }
+        )
+        assert names == ["a", "b", "jellyfin"]
+
+    def test_dns_names_without_networks_is_just_the_container_name(self):
+        assert _dns_names({"Names": ["/jellyfin"], "NetworkSettings": {"Networks": {}}}) == [
+            "jellyfin"
+        ]
 
 
 class TestKubernetesProvider:
