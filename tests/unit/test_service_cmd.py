@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from hle_client.service_cmd import (
@@ -16,6 +18,10 @@ from hle_client.service_cmd import (
     resolve_user_mode,
     unit_name,
 )
+
+# Rich colours numbers and wraps at the console width, so raw substring
+# assertions on its output fail for reasons the user never sees.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class TestBuildFpArgs:
@@ -283,3 +289,35 @@ class TestServiceWiring:
 
         assert "service" in main.commands
         assert "install" in main.commands["service"].commands
+
+
+class TestRestartWithoutATarget:
+    """The error has to name every way out, or it sends people the long way round.
+
+    Reported from a live box: a bare `hle service restart` answered "--label is
+    required (or pass --agent for the agent service)" and never mentioned
+    `--all`, which is what somebody restarting after an upgrade actually wants.
+    """
+
+    def _run(self):
+        from click.testing import CliRunner
+
+        from hle_client.cli import main
+
+        return CliRunner().invoke(main, ["service", "restart"])
+
+    def test_mentions_all_and_how_to_look(self):
+        result = self._run()
+        assert result.exit_code == 1
+        out = " ".join(_ANSI.sub("", result.output).split())
+        assert "--all" in out
+        assert "hle service list" in out
+
+    def test_uninstall_does_not_claim_an_all_flag_it_lacks(self):
+        from click.testing import CliRunner
+
+        from hle_client.cli import main
+
+        result = CliRunner().invoke(main, ["service", "uninstall"])
+        out = " ".join(_ANSI.sub("", result.output).split())
+        assert "--all" not in out
