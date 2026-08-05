@@ -48,6 +48,13 @@ from hle_common.models import (
     WsStreamFrame,
     WsStreamOpen,
 )
+from hle_common.preflight import (
+    PreflightFinding,
+    PreflightFix,
+    PreflightReport,
+    PreflightRequest,
+    Severity,
+)
 from hle_common.protocol import ErrorPayload, MessageType, NoticePayload, ProtocolMessage
 
 _RULE = ForwardRule(host="localhost", port=22)
@@ -196,4 +203,34 @@ SAMPLES: dict[str, object] = {
         error=None,
     ),
     "DiscoveryRefresh": DiscoveryRefresh(),
+    # -- preflight.py -----------------------------------------------------
+    "PreflightFix": PreflightFix(
+        field="service_url", value="https://192.168.1.1", label="Use https://192.168.1.1"
+    ),
+    "PreflightFinding": PreflightFinding(
+        id="upstream_redirects_to_https",
+        severity=Severity.ERROR,
+        title="The service redirects to HTTPS on its own address",
+        detail="The browser would leave the tunnel for a private address.",
+        evidence="302 location: https://192.168.1.1/",
+        fix=PreflightFix(field="service_url", value="https://192.168.1.1"),
+    ),
+    "PreflightRequest": PreflightRequest(
+        request_id="req-1",
+        service_url="http://192.168.1.1",
+        tunnel_host="gw-ian.hle.world",
+        verify_ssl=False,
+        websocket_enabled=True,
+        forward_host=False,
+    ),
+    "PreflightReport": PreflightReport(
+        request_id="req-1",
+        service_url="http://192.168.1.1",
+        findings=[
+            PreflightFinding(id="upstream_requires_auth", severity=Severity.INFO, title="Login")
+        ],
+        error=None,
+        elapsed_ms=41.5,
+        working_host_mode="upstream",
+    ),
 }
