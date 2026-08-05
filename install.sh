@@ -21,6 +21,7 @@ AGENT=0
 AGENT_TOKEN=""
 INSTALL_SERVICE=1
 SERVICE_SCOPE=""   # "", "--user", or "--system"; empty lets the CLI auto-detect
+SYSTEM_LINK=""     # set when hle was linked into a directory already on PATH
 MODIFY_PATH=1      # every published instruction says to run `hle`; make it work
 
 usage() {
@@ -96,10 +97,13 @@ detect_os() {
     esac
 }
 
-# FreeBSD (and therefore pfSense/OPNsense) ships no Python by default, but every
-# dependency is pure Python as of 2608.2, so pip can install them from PyPI with
-# no compiler involved. The interpreter is the only prerequisite.
-FREEBSD_PKGS="python311"
+# Any 3.11+ interpreter will do, and which one is available differs by
+# platform: pfSense 2.7 carries python311 as a dependency of unbound, while
+# OPNsense ships python313 and has no python311 package at all. So never name a
+# version — suggest the meta-package and a search, or the advice is wrong on
+# somebody's box. Every dependency is pure Python as of 2608.2, so pip needs no
+# compiler; the interpreter is the only prerequisite.
+FREEBSD_PKGS="python3"
 
 # Find Python 3.11+
 find_python() {
@@ -123,6 +127,12 @@ ensure_local_bin() {
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
         *)
+            # Already reachable from a system directory, so there is nothing to
+            # add and no shell to guess at.
+            if [ -n "${SYSTEM_LINK:-}" ]; then
+                export PATH="$HOME/.local/bin:$PATH"
+                return 0
+            fi
             SHELL_NAME=$(basename "${SHELL:-}" 2>/dev/null || echo "")
             # $SHELL is the login shell from /etc/passwd, which is not always
             # the shell you are typing into. pfSense's admin account has
@@ -239,8 +249,41 @@ install_with_venv() {
     verify_install "$VENV_DIR/bin/python"
 
     # Symlink the hle binary
-    ensure_local_bin
+    mkdir -p "$HOME/.local/bin"
     ln -sf "$VENV_DIR/bin/hle" "$HOME/.local/bin/hle"
+    link_into_system_path "$VENV_DIR/bin/hle"
+    ensure_local_bin
+}
+
+# Put hle somewhere already on PATH, rather than trusting a shell rc file.
+#
+# Editing an rc file is a guess about which shell will read it, and on FreeBSD
+# firewalls the guess was wrong: pfSense and OPNsense give root csh/tcsh, which
+# never reads .profile, so the install reported success and `hle` was still not
+# found. A symlink in a directory that is already on the default PATH needs no
+# guess and works in every shell, including the console menu's.
+link_into_system_path() {
+    target="$1"
+    # Root only: writing outside $HOME as a normal user is not ours to do.
+    [ "$(id -u)" -eq 0 ] || return 0
+    for d in /usr/local/bin /usr/bin; do
+        case ":$PATH:" in
+            *":$d:"*) ;;
+            *) continue ;;
+        esac
+        [ -d "$d" ] && [ -w "$d" ] || continue
+        # Never clobber something we did not put there.
+        if [ -e "$d/hle" ] && [ ! -L "$d/hle" ]; then
+            warn "$d/hle exists and is not a symlink — leaving it alone."
+            return 0
+        fi
+        if ln -sf "$target" "$d/hle" 2>/dev/null; then
+            info "Linked $d/hle — available in every shell, no PATH change needed"
+            SYSTEM_LINK="$d/hle"
+            return 0
+        fi
+    done
+    return 0
 }
 
 # --- Agent setup ---
@@ -332,6 +375,10 @@ main() {
             echo ""
             echo "    pkg install $FREEBSD_PKGS"
             echo ""
+            echo "  If that package does not exist on this system, find one that does:"
+            echo ""
+            echo "    pkg search '^python3'"
+            echo ""
             exit 1
         }
         info "Found Python: $PYTHON ($($PYTHON --version 2>&1))"
@@ -360,6 +407,12 @@ main() {
     if command -v hle >/dev/null 2>&1; then
         success "HLE client installed successfully!"
         info "Version: $(hle --version)"
+        # csh/tcsh cache the executables on PATH and keep reporting a new one
+        # as missing until told to look again. pfSense and OPNsense both give
+        # root tcsh, so this is the common case on a firewall.
+        case "$(basename "${SHELL:-}" 2>/dev/null)" in
+            csh|tcsh) info "In this shell, run 'rehash' first so it finds hle." ;;
+        esac
     else
         success "HLE client installed. Restart your shell or run:"
         info "  export PATH=\"\$HOME/.local/bin:\$PATH\""
