@@ -442,6 +442,10 @@ def agent_status() -> None:
         console.print(f"Token: [dim]{masked}[/dim]")
     else:
         console.print("[dim]No agent token configured. Run 'hle agent enroll'.[/dim]")
+        # Non-zero so a script can act on it. Without this the installer could
+        # confirm enrollment "succeeded", install a service, and leave it
+        # restarting forever on a missing token.
+        raise SystemExit(1)
 
 
 @agent.command("list")
