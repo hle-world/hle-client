@@ -1,5 +1,46 @@
 # Changelog
 
+## v2608.3 — 2026-08-05
+
+### Fixed
+
+- **The agent service now finds its enrollment token.** On FreeBSD and pfSense
+  the generated rc.d script set no `HOME`, so the running agent looked for its
+  token somewhere other than where enrollment wrote it and failed with
+  `No agent token` on every restart — while the file sat on disk. Reported by a
+  user on pfSense 26.03, whose service had been restarting every few seconds
+  since installation.
+
+  Rather than only setting `HOME`, the token file is now resolved at install
+  time — while still running as whoever enrolled — and passed to the service by
+  absolute path in `HLE_AGENT_CONFIG`. rc.d, systemd and launchd all carry it.
+  Enrollment and the service can run under different environments, so any path
+  derived from `HOME` could disagree between them; an explicit path cannot.
+
+- **Nothing reports success over a broken agent any more.** Three separate
+  things had to agree the failure above was fine for it to stay invisible:
+  `hle agent status` exited 0 with no token, `hle service status --agent`
+  reported a healthy pid for a process in a crash loop, and the installer
+  installed a service after enrollment had silently failed. All three now say
+  what is actually true, and the installer refuses to install a service that
+  would restart forever.
+
+- **The PATH prompt named the wrong file on the platform it was written for.**
+  It offered to write `~/.profile` on a tcsh box, where that file is never
+  read: answering yes would have reported success and changed nothing.
+  `$SHELL` is the login shell from `/etc/passwd`, and pfSense's `admin` account
+  has `/etc/rc.initial` — its console menu — which execs tcsh without updating
+  it. The shell is now taken from the parent process when `$SHELL` isn't a
+  shell we recognise.
+
+### Changed
+
+- **`~/.local/bin` is added to PATH without asking**, since every published
+  instruction says to run `hle` and the prompt defaulted to No — which made the
+  broken answer the likely one. Pass `--no-modify-path` to opt out. Declining
+  now prints the exact line for your shell, in its own syntax, and the full
+  path to the binary.
+
 ## v2608.2 — 2026-08-04
 
 ### Changed
