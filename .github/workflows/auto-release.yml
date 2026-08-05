@@ -129,6 +129,16 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           VERSION="${PR_BRANCH#chore/release-}"
+
+          # The trigger matches on a branch prefix, which any chore/release-*
+          # branch satisfies — including ones that were never releases. Without
+          # this, merging such a branch raises an issue about a release nobody
+          # asked for, and a false alarm teaches people to ignore the real one.
+          if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]+$'; then
+            echo "$PR_BRANCH is not a release branch (version '$VERSION' is not CalVer) - nothing to verify"
+            exit 0
+          fi
+
           if gh release view "v${VERSION}" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release v${VERSION} exists"
             exit 0
