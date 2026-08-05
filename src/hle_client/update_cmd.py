@@ -141,8 +141,47 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
         console.print("[red]Upgrade command failed.[/red]")
         raise SystemExit(result.returncode)
 
-    new_version = _installed_version(sys.executable) or "unknown"
-    console.print(f"[green]Updated to {new_version}.[/green]")
+    # Exit code 0 is not the same as "the new version is installed". `pipx
+    # upgrade` and `uv tool upgrade` both exit 0 while reporting "already at
+    # latest version" when their view of the index is behind PyPI's — which
+    # happens for minutes after a release, and for as long as pip's HTTP cache
+    # holds a stale index page. Trusting the exit code printed a green
+    # "Updated to 2608.3." immediately under "Latest on PyPI: 2608.4".
+    expected = target_version or latest
+    new_version = _installed_version(sys.executable)
+
+    if expected and new_version and new_version != expected:
+        console.print(
+            f"[yellow]{cmd[0]} reported success but {expected} is not installed "
+            f"(still {new_version}).[/yellow]"
+        )
+        pinned = build_upgrade_command(method, sys.executable, version=expected)
+        if pinned != cmd:
+            # The pinned form can't no-op: it names the version outright rather
+            # than asking the tool whether it thinks an upgrade is due.
+            console.print(f"[dim]$ {' '.join(pinned)}[/dim]")
+            retry = subprocess.run(pinned, check=False)  # noqa: S603 — argv built internally
+            if retry.returncode == 0:
+                new_version = _installed_version(sys.executable)
+
+    if expected and new_version and new_version != expected:
+        console.print(
+            f"[red]Still on {new_version}, not {expected}.[/red] The package index this "
+            f"machine sees is behind PyPI — usually a stale cache, or a release "
+            f"published moments ago. Retry in a minute, or force it:\n"
+            f"  {' '.join(build_upgrade_command(method, sys.executable, version=expected))}"
+        )
+        raise SystemExit(1)
+
+    if new_version is None:
+        # No evidence of failure, so don't claim one — but don't claim success
+        # either, which is what "Updated to unknown." amounted to.
+        console.print(
+            "[yellow]Upgraded, but the installed version could not be read.[/yellow] "
+            "Check with: hle --version"
+        )
+    else:
+        console.print(f"[green]Updated to {new_version}.[/green]")
 
     # A service started before the upgrade is still running the old code, and
     # nothing about it looks wrong — `hle --version` reports the new one while
