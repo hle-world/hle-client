@@ -213,6 +213,24 @@ class TestRealProbe:
 
 
 @pytest.mark.parametrize(
+    ("bind", "expected"),
+    [
+        ("", True),
+        ("0.0.0.0", True),
+        ("::", True),
+        ("[::]", True),
+        ("127.0.0.1", False),
+        ("192.168.1.10", False),
+        ("nonsense", False),  # unparseable: try it rather than assume loopback
+    ],
+)
+def test_wildcard_bind_detection(bind, expected):
+    from hle_client.discovery.docker import _is_wildcard_bind
+
+    assert _is_wildcard_bind(bind) is expected
+
+
+@pytest.mark.parametrize(
     ("env", "expected"),
     [("1", True), ("true", True), ("0", False), ("no", False)],
 )

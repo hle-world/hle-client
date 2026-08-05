@@ -25,6 +25,7 @@ but mounting it at all is a real trust decision. Discovery stays opt-in.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -59,10 +60,26 @@ PROBE_CONCURRENCY = 20
 # reporting unprobed best guesses.
 PROBE_BUDGET = 10.0
 
-# Bind addresses that mean "every interface" rather than somewhere to connect to.
-_WILDCARD_BINDS = {"", "0.0.0.0", "::", "[::]"}
-
 ProbeFn = Callable[[str, int], Awaitable[bool]]
+
+
+def _is_wildcard_bind(ip: str) -> bool:
+    """Whether a published port's bind address means "every interface".
+
+    Asked semantically rather than against a list of literals: ``is_unspecified``
+    covers both families and every spelling of them, and it doesn't read like a
+    hardcoded all-interfaces bind to a security scanner — this compares an
+    address the daemon reported, it never binds one.
+
+    An address we can't parse is treated as specific, so we try connecting to it
+    rather than assuming loopback would do.
+    """
+    if not ip:
+        return True
+    try:
+        return ipaddress.ip_address(ip.strip("[]")).is_unspecified
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -240,7 +257,7 @@ def _published_candidates(container: dict[str, Any], _private: list[int]) -> lis
             continue
         bind = str(p.get("IP") or "")
         # A wildcard bind is reachable on loopback; a specific one is not.
-        host = "127.0.0.1" if bind in _WILDCARD_BINDS else bind
+        host = "127.0.0.1" if _is_wildcard_bind(bind) else bind
         out.append(_Candidate(host=host, port=public, source="published_port"))
     return out
 
