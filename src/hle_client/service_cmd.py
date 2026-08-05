@@ -537,6 +537,7 @@ def render_rc_script(
     hle_path: str,
     run_args: list[str],
     run_as_user: str | None = None,
+    home: str | None = None,
     name: str | None = None,
     description: str | None = None,
     restart: bool = True,
@@ -546,10 +547,17 @@ def render_rc_script(
     ``hle`` runs in the foreground, so daemon(8) does the backgrounding. With
     ``restart`` it also re-launches the process if it exits, which is the rc.d
     equivalent of systemd's ``Restart=on-failure``.
+
+    ``HOME`` is set explicitly. rc.d starts services with a near-empty
+    environment and daemon(8) adds nothing, so without it the agent looks for
+    its token somewhere other than the home directory it was enrolled in and
+    fails with "No agent token" on every restart.
     """
     svc = rc_service_name(label, name)
     args = " ".join(_rc_quote(a) for a in run_args)
     daemon_flags = "-f" + (" -r" if restart else "")
+    user = run_as_user or "root"
+    home_dir = home or str(Path.home())
     lines = [
         "#!/bin/sh",
         "#",
@@ -568,7 +576,9 @@ def render_rc_script(
         "load_rc_config $name",
         "",
         f': ${{{svc}_enable:="NO"}}',
-        f': ${{{svc}_user:="{run_as_user or "root"}"}}',
+        f': ${{{svc}_user:="{user}"}}',
+        # Overridable via sysrc, e.g. after moving the config to another user.
+        f": ${{{svc}_home:={_rc_quote(home_dir)}}}",
         "",
         'pidfile="/var/run/${name}.pid"',
         'logfile="/var/log/${name}.log"',
@@ -577,8 +587,10 @@ def render_rc_script(
         'command="/usr/sbin/daemon"',
         # -P tracks the daemon(8) supervisor, -p the hle process itself, so
         # `service ... status` reports on the thing that actually matters.
+        # env(1) supplies HOME because rc.d does not.
         f'command_args="{daemon_flags} -P ${{pidfile}} -p /var/run/${{name}}.child.pid '
-        f'-o ${{logfile}} ${{hle_command}} {args}"',
+        f"-o ${{logfile}} /usr/bin/env HOME=${{{svc}_home}} "
+        f'${{hle_command}} {args}"',
         'procname="/usr/sbin/daemon"',
         "",
         'run_rc_command "$1"',

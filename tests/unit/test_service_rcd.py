@@ -7,6 +7,8 @@ covered here rather than discovered on a firewall.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from hle_client.service_cmd import (
@@ -104,6 +106,27 @@ class TestRenderRcScript:
 
     def test_explicit_user_is_honoured(self):
         assert ': ${hle_agent_user:="hle"}' in self._script(run_as_user="hle")
+
+    def test_home_is_set_explicitly(self):
+        """rc.d starts services with almost no environment and daemon(8) adds
+        nothing, so without HOME the agent looks for its token in the wrong
+        place and fails with "No agent token" on every restart."""
+        script = self._script(home="/root")
+        assert ": ${hle_agent_home:='/root'}" in script
+        assert "/usr/bin/env HOME=${hle_agent_home}" in script
+
+    def test_env_precedes_the_hle_command(self):
+        """env(1) has to wrap the command, not follow it."""
+        script = self._script(home="/root")
+        assert script.index("/usr/bin/env HOME=") < script.index("${hle_command}")
+
+    def test_home_defaults_to_the_installing_users_home(self):
+        script = self._script()
+        assert f": ${{hle_agent_home:='{Path.home()}'}}" in script
+
+    def test_home_is_quoted(self):
+        script = self._script(home="/home/user with space")
+        assert "'/home/user with space'" in script
 
     def test_no_token_is_baked_into_the_script(self):
         """The agent reads its token at runtime; rc.d scripts are world-readable."""
