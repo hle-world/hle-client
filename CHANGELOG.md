@@ -2,7 +2,29 @@
 
 ## v2608.4 — 2026-08-05
 
-<!-- TODO: Fill in release notes before merging -->
+### Fixed
+
+- **`hle` is now on the path on pfSense and OPNsense.** The installer wrote
+  `~/.local/bin` into a shell startup file, which pfSense's `tcsh` root login
+  never read — so `hle: Command not found.` immediately after an install that
+  reported success. When running as root the installer now also symlinks
+  `/usr/local/bin/hle`, which is on the default path for every shell on the
+  system and survives changing shells. An existing non-symlink at that path is
+  left alone rather than clobbered. The startup-file edit remains as the
+  fallback for non-root installs, with `--no-modify-path` to skip it.
+
+### Added
+
+- **`hle update` offers to restart what it just made stale.** Upgrading replaces
+  the code on disk, not the process already running it: the service kept serving
+  the previous release while `hle --version` reported the new one, and nothing
+  looked wrong. `update` now lists the installed services and offers to restart
+  them, defaulting to yes. Declining prints the command to do it later; a
+  restart that fails exits non-zero and says the old version is still serving,
+  rather than reporting a successful upgrade.
+
+- **`hle service restart [--all]`**, so restarting doesn't mean knowing the
+  platform's own service manager and the generated unit's name.
 
 ## v2608.3 — 2026-08-05
 
