@@ -120,30 +120,57 @@ ensure_local_bin() {
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
         *)
-            SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "sh")
-            # csh/tcsh use a different syntax and never read .profile — writing
-            # there looks like it worked and silently does nothing. pfSense
-            # gives root tcsh by default, so this is the common case there.
-            PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+            SHELL_NAME=$(basename "${SHELL:-}" 2>/dev/null || echo "")
+            # $SHELL is the login shell from /etc/passwd, which is not always
+            # the shell you are typing into. pfSense's admin account has
+            # /etc/rc.initial — its console menu — and picking the shell option
+            # execs tcsh without updating $SHELL, so this used to resolve to
+            # "rc.initial", fall through to .profile, and write a file tcsh
+            # never reads. The install then reported success and changed
+            # nothing. Ask the parent process what it actually is whenever
+            # $SHELL names something that isn't a shell we know.
             case "$SHELL_NAME" in
-                zsh) RC_FILE="$HOME/.zshrc" ;;
-                bash) RC_FILE="$HOME/.bashrc" ;;
+                zsh|bash|fish|csh|tcsh|sh|ksh|dash) ;;
+                *)
+                    PARENT=$(ps -o comm= -p "$PPID" 2>/dev/null | tr -d ' ') || PARENT=""
+                    # A login shell shows up as "-tcsh"; the dash is not part
+                    # of the name.
+                    PARENT=${PARENT#-}
+                    [ -n "$PARENT" ] && SHELL_NAME=$(basename "$PARENT")
+                    ;;
+            esac
+
+            # csh/tcsh use a different syntax and never read .profile.
+            PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+            RELOAD_HINT="restart your shell or run: . $HOME/.profile"
+            case "$SHELL_NAME" in
+                zsh) RC_FILE="$HOME/.zshrc"; RELOAD_HINT="restart your shell" ;;
+                bash) RC_FILE="$HOME/.bashrc"; RELOAD_HINT="restart your shell" ;;
                 fish)
                     RC_FILE="$HOME/.config/fish/config.fish"
                     PATH_LINE='set -gx PATH $HOME/.local/bin $PATH'
+                    RELOAD_HINT="restart your shell"
                     ;;
                 csh|tcsh)
                     RC_FILE="$HOME/.cshrc"
                     PATH_LINE='set path = ( $HOME/.local/bin $path )'
+                    # tcsh caches what is on the path and will keep saying
+                    # "Command not found." until told to look again.
+                    RELOAD_HINT="run: rehash"
                     ;;
                 *) RC_FILE="$HOME/.profile" ;;
             esac
             if [ -n "$RC_FILE" ]; then
                 if prompt_yn "Add ~/.local/bin to PATH in $RC_FILE?"; then
                     echo "$PATH_LINE" >> "$RC_FILE"
-                    info "Added to $RC_FILE — restart your shell or run: source $RC_FILE"
+                    info "Added to $RC_FILE — $RELOAD_HINT"
                 else
-                    info "Skipped. You may need to add ~/.local/bin to your PATH manually."
+                    # Say exactly what to do, in the right syntax. "Add it
+                    # yourself" leaves csh users to discover that the obvious
+                    # export line does nothing.
+                    info "Skipped. Either use the full path $HOME/.local/bin/hle, or add:"
+                    info "    $PATH_LINE"
+                    info "  to $RC_FILE"
                 fi
             fi
             export PATH="$HOME/.local/bin:$PATH"
