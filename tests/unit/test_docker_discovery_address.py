@@ -205,11 +205,39 @@ class TestRealProbe:
 
         assert asyncio.run(go()) is True
 
-    def test_a_name_that_does_not_resolve_is_not_reachable(self):
-        """The actual production bug: a container name, from the host."""
+    def test_nothing_listening_is_not_reachable(self):
+        """A port that closed a moment ago: refused, not hung."""
+
+        async def go():
+            server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            server.close()
+            await server.wait_closed()
+            from hle_client.discovery.docker import _probe_tcp
+
+            return await _probe_tcp("127.0.0.1", port)
+
+        assert asyncio.run(go()) is False
+
+    def test_a_name_that_does_not_resolve_is_not_reachable(self, monkeypatch):
+        """The actual production bug: a container name, from the host.
+
+        The resolver is stubbed rather than asked for a real name. `getaddrinfo`
+        runs in a thread executor, so `wait_for` abandons the *wait* while the
+        thread stays blocked in the syscall — and Python joins that thread at
+        interpreter shutdown. Against a resolver that blackholes unknown names
+        instead of answering NXDOMAIN, this test passed and then hung the whole
+        run on the way out, which is exactly what it did on CI's 3.12.
+        """
+        import socket
+
+        async def refuse_to_resolve(host, port, **kwargs):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        monkeypatch.setattr(asyncio, "open_connection", refuse_to_resolve)
         from hle_client.discovery.docker import _probe_tcp
 
-        assert asyncio.run(_probe_tcp("jellyfin.invalid", 8096)) is False
+        assert asyncio.run(_probe_tcp("jellyfin", 8096)) is False
 
 
 @pytest.mark.parametrize(
