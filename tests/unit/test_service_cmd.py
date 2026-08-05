@@ -299,25 +299,35 @@ class TestRestartWithoutATarget:
     `--all`, which is what somebody restarting after an upgrade actually wants.
     """
 
-    def _run(self):
+    def _run(self, subcommand):
+        """Invoke the subcommand with the platform check stubbed out.
+
+        Without this the test only proves what the CI container lacks: the test
+        image has no systemctl, so `_require_supported` exits with "needs
+        systemd" before argument handling runs. That made the assertion fail on
+        Linux and — worse — made the negative test below pass for the wrong
+        reason, since the systemd message happens not to contain "--all".
+        """
+        from unittest.mock import patch
+
         from click.testing import CliRunner
 
         from hle_client.cli import main
 
-        return CliRunner().invoke(main, ["service", "restart"])
+        with patch("hle_client.service_cmd._require_supported", return_value="linux"):
+            return CliRunner().invoke(main, ["service", subcommand])
 
     def test_mentions_all_and_how_to_look(self):
-        result = self._run()
+        result = self._run("restart")
         assert result.exit_code == 1
         out = " ".join(_ANSI.sub("", result.output).split())
+        assert "--label is required" in out
         assert "--all" in out
         assert "hle service list" in out
 
     def test_uninstall_does_not_claim_an_all_flag_it_lacks(self):
-        from click.testing import CliRunner
-
-        from hle_client.cli import main
-
-        result = CliRunner().invoke(main, ["service", "uninstall"])
+        result = self._run("uninstall")
         out = " ".join(_ANSI.sub("", result.output).split())
+        # Proves the hint is per-command, and that we got past the platform gate.
+        assert "--label is required" in out
         assert "--all" not in out
