@@ -28,9 +28,21 @@ jobs:
       - name: Install tools
         run: apt-get update && apt-get install -y git curl
 
-      - uses: actions/checkout@v6.0.2
-        with:
-          fetch-depth: 0
+      # Cloned by hand rather than with actions/checkout. On this ARC runner
+      # that action intermittently dies inside its container implementation
+      # with "TypeError: Converting circular structure to JSON", which failed
+      # three runs in one day — one of them this workflow, leaving v2608.2
+      # unreleased and nobody any the wiser. A plain clone has no such step.
+      - name: Check out the merge commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          git clone --no-checkout \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" .
+          git checkout --detach "$SHA"
+          git config --global --add safe.directory "$PWD"
 
       - name: Extract and validate version
         run: |
@@ -93,3 +105,41 @@ jobs:
           result = json.loads(resp.read())
           print(f'Release created: {result[\"html_url\"]}')
           "
+
+  # A release that fails to happen is silent: the PR merges, the checks are
+  # green, and only the absence of a tag says otherwise. That is how v2608.2
+  # sat unreleased. This job runs even when the one above dies, and turns that
+  # silence into something with a URL.
+  verify:
+    needs: release
+    if: >
+      always() &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'chore/release-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Confirm the release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          VERSION="${PR_BRANCH#chore/release-}"
+          if gh release view "v${VERSION}" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release v${VERSION} exists"
+            exit 0
+          fi
+
+          echo "::error::Release v${VERSION} was not created - the release job did not finish"
+          # An issue rather than only a red check: a failed run on a merged PR
+          # is seen by whoever goes looking, and by then the release is late.
+          # Re-running the release job is usually the whole fix.
+          gh issue create --repo "$REPO" \
+            --title "Release v${VERSION} was never created" \
+            --body "The release PR for v${VERSION} merged, but no GitHub release exists, so PyPI and Homebrew were never updated. This is usually the ARC runner failing during checkout, which a re-run fixes: ${RUN_URL}" \
+            || true
+          exit 1
