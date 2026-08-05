@@ -578,7 +578,7 @@ def render_rc_script(
         f': ${{{svc}_enable:="NO"}}',
         f': ${{{svc}_user:="{user}"}}',
         # Overridable via sysrc, e.g. after moving the config to another user.
-        f': ${{{svc}_home:={_rc_quote(home_dir)}}}',
+        f": ${{{svc}_home:={_rc_quote(home_dir)}}}",
         "",
         'pidfile="/var/run/${name}.pid"',
         'logfile="/var/log/${name}.log"',
