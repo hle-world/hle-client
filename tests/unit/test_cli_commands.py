@@ -469,11 +469,17 @@ class TestAgentCli:
         assert "Invalid agent token" in result.output
 
     def test_status_no_token(self, tmp_path: Path) -> None:
+        """Exits non-zero, so a script can tell enrolled from not.
+
+        This used to exit 0, which is how the installer could confirm
+        enrollment "worked", install a service, and leave it restarting
+        forever on a token that was never saved.
+        """
         runner = CliRunner()
         cfg = tmp_path / "missing.toml"
         with patch("hle_client.agent.AGENT_CONFIG_PATH", cfg):
             result = runner.invoke(main, ["agent", "status"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "No agent token" in result.output
 
     def test_run_requires_token(self, tmp_path: Path) -> None:

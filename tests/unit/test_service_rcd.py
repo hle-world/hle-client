@@ -120,6 +120,28 @@ class TestRenderRcScript:
         script = self._script(home="/root")
         assert script.index("/usr/bin/env HOME=") < script.index("${hle_command}")
 
+    def test_token_file_is_passed_by_absolute_path(self):
+        """HOME alone was not enough.
+
+        Enrollment and the service can run with different environments — on
+        pfSense the agent enrolls as ``admin`` and runs from rc.d — and then
+        the token is written to one path and read from another. The agent
+        restarts forever reporting "No agent token" while the file sits on
+        disk. The path is resolved at install time and passed explicitly.
+        """
+        script = self._script(agent_config="/root/.config/hle/agent.toml")
+        assert ": ${hle_agent_config:='/root/.config/hle/agent.toml'}" in script
+        assert "HLE_AGENT_CONFIG=${hle_agent_config}" in script
+
+    def test_token_path_is_quoted(self):
+        script = self._script(agent_config="/home/user with space/agent.toml")
+        assert ": ${hle_agent_config:='/home/user with space/agent.toml'}" in script
+
+    def test_no_token_path_leaves_the_default_in_charge(self):
+        """An empty value must not override the agent's own default."""
+        script = self._script()
+        assert ": ${hle_agent_config:=''}" in script
+
     def test_home_defaults_to_the_installing_users_home(self):
         script = self._script()
         assert f": ${{hle_agent_home:='{Path.home()}'}}" in script

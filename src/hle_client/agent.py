@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,28 +47,46 @@ WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 AGENT_CONFIG_PATH = Path.home() / ".config" / "hle" / "agent.toml"
 AGENT_TOKEN_PREFIX = "hlea_"
 
+# Set by `hle service install --agent` to the file the token was actually found
+# in, so the service does not have to reconstruct the path from HOME. A service
+# manager starts processes with an environment of its own choosing: on pfSense
+# the agent enrolls as `admin` and runs from rc.d, and if those two disagree
+# about HOME the token is written to one path and read from another. The agent
+# then restarts forever reporting "No agent token" while the file it needs is
+# sitting on disk. An absolute path removes the guesswork.
+AGENT_CONFIG_ENV = "HLE_AGENT_CONFIG"
+
+
+def agent_config_path() -> Path:
+    """The token file to read or write, honouring an explicit override."""
+    override = os.environ.get(AGENT_CONFIG_ENV)
+    return Path(override).expanduser() if override else AGENT_CONFIG_PATH
+
 
 def save_agent_token(token: str) -> None:
     """Persist the agent enrollment token (0600)."""
-    AGENT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    AGENT_CONFIG_PATH.write_text(f'token = "{token}"\n')
-    AGENT_CONFIG_PATH.chmod(0o600)
+    path = agent_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_text(f'token = "{token}"\n')
+    path.chmod(0o600)
 
 
 def load_agent_token() -> str | None:
-    if not AGENT_CONFIG_PATH.exists():
+    path = agent_config_path()
+    if not path.exists():
         return None
     try:
-        with open(AGENT_CONFIG_PATH, "rb") as f:
+        with open(path, "rb") as f:
             return tomllib.load(f).get("token")
     except (OSError, ValueError):
-        logger.debug("Failed to read agent token from %s", AGENT_CONFIG_PATH)
+        logger.debug("Failed to read agent token from %s", path)
         return None
 
 
 def remove_agent_token() -> bool:
-    if AGENT_CONFIG_PATH.exists():
-        AGENT_CONFIG_PATH.unlink()
+    path = agent_config_path()
+    if path.exists():
+        path.unlink()
         return True
     return False
 

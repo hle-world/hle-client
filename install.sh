@@ -21,6 +21,7 @@ AGENT=0
 AGENT_TOKEN=""
 INSTALL_SERVICE=1
 SERVICE_SCOPE=""   # "", "--user", or "--system"; empty lets the CLI auto-detect
+MODIFY_PATH=1      # every published instruction says to run `hle`; make it work
 
 usage() {
     cat <<'EOF'
@@ -32,6 +33,7 @@ Options:
   --token <token>   Agent enrollment token (hlea_...); implies --agent.
                     Without it, --agent prompts on the terminal.
   --no-service      With --agent: enroll only, don't install a service
+  --no-modify-path  Don't add ~/.local/bin to your shell's PATH
   --user            Install a per-user service (no sudo; needs linger on Linux)
   --system          Install a system-wide service (starts at boot; needs sudo)
   -h, --help        Show this help
@@ -49,6 +51,7 @@ while [ $# -gt 0 ]; do
         --token) AGENT_TOKEN="$2"; AGENT=1; shift 2 ;;
         --token=*) AGENT_TOKEN="${1#*=}"; AGENT=1; shift ;;
         --no-service) INSTALL_SERVICE=0; shift ;;
+        --no-modify-path) MODIFY_PATH=0; shift ;;
         --user) SERVICE_SCOPE="--user"; shift ;;
         --system) SERVICE_SCOPE="--system"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -120,31 +123,67 @@ ensure_local_bin() {
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
         *)
-            SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "sh")
-            # csh/tcsh use a different syntax and never read .profile — writing
-            # there looks like it worked and silently does nothing. pfSense
-            # gives root tcsh by default, so this is the common case there.
-            PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+            SHELL_NAME=$(basename "${SHELL:-}" 2>/dev/null || echo "")
+            # $SHELL is the login shell from /etc/passwd, which is not always
+            # the shell you are typing into. pfSense's admin account has
+            # /etc/rc.initial — its console menu — and picking the shell option
+            # execs tcsh without updating $SHELL, so this used to resolve to
+            # "rc.initial", fall through to .profile, and write a file tcsh
+            # never reads. The install then reported success and changed
+            # nothing. Ask the parent process what it actually is whenever
+            # $SHELL names something that isn't a shell we know.
             case "$SHELL_NAME" in
-                zsh) RC_FILE="$HOME/.zshrc" ;;
-                bash) RC_FILE="$HOME/.bashrc" ;;
+                zsh|bash|fish|csh|tcsh|sh|ksh|dash) ;;
+                *)
+                    PARENT=$(ps -o comm= -p "$PPID" 2>/dev/null | tr -d ' ') || PARENT=""
+                    # A login shell shows up as "-tcsh"; the dash is not part
+                    # of the name.
+                    PARENT=${PARENT#-}
+                    [ -n "$PARENT" ] && SHELL_NAME=$(basename "$PARENT")
+                    ;;
+            esac
+
+            # csh/tcsh use a different syntax and never read .profile.
+            PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+            RELOAD_HINT="restart your shell or run: . $HOME/.profile"
+            case "$SHELL_NAME" in
+                zsh) RC_FILE="$HOME/.zshrc"; RELOAD_HINT="restart your shell" ;;
+                bash) RC_FILE="$HOME/.bashrc"; RELOAD_HINT="restart your shell" ;;
                 fish)
                     RC_FILE="$HOME/.config/fish/config.fish"
                     PATH_LINE='set -gx PATH $HOME/.local/bin $PATH'
+                    RELOAD_HINT="restart your shell"
                     ;;
                 csh|tcsh)
                     RC_FILE="$HOME/.cshrc"
                     PATH_LINE='set path = ( $HOME/.local/bin $path )'
+                    # tcsh caches what is on the path and will keep saying
+                    # "Command not found." until told to look again.
+                    RELOAD_HINT="run: rehash"
                     ;;
                 *) RC_FILE="$HOME/.profile" ;;
             esac
-            if [ -n "$RC_FILE" ]; then
-                if prompt_yn "Add ~/.local/bin to PATH in $RC_FILE?"; then
-                    echo "$PATH_LINE" >> "$RC_FILE"
-                    info "Added to $RC_FILE — restart your shell or run: source $RC_FILE"
+            # Written without asking. Every instruction we publish says to run
+            # `hle`, so an install that leaves it off PATH has not finished the
+            # job — and the prompt defaulted to No, which meant the common
+            # answer was the broken one. --no-modify-path opts out.
+            if [ "$MODIFY_PATH" -eq 1 ] && [ -n "$RC_FILE" ]; then
+                if [ -f "$RC_FILE" ] && grep -qF '.local/bin' "$RC_FILE" 2>/dev/null; then
+                    info "PATH already set up in $RC_FILE"
+                elif echo "$PATH_LINE" >> "$RC_FILE" 2>/dev/null; then
+                    info "Added ~/.local/bin to PATH in $RC_FILE"
+                    info "  For this shell: $RELOAD_HINT"
                 else
-                    info "Skipped. You may need to add ~/.local/bin to your PATH manually."
+                    warn "Could not write $RC_FILE. Add this line yourself:"
+                    warn "    $PATH_LINE"
                 fi
+            elif [ "$MODIFY_PATH" -eq 0 ]; then
+                # Say exactly what to run, in the right syntax. "Add it
+                # yourself" leaves csh users to discover that the obvious
+                # export line does nothing.
+                info "Left PATH alone (--no-modify-path). Use $HOME/.local/bin/hle, or add:"
+                info "    $PATH_LINE"
+                info "  to $RC_FILE"
             fi
             export PATH="$HOME/.local/bin:$PATH"
             ;;
@@ -258,6 +297,18 @@ setup_agent() {
         error "Agent enrollment failed. The client is installed; you can retry with:"
         error "  hle agent enroll"
         error "  hle service install --agent"
+        exit 1
+    fi
+
+    # Confirm a token actually landed before installing anything that depends
+    # on one. A service started without a token does not fail — it respawns
+    # forever, logging "No agent token" while `service ... status` reports a
+    # healthy pid, so the install looks successful and the agent never
+    # connects. Better to stop here and say so.
+    if ! hle agent status >/dev/null 2>&1; then
+        error "Enrollment reported success but no agent token is readable."
+        error "Not installing the service: it would restart forever without one."
+        error "Retry with:  hle agent enroll"
         exit 1
     fi
     success "Agent enrolled."
