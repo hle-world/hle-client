@@ -39,10 +39,15 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
+          # safe.directory FIRST. The container runs as a different uid than
+          # the workspace owner, so git refuses to touch the repo with
+          # "detected dubious ownership" — and it refuses at checkout, which
+          # is before the line that used to set this. The clone appeared to
+          # work and the job died on the next command.
+          git config --global --add safe.directory "$PWD"
           git clone --no-checkout \
             "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" .
           git checkout --detach "$SHA"
-          git config --global --add safe.directory "$PWD"
 
       - name: Extract and validate version
         run: |
