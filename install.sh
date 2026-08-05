@@ -121,15 +121,26 @@ ensure_local_bin() {
         *":$HOME/.local/bin:"*) ;;
         *)
             SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "sh")
+            # csh/tcsh use a different syntax and never read .profile — writing
+            # there looks like it worked and silently does nothing. pfSense
+            # gives root tcsh by default, so this is the common case there.
+            PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
             case "$SHELL_NAME" in
                 zsh) RC_FILE="$HOME/.zshrc" ;;
                 bash) RC_FILE="$HOME/.bashrc" ;;
-                fish) RC_FILE="$HOME/.config/fish/config.fish" ;;
+                fish)
+                    RC_FILE="$HOME/.config/fish/config.fish"
+                    PATH_LINE='set -gx PATH $HOME/.local/bin $PATH'
+                    ;;
+                csh|tcsh)
+                    RC_FILE="$HOME/.cshrc"
+                    PATH_LINE='set path = ( $HOME/.local/bin $path )'
+                    ;;
                 *) RC_FILE="$HOME/.profile" ;;
             esac
             if [ -n "$RC_FILE" ]; then
                 if prompt_yn "Add ~/.local/bin to PATH in $RC_FILE?"; then
-                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC_FILE"
+                    echo "$PATH_LINE" >> "$RC_FILE"
                     info "Added to $RC_FILE — restart your shell or run: source $RC_FILE"
                 else
                     info "Skipped. You may need to add ~/.local/bin to your PATH manually."
