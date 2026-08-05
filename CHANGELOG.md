@@ -2,7 +2,64 @@
 
 ## v2608.5 — 2026-08-05
 
-<!-- TODO: Fill in release notes before merging -->
+### Fixed
+
+- **Docker discovery offered addresses the agent could not reach.** Every
+  discovered container was reported as `http://<container-name>:<port>`, and that
+  name only resolves through Docker's embedded DNS at `127.0.0.11` — which exists
+  inside a container attached to the same user-defined network. An agent
+  installed on the host, via pipx or a venv or on pfSense, has no such resolver,
+  so the address was NXDOMAIN and exposing a discovered container produced a
+  tunnel to nothing.
+
+  A published container was no better: the port helper sorted published ports
+  first but returned the *container-side* number, so `0.0.0.0:32768->8096/tcp`
+  still came out as `http://name:8096` — the one address that would have worked
+  from the host was found and then discarded.
+
+  Addressing is not a property of the container; it depends on where the agent
+  runs. Each container now produces a ladder of candidates — the published host
+  port, the container's own bridge address, then the alias or name — and the
+  first one that answers a TCP connect is what gets reported. Whether the agent
+  is itself containerised decides only the order; the probe decides the answer.
+
+  Containers nothing can reach are still reported, labelled
+  `hle.discovery.reachable=false`, rather than dropped — "unreachable from here"
+  and "discovery found nothing" are very different problems to debug. The chosen
+  rung is recorded in `hle.discovery.address_source`.
+
+- **`hle update` reported success after upgrading nothing.**
+
+  ```
+  Latest on PyPI: 2608.4
+  $ pipx upgrade hle-client
+  hle-client is already at latest version 2608.3
+  Updated to 2608.3.
+  ```
+
+  `pipx upgrade` and `uv tool upgrade` exit 0 when they decide no upgrade is due,
+  and the exit code was the only thing checked — so a green "Updated to 2608.3."
+  printed directly under "Latest on PyPI: 2608.4", followed by an offer to
+  restart services onto code that had not been replaced.
+
+  The no-op itself was a race rather than a bug, and it will recur every release:
+  the version check reads PyPI's JSON API, which updates the moment a release is
+  cut, while pipx resolves through the simple index, which trails it. Run
+  `hle update` in that window and pip caches the older index page for ten
+  minutes.
+
+  So the installed version is now verified against the one requested. A mismatch
+  is retried once with the version pinned — `pipx install --force pkg==X` names
+  the version outright and cannot no-op — and if it still hasn't moved, that is
+  an error naming the cause, the command to force it, and a non-zero exit.
+  "Updated to unknown." is gone too: an unreadable version no longer reports
+  success.
+
+- **`hle service restart` hid the flag you wanted.** A bare invocation answered
+  "--label is required (or pass --agent for the agent service)" and stopped
+  there, sending people to look up a label when `--all` was what they needed
+  after an upgrade. It now names `--all`, and both this and `uninstall`/`status`
+  point at `hle service list`.
 
 ## v2608.4 — 2026-08-05
 
