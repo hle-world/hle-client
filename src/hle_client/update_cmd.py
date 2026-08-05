@@ -143,7 +143,42 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
 
     new_version = _installed_version(sys.executable) or "unknown"
     console.print(f"[green]Updated to {new_version}.[/green]")
-    console.print(
-        "[yellow]Restart any running tunnels[/yellow] so they pick up the new version "
-        "(e.g. restart the systemd service, or stop and re-run 'hle expose ...')."
-    )
+
+    # A service started before the upgrade is still running the old code, and
+    # nothing about it looks wrong — `hle --version` reports the new one while
+    # the process serving traffic is the previous release. Telling people to
+    # "restart any running tunnels" left that gap open until they acted on it.
+    from hle_client.service_cmd import installed_services, restart_service
+
+    try:
+        services = installed_services()
+    except Exception:
+        services = []
+
+    if not services:
+        console.print(
+            "[dim]No hle services installed. Restart anything you started by hand "
+            "(e.g. re-run 'hle expose ...') so it picks up the new version.[/dim]"
+        )
+        return
+
+    listed = ", ".join(services)
+    console.print(f"Still running the previous version: [bold]{listed}[/bold]")
+    if not (yes or click.confirm(f"Restart {len(services)} service(s) now?", default=True)):
+        console.print("[yellow]Left running the old version.[/yellow] Restart later with:")
+        console.print("  hle service restart --all")
+        return
+
+    failed = []
+    for svc in services:
+        if restart_service(svc):
+            console.print(f"  [green]restarted[/green] {svc}")
+        else:
+            failed.append(svc)
+            console.print(f"  [red]failed[/red] {svc}")
+    if failed:
+        console.print(
+            "[yellow]Some services did not restart.[/yellow] They are still on the old "
+            "version — check 'hle service status --agent' and the service log."
+        )
+        raise SystemExit(1)

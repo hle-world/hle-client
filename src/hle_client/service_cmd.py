@@ -728,6 +728,70 @@ def _rcd_list() -> None:
         console.print(svc)
 
 
+# --------------------------------------------------------------------------- #
+# Enumerate and restart, for `hle update`
+# --------------------------------------------------------------------------- #
+def installed_services() -> list[str]:
+    """Every hle service installed on this machine, as its manager names it.
+
+    Used by ``hle update``: a client upgraded underneath a running service is
+    still the old code in memory, and the only sign is a version that never
+    changes. Knowing what is installed lets the upgrade offer to restart it
+    instead of printing advice the user has to act on later.
+    """
+    plat = current_platform()
+    if plat == "freebsd":
+        if not _RCD_DIR.exists():
+            return []
+        return sorted(p.name for p in _RCD_DIR.glob("hle_*"))
+    if plat == "darwin":
+        result = subprocess.run(  # noqa: S603 — argv built internally
+            ["launchctl", "list"], check=False, capture_output=True, text=True
+        )
+        return sorted(
+            ln.split()[-1] for ln in result.stdout.splitlines() if _LAUNCHD_LABEL_PREFIX in ln
+        )
+    result = subprocess.run(  # noqa: S603 — argv built internally
+        ["systemctl", "list-units", "--type=service", "--all", "--plain", "--no-legend", "hle-*"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    units = [ln.split()[0] for ln in result.stdout.splitlines() if ln.strip()]
+    if units:
+        return sorted(units)
+    # Fall back to per-user units, which a non-root install uses.
+    result = subprocess.run(  # noqa: S603 — argv built internally
+        [
+            "systemctl",
+            "--user",
+            "list-units",
+            "--type=service",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "hle-*",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return sorted(ln.split()[0] for ln in result.stdout.splitlines() if ln.strip())
+
+
+def restart_service(name: str) -> bool:
+    """Restart one service by the name ``installed_services()`` returned."""
+    plat = current_platform()
+    if plat == "freebsd":
+        return _service_cmd(name, "restart").returncode == 0
+    if plat == "darwin":
+        domain = "system" if os.geteuid() == 0 else f"gui/{os.getuid()}"
+        return _launchctl("kickstart", "-k", f"{domain}/{name}").returncode == 0
+    if _systemctl(False, "restart", name).returncode == 0:
+        return True
+    return _systemctl(True, "restart", name).returncode == 0
+
+
 def _resolve_label(label: str | None, agent_mode: bool) -> str:
     """Resolve the label for uninstall/status: --agent implies the agent label."""
     if label:
@@ -1013,6 +1077,47 @@ def status(
                 "running it is restarting in a loop."
             )
             console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
+
+
+@service.command("restart")
+@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
+@click.option("--label", default=None, help="Service label")
+@click.option("--name", default=None, help="Explicit unit/plist name")
+@click.option("--all", "restart_all", is_flag=True, default=False, help="Restart every hle service")
+def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: bool) -> None:
+    """Restart a background service, or all of them with --all.
+
+    Exists because there was no way to do this through the CLI: the docs told
+    people to reach for systemctl or service(8) directly, which differs per
+    platform and is the sort of detail a tool should absorb.
+    """
+    _require_supported()
+    if restart_all:
+        services = installed_services()
+        if not services:
+            console.print("No hle services installed.")
+            return
+        failed = [svc for svc in services if not restart_service(svc)]
+        for svc in services:
+            mark = "[red]failed[/red]" if svc in failed else "[green]restarted[/green]"
+            console.print(f"{svc}: {mark}")
+        if failed:
+            raise SystemExit(1)
+        return
+
+    plat = current_platform()
+    label = _resolve_label(label, agent_mode)
+    if plat == "freebsd":
+        svc = rc_service_name(label, name)
+    elif plat == "darwin":
+        svc = launchd_label(label, name)
+    else:
+        svc = unit_name(label, name)
+    if restart_service(svc):
+        console.print(f"[green]Restarted[/green] {svc}")
+    else:
+        console.print(f"[red]Could not restart[/red] {svc}")
+        raise SystemExit(1)
 
 
 @service.command("list")

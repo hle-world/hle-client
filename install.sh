@@ -96,10 +96,13 @@ detect_os() {
     esac
 }
 
-# FreeBSD (and therefore pfSense/OPNsense) ships no Python by default, but every
-# dependency is pure Python as of 2608.2, so pip can install them from PyPI with
-# no compiler involved. The interpreter is the only prerequisite.
-FREEBSD_PKGS="python311"
+# Any 3.11+ interpreter will do, and which one is available differs by
+# platform: pfSense 2.7 carries python311 as a dependency of unbound, while
+# OPNsense ships python313 and has no python311 package at all. So never name a
+# version — suggest the meta-package and a search, or the advice is wrong on
+# somebody's box. Every dependency is pure Python as of 2608.2, so pip needs no
+# compiler; the interpreter is the only prerequisite.
+FREEBSD_PKGS="python3"
 
 # Find Python 3.11+
 find_python() {
@@ -331,6 +334,10 @@ main() {
             error "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not found."
             echo ""
             echo "    pkg install $FREEBSD_PKGS"
+            echo ""
+            echo "  If that package does not exist on this system, find one that does:"
+            echo ""
+            echo "    pkg search '^python3'"
             echo ""
             exit 1
         }
