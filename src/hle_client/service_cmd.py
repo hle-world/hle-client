@@ -792,13 +792,20 @@ def restart_service(name: str) -> bool:
     return _systemctl(True, "restart", name).returncode == 0
 
 
-def _resolve_label(label: str | None, agent_mode: bool) -> str:
-    """Resolve the label for uninstall/status: --agent implies the agent label."""
+def _resolve_label(label: str | None, agent_mode: bool, *, extra_hint: str = "") -> str:
+    """Resolve the label for uninstall/status/restart: --agent implies the agent label.
+
+    ``extra_hint`` names any other way out that the calling command offers, so the
+    error doesn't hide the flag that is usually the right answer.
+    """
     if label:
         return label
     if agent_mode:
         return AGENT_LABEL
-    console.print("[red]--label is required[/red] (or pass --agent for the agent service).")
+    console.print(
+        f"[red]--label is required[/red] (or pass --agent for the agent service{extra_hint})."
+    )
+    console.print("[dim]hle service list[/dim] shows what is installed.")
     raise SystemExit(1)
 
 
@@ -1106,7 +1113,7 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
         return
 
     plat = current_platform()
-    label = _resolve_label(label, agent_mode)
+    label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
     if plat == "freebsd":
         svc = rc_service_name(label, name)
     elif plat == "darwin":
