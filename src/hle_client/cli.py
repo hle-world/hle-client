@@ -379,6 +379,74 @@ main.add_command(service_group, name="service")
 main.add_command(fp_command, name="fp")
 
 
+@main.command("preflight")
+@click.argument("service_url")
+@click.option("--host", "tunnel_host", default=None, help="Hostname the tunnel will be reached by")
+@click.option("--verify-ssl", is_flag=True, default=False, help="Verify the upstream certificate")
+@click.option("--no-websocket", is_flag=True, default=False, help="Check as WebSockets-disabled")
+@click.option("--forward-host", is_flag=True, default=False, help="Check as host-forwarding")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output")
+def preflight_cmd(
+    service_url: str,
+    tunnel_host: str | None,
+    verify_ssl: bool,
+    no_websocket: bool,
+    forward_host: bool,
+    as_json: bool,
+) -> None:
+    """Check whether SERVICE_URL will work as a tunnel, before creating one.
+
+    Probes the service the way a tunnel would and reports what would break —
+    redirects to private addresses, wrong scheme, hostname validation, cookies
+    scoped elsewhere. Changes nothing.
+    """
+    import asyncio as _asyncio
+
+    from hle_client.preflight import run_preflight
+
+    report = _asyncio.run(
+        run_preflight(
+            service_url,
+            tunnel_host=tunnel_host,
+            verify_ssl=verify_ssl,
+            websocket_enabled=not no_websocket,
+            forward_host=forward_host,
+        )
+    )
+
+    if as_json:
+        click.echo(report.model_dump_json())
+        raise SystemExit(1 if any(f.severity == "error" for f in report.findings) else 0)
+
+    if report.error:
+        console.print(f"[red]Could not finish the checks:[/red] {report.error}")
+
+    if not report.findings:
+        console.print(f"[green]No problems found[/green] with {service_url}.")
+        if report.working_host_mode:
+            console.print(
+                f"[dim]Answered normally in '{report.working_host_mode}' host mode.[/dim]"
+            )
+        return
+
+    marks = {"error": "[red]✗[/red]", "warning": "[yellow]![/yellow]", "info": "[blue]i[/blue]"}
+    for finding in report.findings:
+        console.print(f"{marks.get(finding.severity, '?')} [bold]{finding.title}[/bold]")
+        if finding.detail:
+            console.print(f"   {finding.detail}")
+        if finding.evidence:
+            console.print(f"   [dim]{finding.evidence}[/dim]")
+        if finding.fix is not None:
+            console.print(f"   [cyan]Fix:[/cyan] {finding.fix.label or finding.fix.value}")
+        console.print()
+
+    errors = sum(1 for f in report.findings if f.severity == "error")
+    if errors:
+        console.print(f"[red]{errors} problem(s) would stop this tunnel working.[/red]")
+        raise SystemExit(1)
+    console.print("[yellow]Nothing fatal, but check the warnings above.[/yellow]")
+
+
 @main.group()
 def agent() -> None:
     """Run a multi-tunnel agent controlled from the dashboard."""
