@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from hle_client.agent import AgentClient
 from hle_common.agent_protocol import EndpointSpec
@@ -201,3 +202,96 @@ class TestControlUri:
     def test_ws_for_localhost(self):
         client = AgentClient("hlea_x", relay_host="localhost", relay_port=8000)
         assert client.control_uri == "ws://localhost:8000/_hle/agent"
+
+
+class TestPreflightRequests:
+    """The server asks, the agent probes, the agent answers.
+
+    A reply is always sent — including when the probe fails — because the server
+    awaits this request_id, and silence would leave the dashboard spinning until
+    timeout with nothing to show for it.
+    """
+
+    class FakeWs:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, payload: str) -> None:
+            self.sent.append(payload)
+
+    async def _handle(self, msg, monkeypatch, report=None, boom=None):
+        from hle_common.preflight import PreflightReport
+
+        client, _ = _make_client()
+        ws = self.FakeWs()
+
+        async def fake_run_preflight(url, **kwargs):
+            if boom is not None:
+                raise boom
+            return report or PreflightReport(
+                request_id=kwargs.get("request_id", ""), service_url=url
+            )
+
+        monkeypatch.setattr("hle_client.preflight.run_preflight", fake_run_preflight)
+        await client._handle_message(json.dumps(msg), ws)
+        # The probe is spawned, not awaited, so the control channel stays live.
+        for _ in range(50):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.01)
+        return ws
+
+    async def test_replies_with_a_report_echoing_the_request_id(self, monkeypatch):
+        ws = await self._handle(
+            {
+                "type": "preflight_request",
+                "request_id": "req-7",
+                "service_url": "http://192.168.1.1",
+            },
+            monkeypatch,
+        )
+        assert ws.sent, "the server is waiting on this reply"
+        payload = json.loads(ws.sent[0])
+        assert payload["type"] == "preflight_report"
+        assert payload["request_id"] == "req-7"
+
+    async def test_a_crashing_probe_still_answers(self, monkeypatch):
+        """Otherwise the dashboard waits out a timeout to learn nothing."""
+        ws = await self._handle(
+            {"type": "preflight_request", "request_id": "req-8", "service_url": "http://x"},
+            monkeypatch,
+            boom=RuntimeError("resolver exploded"),
+        )
+        assert ws.sent, "a failed probe must still be reported"
+        payload = json.loads(ws.sent[0])
+        assert payload["request_id"] == "req-8"
+        assert "resolver exploded" in payload["error"]
+
+    async def test_a_malformed_request_is_ignored_not_fatal(self, monkeypatch):
+        """No request_id means nothing to answer with; it must not kill the agent."""
+        ws = await self._handle(
+            {"type": "preflight_request", "service_url": "http://x"}, monkeypatch
+        )
+        assert ws.sent == []
+
+    async def test_the_control_channel_is_not_blocked_while_probing(self, monkeypatch):
+        """A slow probe must not stall state_sync or fp frames."""
+        client, _ = _make_client()
+        ws = self.FakeWs()
+        started = asyncio.Event()
+
+        async def slow(url, **kwargs):
+            started.set()
+            await asyncio.sleep(5)
+            raise AssertionError("should not finish in this test")
+
+        monkeypatch.setattr("hle_client.preflight.run_preflight", slow)
+        await client._handle_message(
+            json.dumps({"type": "preflight_request", "request_id": "r", "service_url": "http://x"}),
+            ws,
+        )
+        # _handle_message has already returned while the probe is still running.
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert ws.sent == []
+        for task in list(client._preflight_tasks):
+            task.cancel()

@@ -36,6 +36,7 @@ from hle_common.agent_protocol import (
 )
 from hle_common.discovery import DiscoveryReport
 from hle_common.fp_protocol import ForwardRule, default_rules
+from hle_common.preflight import PreflightReport, PreflightRequest
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,8 @@ class AgentClient:
         self._fp: FpAgentSide | None = None
         # Until the server tells us otherwise, only loopback is forwardable.
         self._forward_rules: list[ForwardRule] = default_rules()
+        # In-flight preflight probes, held so they aren't garbage-collected.
+        self._preflight_tasks: set[asyncio.Task[None]] = set()
 
     # -- public API ----------------------------------------------------------
 
@@ -250,10 +253,59 @@ class AgentClient:
         elif mtype == "discovery_refresh":
             if ws is not None:
                 await self._report_discovery(ws)
+        elif mtype == "preflight_request":
+            if ws is not None:
+                # Spawned rather than awaited: a preflight takes seconds, and the
+                # control channel has to keep handling state_sync and fp frames
+                # meanwhile. Blocking here would stall tunnel reconciliation.
+                self._spawn_preflight(msg, ws)
         elif mtype == "pong":
             pass
         else:
             logger.debug("Unhandled agent control message: %s", mtype)
+
+    def _spawn_preflight(self, msg: dict[str, Any], ws: Any) -> None:
+        """Run a preflight in the background and reply with the report."""
+        task = asyncio.create_task(self._run_preflight(msg, ws))
+        # Held so the task isn't garbage-collected mid-flight, and discarded on
+        # completion so a long-lived agent doesn't accumulate them.
+        self._preflight_tasks.add(task)
+        task.add_done_callback(self._preflight_tasks.discard)
+
+    async def _run_preflight(self, msg: dict[str, Any], ws: Any) -> None:
+        """Probe a service on the server's behalf and send back what we found.
+
+        A reply is always sent, including on failure: the server is awaiting this
+        request_id, and silence would leave the dashboard spinning until timeout
+        with nothing to show.
+        """
+        from hle_client.preflight import run_preflight
+
+        try:
+            req = PreflightRequest.model_validate(msg)
+        except ValueError as exc:
+            logger.warning("Bad preflight request: %s", exc)
+            return  # no request_id to answer with
+
+        try:
+            report = await run_preflight(
+                req.service_url,
+                tunnel_host=req.tunnel_host,
+                verify_ssl=req.verify_ssl,
+                websocket_enabled=req.websocket_enabled,
+                forward_host=req.forward_host,
+                request_id=req.request_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — never take the agent down for this
+            logger.warning("Preflight failed for %s: %s", req.service_url, exc)
+            report = PreflightReport(
+                request_id=req.request_id,
+                service_url=req.service_url,
+                error=f"{type(exc).__name__}: {exc}"[:200],
+            )
+
+        with contextlib.suppress(Exception):
+            await ws.send(report.model_dump_json())
 
     async def _report_discovery(self, ws: Any) -> None:
         """Scan every applicable provider and report the inventory.
