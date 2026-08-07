@@ -38,6 +38,10 @@ def container(
     }
 
 
+# Generous for a loopback connect (milliseconds locally), short enough that a
+# container without usable loopback TCP skips rather than holding a CI runner.
+SOCKET_TEST_BUDGET = 10.0
+
 PUBLISHED = [{"Type": "tcp", "PrivatePort": 8096, "PublicPort": 32768, "IP": "0.0.0.0"}]
 UNPUBLISHED = [{"Type": "tcp", "PrivatePort": 8096}]
 BRIDGE = {"bridge": {"IPAddress": "172.17.0.4", "Aliases": []}}
@@ -191,6 +195,16 @@ class TestProbeBudget:
 
 
 class TestRealProbe:
+    """Bounded, because an unbounded socket test wedged CI three times.
+
+    These open a real loopback socket, which is the point — the probe's whole
+    job is deciding whether something answers. But inside the CI container the
+    3.12 job hung here indefinitely, holding a runner and starving the queue
+    behind it for up to 95 minutes with no output. Every wait is now bounded, so
+    an environment without usable loopback TCP skips with a reason instead of
+    stopping the run.
+    """
+
     def test_a_listening_socket_answers(self):
         async def go():
             server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
@@ -203,7 +217,11 @@ class TestRealProbe:
                 server.close()
                 await server.wait_closed()
 
-        assert asyncio.run(go()) is True
+        try:
+            result = asyncio.run(asyncio.wait_for(go(), timeout=SOCKET_TEST_BUDGET))
+        except TimeoutError:
+            pytest.skip("no usable loopback TCP in this environment")
+        assert result is True
 
     def test_nothing_listening_is_not_reachable(self):
         """A port that closed a moment ago: refused, not hung."""
@@ -217,7 +235,11 @@ class TestRealProbe:
 
             return await _probe_tcp("127.0.0.1", port)
 
-        assert asyncio.run(go()) is False
+        try:
+            result = asyncio.run(asyncio.wait_for(go(), timeout=SOCKET_TEST_BUDGET))
+        except TimeoutError:
+            pytest.skip("no usable loopback TCP in this environment")
+        assert result is False
 
     def test_a_name_that_does_not_resolve_is_not_reachable(self, monkeypatch):
         """The actual production bug: a container name, from the host.

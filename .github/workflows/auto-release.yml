@@ -18,6 +18,9 @@ jobs:
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'chore/release-')
     runs-on: arc-runner-hle-client
+    # A release that never finishes is worse than one that fails: the tag is
+    # absent, the checks are green, and only the verify job below says so.
+    timeout-minutes: 15
     container:
       image: python:3.13-slim
     env:
@@ -77,6 +80,12 @@ jobs:
           # blocked from triggering other workflows).
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REPO: ${{ github.repository }}
+          # Tag the commit this job actually checked out and verified, not
+          # whatever main happens to be when it runs. Those are the same commit
+          # only if nothing merged in between — and this job can sit queued for
+          # a long time. v2608.5 tagged 'main' after an unrelated PR had landed,
+          # so it shipped a feature its own changelog never mentioned.
+          TARGET_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           # Extract changelog entry for this version and pass via env var
           # (never interpolate file content into code strings — injection risk)
@@ -95,7 +104,7 @@ jobs:
               'tag_name': f'v{version}',
               'name': f'v{version}',
               'body': notes,
-              'target_commitish': 'main'
+              'target_commitish': os.environ.get('TARGET_SHA') or 'main'
           }).encode()
           req = urllib.request.Request(
               f'https://api.github.com/repos/{os.environ[\"REPO\"]}/releases',
