@@ -9,9 +9,21 @@ on:
 permissions:
   contents: read
 
+# Only the newest push to a branch matters. Without this, every push leaves its
+# predecessor's jobs queued, and on a small self-hosted pool those stale runs
+# are what everything else waits behind.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: arc-runner-hle-client
+    # The suite takes about two minutes. This is not a limit on the tests, it is
+    # a limit on a dead runner: when an ARC pod dies mid-job the job stays
+    # "in_progress" forever, holds its slot, and starves the queue behind it in
+    # total silence. One such job blocked a release for 95 minutes.
+    timeout-minutes: 10
     container:
       image: python:${{ matrix.python-version }}-slim
     strategy:

@@ -12,10 +12,18 @@ on:
 permissions:
   contents: read
 
+# See test.yml: a superseded run holding a slot on a small self-hosted pool is
+# what everything else queues behind. The scheduled weekly scan has no ref of
+# its own to collide with, so it is unaffected.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   bandit:
     name: Bandit (Python SAST)
     runs-on: arc-runner-hle-client
+    timeout-minutes: 10
     container:
       image: python:3.13-slim
     steps:
@@ -57,6 +65,7 @@ jobs:
   pip-audit:
     name: pip-audit (Dependencies)
     runs-on: arc-runner-hle-client
+    timeout-minutes: 10
     container:
       image: python:3.13-slim
     steps:
@@ -80,6 +89,7 @@ jobs:
   secrets-scan:
     name: TruffleHog (Secret Scanning)
     runs-on: arc-runner-hle-client
+    timeout-minutes: 10
     container:
       image: python:3.13-slim
     steps:
