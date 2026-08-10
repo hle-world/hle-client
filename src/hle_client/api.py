@@ -66,6 +66,15 @@ class ApiClient:
 
         Returns ``None`` when the endpoint is unavailable (404, timeout,
         network error), allowing the caller to fall back to the default relay.
+
+        Failures are logged at ``warning`` rather than ``debug``, because the
+        fallback is silent and correct-looking: the tunnel connects, everything
+        appears fine, and discovery has simply stopped working. Agent-managed
+        tunnels got a 401 here on every single reconnect for exactly this reason,
+        and it went unnoticed until a server-side error report surfaced it.
+
+        A 404 stays at debug — that means the relay predates the endpoint, which
+        is expected rather than wrong.
         """
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -75,11 +84,29 @@ class ApiClient:
                 )
                 resp.raise_for_status()
                 return RelayDiscoveryResponse.model_validate(resp.json())
-        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException):
-            logger.debug("Relay discovery unavailable, will use default relay", exc_info=True)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 404:
+                logger.debug("Relay discovery not implemented by this relay (404)")
+            elif status in (401, 403):
+                logger.warning(
+                    "Relay discovery rejected our credential (HTTP %d) — using the default "
+                    "relay. The tunnel still works, but this relay cannot route us.",
+                    status,
+                )
+            else:
+                logger.warning("Relay discovery failed (HTTP %d), using the default relay", status)
+            return None
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            logger.warning(
+                "Relay discovery unreachable (%s), using the default relay",
+                type(exc).__name__,
+            )
             return None
         except Exception:
-            logger.debug("Relay discovery failed unexpectedly", exc_info=True)
+            logger.warning(
+                "Relay discovery failed unexpectedly, using the default relay", exc_info=True
+            )
             return None
 
     async def list_tunnels(self) -> list[dict[str, Any]]:
