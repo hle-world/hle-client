@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -113,3 +114,101 @@ class TestApiClientMethods:
             pytest.raises(httpx.HTTPStatusError),
         ):
             await client.delete_access_rule("app-x7k", 999)
+
+
+class TestRelayDiscoveryFailureIsVisible:
+    """A failed discovery falls back silently and everything still looks fine.
+
+    Agent-managed tunnels were rejected here on every reconnect for months
+    without a single visible log line, because the failure was logged at debug.
+    """
+
+    @pytest.fixture
+    def client(self) -> ApiClient:
+        return ApiClient(ApiClientConfig(api_key="hle_testkey"))
+
+    def _response(self, status: int) -> httpx.Response:
+        return httpx.Response(
+            status, request=httpx.Request("GET", "https://hle.world/api/v1/connect")
+        )
+
+    async def test_a_rejected_credential_warns(self, client: ApiClient, caplog) -> None:
+        """The case that actually happened, and was invisible."""
+        with (
+            caplog.at_level(logging.WARNING, logger="hle_client.api"),
+            patch(
+                "httpx.AsyncClient.get", new_callable=AsyncMock, return_value=self._response(401)
+            ),
+        ):
+            assert await client.discover_relay() is None
+
+        assert "401" in caplog.text
+        # The operator needs to know the tunnel is fine, so they can judge urgency.
+        assert "default" in caplog.text.lower()
+
+    async def test_a_403_warns_too(self, client: ApiClient, caplog) -> None:
+        with (
+            caplog.at_level(logging.WARNING, logger="hle_client.api"),
+            patch(
+                "httpx.AsyncClient.get", new_callable=AsyncMock, return_value=self._response(403)
+            ),
+        ):
+            assert await client.discover_relay() is None
+        assert "403" in caplog.text
+
+    async def test_a_server_error_warns(self, client: ApiClient, caplog) -> None:
+        with (
+            caplog.at_level(logging.WARNING, logger="hle_client.api"),
+            patch(
+                "httpx.AsyncClient.get", new_callable=AsyncMock, return_value=self._response(500)
+            ),
+        ):
+            assert await client.discover_relay() is None
+        assert "500" in caplog.text
+
+    async def test_a_404_stays_quiet(self, client: ApiClient, caplog) -> None:
+        """A relay older than the endpoint is expected, not broken — warning on
+        it would train everyone to ignore the warning that matters."""
+        with (
+            caplog.at_level(logging.WARNING, logger="hle_client.api"),
+            patch(
+                "httpx.AsyncClient.get", new_callable=AsyncMock, return_value=self._response(404)
+            ),
+        ):
+            assert await client.discover_relay() is None
+        assert caplog.text == ""
+
+    async def test_an_unreachable_relay_warns(self, client: ApiClient, caplog) -> None:
+        with (
+            caplog.at_level(logging.WARNING, logger="hle_client.api"),
+            patch(
+                "httpx.AsyncClient.get",
+                new_callable=AsyncMock,
+                side_effect=httpx.ConnectError("no route"),
+            ),
+        ):
+            assert await client.discover_relay() is None
+        assert "unreachable" in caplog.text.lower()
+
+    async def test_success_says_nothing(self, client: ApiClient, caplog) -> None:
+        """No warning on the happy path, or the signal is worthless."""
+        ok = httpx.Response(
+            200,
+            json={
+                "relay_url": "wss://hle.world/_hle/tunnel",
+                "relay_region": "default",
+                "ttl": 300,
+                "fallback_urls": [],
+                "metadata": {},
+            },
+            request=httpx.Request("GET", "https://hle.world/api/v1/connect"),
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="hle_client.api"),
+            patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=ok),
+        ):
+            result = await client.discover_relay()
+
+        assert result is not None
+        assert result.relay_url == "wss://hle.world/_hle/tunnel"
+        assert caplog.text == ""
