@@ -1,5 +1,29 @@
 # Changelog
 
+## v2608.6 — 2026-08-10
+
+### Fixed
+
+- **A failed relay discovery said nothing at all.** On every connection the
+  client asks the relay where to connect, and falls back to the default relay
+  when that fails. The failure was logged at `debug`, so the fallback was
+  completely silent: the tunnel connects, everything looks healthy, and
+  discovery has simply stopped working with no symptom to notice.
+
+  Agent-managed tunnels were being turned away here on *every single reconnect*,
+  because an agent's token is a credential for carrying traffic that the REST
+  API did not accept. No client ever mentioned it. It came to light only from
+  the relay's side, as a cluster of rejections in a server error report.
+
+  Discovery failures now log at `warning` with the status code, and say the
+  tunnel still works so the message can be read calmly rather than as an
+  outage. A 404 stays quiet — that means the relay is older than the endpoint,
+  which is expected rather than broken, and warning about it would only teach
+  you to ignore the warning that matters.
+
+  The matching relay-side fix shipped in server v2608.23, so the specific
+  rejection this exposed is already gone.
+
 ## v2608.5 — 2026-08-05
 
 ### Fixed
