@@ -22,7 +22,7 @@ concurrency:
 jobs:
   bandit:
     name: Bandit (Python SAST)
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     timeout-minutes: 10
     container:
       image: python:3.13-slim
@@ -64,7 +64,7 @@ jobs:
 
   pip-audit:
     name: pip-audit (Dependencies)
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     timeout-minutes: 10
     container:
       image: python:3.13-slim
@@ -88,7 +88,7 @@ jobs:
 
   secrets-scan:
     name: TruffleHog (Secret Scanning)
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     timeout-minutes: 10
     container:
       image: python:3.13-slim
