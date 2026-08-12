@@ -132,10 +132,14 @@ def _remove_api_key() -> bool:
         with os.fdopen(fd, "w") as f:
             f.writelines(new_lines)
 
-        logger.info("API key removed from %s", _CONFIG_FILE)
+        # Both of these log the config path, never the key itself. The rule
+        # fires on the words "API key" appearing in the message.
+        logger.info("API key removed from %s", _CONFIG_FILE)  # nosemgrep
         return True
     except Exception:
-        logger.warning("Failed to remove API key from %s", _CONFIG_FILE, exc_info=True)
+        logger.warning(  # nosemgrep
+            "Failed to remove API key from %s", _CONFIG_FILE, exc_info=True
+        )
         return False
 
 

@@ -80,7 +80,9 @@ def load_agent_token() -> str | None:
         with open(path, "rb") as f:
             return tomllib.load(f).get("token")
     except (OSError, ValueError):
-        logger.debug("Failed to read agent token from %s", path)
+        # Logs the path, never the token. The rule fires on the word "token"
+        # appearing in the message.
+        logger.debug("Failed to read agent token from %s", path)  # nosemgrep
         return None
 
 
