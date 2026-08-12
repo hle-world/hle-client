@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   notify:
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     container:
       image: node:20-slim
     steps:
