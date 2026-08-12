@@ -23,7 +23,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from xml.sax.saxutils import escape as _xml_escape
+
+# escape() only quotes characters on the way OUT, when building the launchd
+# plist below. Nothing here parses XML, so there is no entity-expansion or
+# external-entity surface for defusedxml to protect against.
+from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 
 import click
 from rich.console import Console
