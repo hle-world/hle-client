@@ -512,7 +512,12 @@ async def _read_loop(ws: websockets.ClientConnection, client: FpLocalClient) -> 
     default="127.0.0.1",
     help="Local address to bind (default loopback — think before widening)",
 )
-@click.option("--api-key", default=None, help="API key (else env/config)")
+@click.option(
+    "--api-key",
+    default=None,
+    envvar="HLE_API_KEY",
+    help="API key (also reads HLE_API_KEY env var, then ~/.config/hle/config.toml)",
+)
 @click.option("--relay-host", default="hle.world", help="Relay host")
 @click.option("--relay-port", default=443, type=int, help="Relay port")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
