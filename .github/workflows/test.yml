@@ -47,6 +47,36 @@ jobs:
       - name: Test
         run: pytest tests/ -v
 
+      # The core has to keep working on a machine that cannot afford rich —
+      # a pfSense or OpenWrt box wants the tunnel, not a rendering library.
+      # Asserting it in a venv that genuinely lacks rich is the only way to
+      # know; with rich installed, every fallback path is dead code.
+      - name: Test without the pretty extra
+        run: |
+          python -m venv /tmp/norich
+          /tmp/norich/bin/pip install --quiet . pytest pytest-asyncio
+          if /tmp/norich/bin/python -c "import rich" 2>/dev/null; then
+            echo "::error::rich was installed by a bare 'pip install .' — it must stay an extra"
+            exit 1
+          fi
+          /tmp/norich/bin/python -m pytest tests/ -q
+
+      - name: Test the plugins
+        run: |
+          # POSIX sh: these steps run under `sh -e`, where `shopt` does not
+          # exist and cost this job an exit-127 before it ran anything. An
+          # unmatched glob stays literal instead, which the -d test catches.
+          set -eu
+          for plugin in plugins/*/; do
+            [ -d "$plugin" ] || continue
+            [ -f "${plugin}pyproject.toml" ] || continue
+            echo "::group::$(basename "$plugin")"
+            uv pip install --system -e "${plugin}[dev]"
+            (cd "$plugin" && ruff check src/ tests/ && ruff format --check src/ tests/)
+            (cd "$plugin" && pytest tests/ -q)
+            echo "::endgroup::"
+          done
+
       - name: Verify imports
         run: |
           python -c "from hle_client.cli import main; print('CLI import OK')"
