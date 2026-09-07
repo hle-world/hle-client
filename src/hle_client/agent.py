@@ -21,11 +21,14 @@ from pathlib import Path
 from typing import Any
 
 import websockets
+import websockets.exceptions
 
 from hle_client import __version__
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
+from hle_client.identity import hostname, instance_id
 from hle_client.tunnel import Tunnel, TunnelConfig
+from hle_common import close_codes
 from hle_common.agent_protocol import (
     AgentHello,
     AgentStateSync,
@@ -56,6 +59,37 @@ AGENT_TOKEN_PREFIX = "hlea_"
 # then restarts forever reporting "No agent token" while the file it needs is
 # sitting on disk. An absolute path removes the guesswork.
 AGENT_CONFIG_ENV = "HLE_AGENT_CONFIG"
+
+
+def _fatal_agent_message(code: int | None, reason: str) -> str:
+    """What to tell the operator about a close the agent must not retry.
+
+    The relay's own reason is capped at 123 bytes by RFC 6455, so it can say
+    what happened but not what to do next. These supply the second half.
+    """
+    if code == close_codes.DUPLICATE_INSTANCE:
+        return (
+            "This agent's token is already in use by another agent that is connected "
+            f"and healthy. {reason}\n"
+            "This one has stopped rather than take the endpoints off it. Two agents "
+            "sharing one token take every tunnel off each other about once a second.\n"
+            "Run `hle service list` on each machine to find the copy you did not mean "
+            "to run, or enroll this machine as its own agent from the dashboard."
+        )
+    if code == close_codes.REPLACED:
+        return (
+            f"Another agent took this token over. {reason}\n"
+            "This one has stopped rather than take it back — two agents sharing one "
+            "token take every tunnel off each other about once a second.\n"
+            "If this machine is meant to be the one running it, stop the other copy "
+            "and start this service again."
+        )
+    if code == close_codes.INVALID_CREDENTIAL:
+        return (
+            f"This agent's enrollment token is invalid or has been revoked. {reason}\n"
+            "Re-enroll from the dashboard: https://hle.world/dashboard"
+        )
+    return f"The relay stopped this agent and asked it not to reconnect (code {code}). {reason}"
 
 
 def agent_config_path() -> Path:
@@ -132,6 +166,10 @@ class AgentClient:
         self._running = False
         # True once the current session reached "registered"; see run().
         self._registered = False
+        # Set when the relay closed with a code that must not be retried, so
+        # the caller can exit non-zero and print why instead of a service
+        # quietly "stopping successfully".
+        self._fatal_error: str | None = None
         self._endpoints: dict[str, _Running] = {}
         self._api_key: str | None = None
         self._base_domain: str | None = None
@@ -158,6 +196,25 @@ class AgentClient:
                 await self._connect_once()
             except asyncio.CancelledError:
                 break
+            except websockets.exceptions.ConnectionClosed as exc:
+                code = exc.rcvd.code if exc.rcvd is not None else None
+                if close_codes.is_fatal(code):
+                    # Reconnecting after one of these cannot help and can do
+                    # real harm: two agents on one token that both keep
+                    # retrying take each other's endpoints in turn, roughly
+                    # once a second, for as long as both are running. The
+                    # `finally` below still stops every endpoint on the way out.
+                    self._running = False
+                    reason = (exc.rcvd.reason if exc.rcvd is not None else "") or ""
+                    message = _fatal_agent_message(code, reason)
+                    logger.error("%s", message)
+                    self._fatal_error = message
+                wait = close_codes.retry_after_seconds(code)
+                if wait is not None:
+                    logger.warning("Relay asked this agent to slow down (code %s)", code)
+                    delay = max(delay, wait)
+                    self._registered = False
+                logger.warning("Agent control connection lost: %s", exc)
             except Exception as exc:  # noqa: BLE001 — control conn is best-effort
                 logger.warning("Agent control connection lost: %s", exc)
             finally:
@@ -174,6 +231,11 @@ class AgentClient:
             logger.info("Reconnecting agent control in %.1fs ...", delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, self._max_reconnect_delay)
+
+    @property
+    def fatal_error(self) -> str | None:
+        """Why the relay stopped this agent for good, if it did."""
+        return self._fatal_error
 
     async def stop(self) -> None:
         self._running = False
@@ -193,6 +255,8 @@ class AgentClient:
                 token=self._token,
                 agent_version=__version__,
                 capabilities=capabilities,
+                instance_id=instance_id(),
+                hostname=hostname(),
             )
             await ws.send(hello.model_dump_json())
 
