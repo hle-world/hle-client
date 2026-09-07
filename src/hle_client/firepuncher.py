@@ -25,8 +25,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from hle_client.netinfo import describe_local_networks, is_local
 from hle_common.fp_protocol import (
     FP_MAX_CHUNK,
+    LOCAL_NETWORKS,
     ForwardRule,
     FpClose,
     FpData,
@@ -94,6 +96,36 @@ class FpAgentSide:
 
     # -- individual frames ---------------------------------------------------
 
+    def _target_allowed(self, host: str, port: int) -> bool:
+        """Check a target against the allowlist, expanding ``@local`` here.
+
+        The sentinel is expanded on this side because this is the only side
+        that can: the relay cannot see that this machine has a Docker bridge, a
+        Kubernetes CNI, a VPN and a LAN, and fixed CIDRs sent from there would
+        be guessing at all four.
+        """
+        if is_allowed(self.rules, host, port):
+            return True
+        local_rules = [r for r in self.rules if r.host == LOCAL_NETWORKS]
+        if not local_rules:
+            return False
+        # A port on the sentinel still narrows it: `@local:22` means "port 22
+        # anywhere on my networks", not "anything on my networks".
+        if not any(r.port is None or r.port == port for r in local_rules):
+            return False
+        return is_local(host)
+
+    def describe_rules(self) -> list[str]:
+        """The allowlist as a person would read it, with ``@local`` resolved."""
+        rendered: list[str] = []
+        for rule in self.rules:
+            if rule.host != LOCAL_NETWORKS:
+                rendered.append(str(rule))
+                continue
+            suffix = "" if rule.port is None else f":{rule.port}"
+            rendered.extend(f"{net}{suffix}" for net in describe_local_networks())
+        return rendered
+
     async def _on_open(self, msg: FpOpen) -> None:
         if len(self._streams) >= MAX_STREAMS:
             await self._fail(msg.stream_id, FpErrorCode.INTERNAL, "too many open streams")
@@ -102,8 +134,10 @@ class FpAgentSide:
         # The allowlist check is the whole point: the relay already proved the
         # caller owns this agent, but owning an agent must not imply the right
         # to reach arbitrary hosts on the network behind it.
-        if not is_allowed(self.rules, msg.target_host, msg.target_port):
-            allowed = ", ".join(str(r) for r in self.rules) or "(nothing configured)"
+        if not self._target_allowed(msg.target_host, msg.target_port):
+            # Resolved, not raw: "@local" tells the operator nothing about why
+            # their address was refused, while the networks it stands for do.
+            allowed = ", ".join(self.describe_rules()) or "(nothing configured)"
             logger.warning(
                 "Firepuncher refused %s:%s — not in allowlist",
                 msg.target_host,
