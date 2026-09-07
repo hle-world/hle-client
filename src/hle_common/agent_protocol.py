@@ -62,6 +62,14 @@ class AgentHello(WireModel):
     token: str
     agent_version: str | None = None
     capabilities: list[str] = field(default_factory=list)
+    # Which agent process this is. One enrollment token can be copied onto a
+    # second machine, and without an identity per process the relay cannot tell
+    # that from the same agent reconnecting — so it evicted the incumbent every
+    # time, and two agents took each other's endpoints in turn indefinitely.
+    # `hostname` is shown only to the account's own owner, to name where the
+    # other copy is running.
+    instance_id: str | None = None
+    hostname: str | None = None
 
 
 @dataclass(kw_only=True)
