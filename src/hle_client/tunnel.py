@@ -468,6 +468,9 @@ class Tunnel:
             )
         )
         self._server_caps: list[str] = []
+        # Whether the current session ever reached TUNNEL_ACK — the reconnect
+        # backoff resets on that, not on how the session ended.
+        self._session_registered = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -479,6 +482,7 @@ class Tunnel:
         delay = self.config.reconnect_delay
 
         while self._running:
+            self._session_registered = False
             try:
                 await self._proxy.start()
                 await self._connect_once()
@@ -500,6 +504,18 @@ class Tunnel:
                             "Authentication failed. Your API key is invalid or revoked.\n"
                             "Run 'hle auth login' to save a new key."
                         ) from exc
+                    if code == 4009:
+                        # Another connection claimed this label. Reconnecting
+                        # would take it straight back and leave two clients
+                        # trading the tunnel between them a second at a time —
+                        # which is the shape of the reconnect storm this code
+                        # exists to end. Stop, and say what to go and look for.
+                        raise TunnelFatalError(
+                            f"Tunnel '{self.config.service_label}' was taken over by another "
+                            "connection using the same account.\n"
+                            "Another copy of hle (or an hle agent) is running this same label — "
+                            "stop the duplicate, or give this one a different --label."
+                        ) from exc
                 logger.warning("Connection lost: %s", exc)
             except asyncio.CancelledError:
                 logger.info("Tunnel cancelled")
@@ -509,6 +525,15 @@ class Tunnel:
 
             if not self._running:
                 break
+
+            # Reset on any session that got as far as registering, not just a
+            # clean exit. Initialised once outside the loop, the backoff only
+            # ever grew: a tunnel up for a month across six unrelated blips
+            # then waited a full minute to come back from a routine relay
+            # deploy. Kept in step with the agent's control loop, which
+            # already worked this way.
+            if self._session_registered:
+                delay = self.config.reconnect_delay
 
             logger.info("Reconnecting in %.1fs ...", delay)
             await asyncio.sleep(delay)
@@ -646,6 +671,10 @@ class Tunnel:
             self._tunnel_id = ack_data.tunnel_id
             self._public_url = ack_data.public_url
             self._server_caps = getattr(ack_data, "server_capabilities", []) or []
+            # This session worked, whatever ends it — so the reconnect backoff
+            # in connect() starts over rather than compounding across the
+            # process's whole life.
+            self._session_registered = True
             logger.info(
                 "Tunnel registered: id=%s  url=%s",
                 self._tunnel_id,
