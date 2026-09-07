@@ -1,0 +1,50 @@
+[
+  {
+    "ifindex": 1,
+    "ifname": "lo",
+    "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+    "link_type": "loopback",
+    "addr_info": [
+      {"family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host", "label": "lo"},
+      {"family": "inet6", "local": "::1", "prefixlen": 128, "scope": "host"}
+    ]
+  },
+  {
+    "ifindex": 2,
+    "ifname": "eth0",
+    "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+    "link_type": "ether",
+    "addr_info": [
+      {"family": "inet", "local": "192.168.2.141", "prefixlen": 24, "scope": "global"},
+      {"family": "inet6", "local": "fe80::be24:11ff:fe56:e14a", "prefixlen": 64, "scope": "link"}
+    ]
+  },
+  {
+    "ifindex": 3,
+    "ifname": "docker0",
+    "flags": ["BROADCAST", "MULTICAST", "UP"],
+    "link_type": "ether",
+    "addr_info": [
+      {"family": "inet", "local": "172.17.0.1", "prefixlen": 16, "scope": "global"}
+    ]
+  },
+  {
+    "ifindex": 4,
+    "ifname": "br-977c576079e1",
+    "flags": ["BROADCAST", "MULTICAST", "UP"],
+    "link_type": "ether",
+    "addr_info": [
+      {"family": "inet", "local": "172.18.0.1", "prefixlen": 16, "scope": "global"},
+      {"family": "inet6", "local": "fe80::4c15:3fff:fe03:66a8", "prefixlen": 64, "scope": "link"}
+    ]
+  },
+  {
+    "ifindex": 5,
+    "ifname": "vethb50cda4",
+    "flags": ["BROADCAST", "MULTICAST", "UP"],
+    "link_type": "ether",
+    "addr_info": [
+      {"family": "inet6", "local": "fe80::b067:35ff:fec3:ed8c", "prefixlen": 64, "scope": "link"}
+    ]
+  }
+]

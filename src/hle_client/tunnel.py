@@ -66,6 +66,15 @@ _ClientConn = websockets.asyncio.client.ClientConnection
 _CONFIG_DIR = Path.home() / ".config" / "hle"
 _CONFIG_FILE = _CONFIG_DIR / "config.toml"
 
+# An API key is "hle_" plus 32 hex characters. The relay checks this exact
+# length before it will even hash a key, so a value with a stray quote or a
+# trailing newline is refused there while still working elsewhere.
+_API_KEY_LENGTH = 36
+
+# Agent enrollment tokens share the "hle" stem, which is precisely why they get
+# put in variables named for API keys.
+AGENT_TOKEN_PREFIX = "hlea_"
+
 
 def _load_api_key() -> str | None:
     """Load api_key from the config file, if it exists."""

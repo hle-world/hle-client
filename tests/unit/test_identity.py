@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -70,6 +71,74 @@ class TestHostname:
         monkeypatch.delenv("HLE_HOSTNAME", raising=False)
         monkeypatch.setattr(socket, "gethostname", lambda: "  ")
         assert identity.hostname() is None
+
+
+class TestLinuxInterfaceEnumeration:
+    """Parsing real `ip -j addr` output.
+
+    The fixture is captured verbatim from a Linux host running Docker: loopback,
+    a LAN interface, `docker0`, a Docker user-network bridge, and a veth with
+    only a link-local address. Firepuncher's default allowlist is built from
+    this, so a parsing slip does not fail loudly — it silently narrows what the
+    agent will forward to.
+    """
+
+    @staticmethod
+    def _networks(monkeypatch) -> list[str]:
+        from hle_client import netinfo
+
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "ip_addr_linux.json"
+        monkeypatch.setattr(netinfo, "_run", lambda argv: fixture.read_text())
+        return [str(n) for n in netinfo._enumerate()]
+
+    def test_the_lan_is_found(self, monkeypatch):
+        """The whole point: an agent must be able to reach its own network."""
+        assert "192.168.2.0/24" in self._networks(monkeypatch)
+
+    def test_docker_networks_are_found(self, monkeypatch):
+        """Both the default bridge and a user-defined one."""
+        networks = self._networks(monkeypatch)
+        assert "172.17.0.0/16" in networks
+        assert "172.18.0.0/16" in networks
+
+    def test_host_bits_are_discarded(self, monkeypatch):
+        """`192.168.2.141/24` describes a host on a network, not the network."""
+        networks = self._networks(monkeypatch)
+        assert "192.168.2.141/24" not in networks
+        assert "192.168.2.0/24" in networks
+
+    def test_loopback_is_present(self, monkeypatch):
+        assert "127.0.0.0/8" in self._networks(monkeypatch)
+
+    def test_ipv6_link_local_is_kept(self, monkeypatch):
+        """A v6 homelab addresses itself here; several interfaces share fe80::/64."""
+        assert "fe80::/64" in self._networks(monkeypatch)
+
+    def test_duplicates_across_interfaces_collapse(self, monkeypatch):
+        """Three interfaces carry an fe80:: address; that is one network."""
+        networks = self._networks(monkeypatch)
+        assert networks.count("fe80::/64") == 1
+
+    def test_a_lan_address_reads_as_local(self, monkeypatch):
+        from hle_client import netinfo
+
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "ip_addr_linux.json"
+        monkeypatch.setattr(netinfo, "_run", lambda argv: fixture.read_text())
+        netinfo.local_networks(refresh=True)
+        try:
+            assert netinfo.is_local("192.168.2.141")
+            assert netinfo.is_local("172.17.0.5")
+            assert not netinfo.is_local("93.184.216.34")
+        finally:
+            netinfo._cache = None
+
+    def test_malformed_output_yields_loopback_rather_than_nothing(self, monkeypatch):
+        """A parse failure must not leave an agent unable to reach even itself."""
+        from hle_client import netinfo
+
+        monkeypatch.setattr(netinfo, "_run", lambda argv: "not json")
+        networks = [str(n) for n in netinfo._enumerate()]
+        assert "127.0.0.0/8" in networks
 
 
 class TestCloseCodes:
