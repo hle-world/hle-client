@@ -45,6 +45,19 @@
   run either command, and be told there was no API key. It also made `hle fp`
   unusable anywhere a key comes from the environment: CI, a container, a unit.
 
+- **A machine enrolled the old way looked like it had no credential.** Agents
+  now enrol with a scoped `hle_` API key, so there is one credential shape;
+  earlier enrolments left an `hlea_` agent token in `HLE_API_KEY`, which is
+  what the unit file sets and what the relay still accepts for registering
+  tunnels. The tunnel therefore ran fine while everything reading
+  `HLE_AGENT_TOKEN` — the variable an agent token now belongs in — saw nothing
+  there at all.
+
+  A legacy token found in `HLE_API_KEY` is read as an agent token too, with a
+  one-line note on stderr saying so. `HLE_API_KEY` is left exactly as it was:
+  the relay accepts it there, and clearing it would break the installs this is
+  meant to help.
+
 ### Changed
 
 - **A rejected credential now explains itself in the relay's words.** On a 401

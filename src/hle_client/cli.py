@@ -22,6 +22,7 @@ from hle_client.agent import (
     save_agent_token,
 )
 from hle_client.config_cmd import config as config_group
+from hle_client.credentials import normalize_credential_env
 from hle_client.fp_cmd import fp as fp_command
 from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import (
@@ -35,6 +36,9 @@ from hle_client.tunnel import (
 from hle_client.update_cmd import update as update_command
 
 console = Console()
+# Notices about the environment go to stderr: `--json` output must stay
+# parseable no matter what the machine's credentials look like.
+err_console = Console(stderr=True)
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +53,11 @@ def main(debug: bool) -> None:
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Runs before the subcommand's own options are resolved, so a token moved
+    # here is visible to every `envvar=` lookup below it.
+    notice = normalize_credential_env()
+    if notice:
+        err_console.print(f"[dim]{notice}[/dim]")
 
 
 _VALID_AUTH_PROVIDERS = {"any", "google", "github", "hle"}
