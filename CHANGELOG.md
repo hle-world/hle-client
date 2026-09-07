@@ -1,5 +1,63 @@
 # Changelog
 
+## v2609.1 — 2026-09-07
+
+### Fixed
+
+- **The reconnect backoff never started over.** `delay` was set once before the
+  reconnect loop and only ever doubled, so it carried every failure a process
+  had ever seen. A tunnel up for weeks that had ridden out six unrelated blips
+  then waited the full 60-second cap to come back from a routine relay deploy —
+  the longer a tunnel had been reliable, the worse it recovered. It now resets
+  after any session that got as far as `TUNNEL_ACK`, which is the rule the
+  agent's own control loop already used; the two loops finally agree.
+
+- **A tunnel that lost its label kept fighting for it.** When two copies of the
+  same label run under one account — a second `hle` left running, or an agent
+  and a hand-started tunnel — the relay hands the label to whichever registered
+  most recently. Until now nothing told the loser: it held a socket it believed
+  was working, received no requests, reported healthy, and never reconnected.
+
+  The relay now closes that socket with code `4009`, and this release treats
+  4009 as fatal rather than retrying it. Retrying is what makes it dangerous:
+  reconnecting takes the label straight back from whoever just claimed it, and
+  two clients end up trading the tunnel between them about once a second — a
+  reconnect storm that reads like a network fault and is really a duplicate
+  instance. Instead the client stops and says which one to go and find:
+
+  ```
+  Tunnel 'mimos-ssh' was taken over by another connection using the same account.
+  Another copy of hle (or an hle agent) is running this same label — stop the
+  duplicate, or give this one a different --label.
+  ```
+
+  Both fixes came out of diagnosing a tunnel that re-registered every 1.4
+  seconds for hours. The constant cadence was itself the clue: exponential
+  backoff would have shown 1s, 2s, 4s, so a metronomic 1.4s proved a fresh
+  connection each cycle rather than one loop backing off.
+
+- **`hle service install` would happily install a second copy of a service that
+  was already running.** It wrote its unit and started it without ever looking
+  at the other systemd scope, so a `--user` install did not notice a
+  system-wide unit of the same name, and a system install did not notice a
+  per-user one. Afterwards nothing on the host looked wrong: two units, both
+  enabled, both active, neither aware of the other.
+
+  That is what produced the storm above. One host carried
+  `/etc/systemd/system/hle-agent.service` from August and
+  `~/.config/systemd/user/hle-agent.service` added in September; both agents
+  read the same enrollment token, registered the same endpoints, and took the
+  tunnel off each other roughly once a second for a day, burning 67 minutes of
+  CPU each.
+
+  Installing now stops with the path of the existing unit and the uninstall
+  command for the scope it is in. Reinstalling within the same scope is
+  unchanged — that is an upgrade, not a duplicate.
+
+  This catches the case on one machine. Preventing it across *different*
+  machines needs the relay to tell one agent from another, which is coming
+  next.
+
 ## v2608.6 — 2026-08-10
 
 ### Fixed
