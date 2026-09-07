@@ -49,6 +49,13 @@ Repository = "https://github.com/hle-world/hle-client"
 [tool.hatch.build.targets.wheel]
 packages = ["src/hle_tui"]
 
+[tool.pytest.ini_options]
+# The app tests drive textual's harness, which is async. Set here rather than
+# passed on the command line so `pytest tests/` works the same in CI and by
+# hand.
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
