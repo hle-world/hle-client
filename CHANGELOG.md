@@ -1,5 +1,89 @@
 # Changelog
 
+## v2609.3 — 2026-09-07
+
+### Changed
+
+- **Firepuncher now reaches your homelab by default, not just the agent's own
+  box.** The default allowlist was loopback only, which answered the wrong
+  question: an agent exists to reach a network, and this allowed exactly the
+  one machine it happened to run on. Meanwhile `hle expose --service
+  https://192.168.2.200:8006` — same agent, same LAN, same credential — has
+  never been restricted at all. There is no threat model in which one of those
+  is safe and the other is not; if anything the tunnel is the more exposed,
+  since it publishes a host on the open internet while a forward binds to
+  loopback on your own machine.
+
+  Fixed private ranges were the obvious replacement and are wrong in both
+  directions: they admit any Docker bridge while refusing Tailscale, whose
+  CGNAT range is not private, and refusing a homelab on native IPv6, whose
+  addresses are globally routable by design.
+
+  So the default is now the networks the agent is *actually* attached to,
+  read from its own interface and route tables — LAN, Docker, Kubernetes, any
+  VPN, whatever is really there, updating itself as those come and go. Nothing
+  is probed: hop counts are filtered on most homelab gear, forgeable, and cost
+  latency on a decision the route table already answers exactly.
+
+  Public addresses stay excluded, so an agent still cannot be used as a
+  general-purpose outbound proxy. Reaching one is a rule away.
+
+  Agents older than this release keep working — they receive static private
+  ranges alongside the new marker, which is already broader than the loopback
+  they have today. The relay must also be new enough to send it; until then
+  the static ranges apply.
+
+### Fixed
+
+- **`hle fp` told you to run a command it already knew would fail.** It
+  received the agent's allowlist, printed it, and then ignored it —
+  announcing the forward and suggesting `ssh -p 9923 ...` for a target that
+  allowlist excluded. The refusal only arrived when ssh actually connected,
+  as `Connection closed by 127.0.0.1 port 9923`, pointing at nothing:
+
+  ```
+  Forwarding 127.0.0.1:9923 → rpi trikala → 192.168.1.101:22
+  Agent allows: localhost:*
+  Try: ssh -p 9923 <user>@127.0.0.1
+  Refused: 192.168.1.101:22 is not allowed. Allowed: localhost:*
+  ```
+
+  It now checks before offering anything, and says what to do:
+
+  ```
+  Refused: the agent does not allow 192.168.1.101:22.
+  It allows: localhost:*
+  Add a rule for this target on the agent's Firepuncher settings in the dashboard.
+  ```
+
+  Where it cannot judge — a marker only the agent can expand, or a name only
+  the agent resolves — it stays quiet and lets the agent decide. A wrong
+  refusal here would block a forward that would have worked, and the agent is
+  the authority either way. The agent's own refusal now names the networks it
+  resolved rather than the raw marker.
+
+### Added
+
+- **Several forwards from one command.** `--to` and `--port` repeat and pair
+  in order; ports you leave out are derived, and two targets wanting the same
+  local port is refused with the fix in the message.
+
+  ```bash
+  hle fp --agent rpi --to 22 --to nas:445 --to 192.168.1.50:5432
+  ```
+
+- **Run a command with the forwards up, and tear them down when it exits.**
+
+  ```bash
+  hle fp --agent rpi --to 22 -- ssh -p '{port}' me@127.0.0.1
+  hle fp --agent rpi --to 22 --to 5432 -- ./backup.sh
+  ```
+
+  `{port}` is the first forward's local port and `{port1}`, `{port2}`, ... are
+  each one's, so a derived port needn't be guessed; the same values arrive as
+  `HLE_FP_PORT` and `HLE_FP_PORT_1`, `HLE_FP_PORT_2`, ... for scripts. The
+  exit status is the command's, so it composes in a pipeline or a CI job.
+
 ## v2609.2 — 2026-09-07
 
 ### Fixed
