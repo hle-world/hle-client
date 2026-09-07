@@ -36,6 +36,28 @@
   backoff would have shown 1s, 2s, 4s, so a metronomic 1.4s proved a fresh
   connection each cycle rather than one loop backing off.
 
+- **`hle service install` would happily install a second copy of a service that
+  was already running.** It wrote its unit and started it without ever looking
+  at the other systemd scope, so a `--user` install did not notice a
+  system-wide unit of the same name, and a system install did not notice a
+  per-user one. Afterwards nothing on the host looked wrong: two units, both
+  enabled, both active, neither aware of the other.
+
+  That is what produced the storm above. One host carried
+  `/etc/systemd/system/hle-agent.service` from August and
+  `~/.config/systemd/user/hle-agent.service` added in September; both agents
+  read the same enrollment token, registered the same endpoints, and took the
+  tunnel off each other roughly once a second for a day, burning 67 minutes of
+  CPU each.
+
+  Installing now stops with the path of the existing unit and the uninstall
+  command for the scope it is in. Reinstalling within the same scope is
+  unchanged — that is an upgrade, not a duplicate.
+
+  This catches the case on one machine. Preventing it across *different*
+  machines needs the relay to tell one agent from another, which is coming
+  next.
+
 ## v2608.6 — 2026-08-10
 
 ### Fixed
