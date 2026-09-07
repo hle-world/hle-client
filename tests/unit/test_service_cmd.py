@@ -338,64 +338,182 @@ class TestRestartWithoutATarget:
 class TestDuplicateScopeInstall:
     """Installing a unit that is already live in the other systemd scope.
 
-    A per-user agent installed alongside a system-wide one gives two copies
-    running on the same credentials. Both register the same endpoints, the
-    relay hands each label to whichever connected most recently, and the two
-    evict each other about once a second. Observed in the wild: a system unit
-    from August, a user unit added in September, and a tunnel that reconnected
-    every 1.4s for a day with nothing on the host looking wrong.
+    The *same* agent installed twice is the fault: both copies read one
+    enrollment token, register the same endpoints, and take the tunnel off each
+    other about once a second. Observed in the wild — a system unit from August,
+    a per-user unit added in September, a tunnel reconnecting every 1.4s for a
+    day, and nothing on the host looking wrong.
+
+    Two *different* agents on one machine are not a fault. Someone learning HLE
+    ends up with a spare, and one agent per OS user is a reasonable way to keep
+    things separate. The unit name cannot tell those cases apart; the token can,
+    and where even that is unreadable the benefit of the doubt goes to the user:
+    a false refusal blocks a legitimate setup outright, while a duplicate that
+    slips through is still caught by the relay.
     """
 
     @staticmethod
-    def _install(tmp_path, monkeypatch, *, user_mode: bool, existing: str | None):
-        """Attempt an install, having optionally planted a unit in the other scope."""
+    def _install(
+        tmp_path,
+        monkeypatch,
+        *,
+        user_mode: bool,
+        existing: str | None,
+        existing_token: str | None = "hlea_same",
+        new_token: str | None = "hlea_same",
+        existing_user: str | None = None,
+        run_as: str | None = None,
+    ):
+        """Attempt an install, having optionally planted a unit in the other scope.
+
+        Tokens are written to separate files so "same token" and "same file"
+        can be exercised independently.
+        """
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "home" / ".config" / "systemd" / "user"
-        system_dir.mkdir(parents=True)
-        user_dir.mkdir(parents=True)
+        system_dir.mkdir(parents=True, exist_ok=True)
+        user_dir.mkdir(parents=True, exist_ok=True)
 
         monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", system_dir)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
         monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
         monkeypatch.setattr(service_cmd, "_systemctl", lambda *a, **k: None)
 
+        new_config = tmp_path / "new-agent.toml"
+        if new_token:
+            new_config.write_text(f'token = "{new_token}"\n')
+
         uname = unit_name(AGENT_LABEL, None)
-        if existing == "system":
-            (system_dir / uname).write_text("[Unit]\n")
-        elif existing == "user":
-            (user_dir / uname).write_text("[Unit]\n")
+        if existing is not None:
+            existing_config = tmp_path / "existing-agent.toml"
+            if existing_token:
+                existing_config.write_text(f'token = "{existing_token}"\n')
+            lines = [
+                "[Unit]",
+                "[Service]",
+                "ExecStart=/usr/bin/hle agent run",
+                f"Environment=HLE_AGENT_CONFIG={existing_config}",
+            ]
+            if existing_user:
+                lines.append(f"User={existing_user}")
+            target = system_dir if existing == "system" else user_dir
+            (target / uname).write_text("\n".join(lines) + "\n")
 
         return service_cmd._systemd_install(
             label=AGENT_LABEL,
             run_args=["agent", "run"],
             name=None,
             user_mode=user_mode,
-            run_as=None,
+            run_as=run_as,
             start=False,
+            agent_config=str(new_config),
         )
 
-    def test_user_install_refuses_when_a_system_unit_exists(self, tmp_path, monkeypatch, capsys):
+    # -- the genuine duplicate ------------------------------------------------
+
+    def test_the_same_token_in_the_other_scope_is_refused(self, tmp_path, monkeypatch, capsys):
         with pytest.raises(SystemExit) as excinfo:
             self._install(tmp_path, monkeypatch, user_mode=True, existing="system")
         assert excinfo.value.code == 1
 
         out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
-        assert "already installed system-wide" in out
-        assert "fight each other" in out
-        # And says exactly which command clears it.
+        assert "same agent is already installed system-wide" in out
+        assert "same enrollment token" in out
         assert "hle service uninstall --label agent" in out
 
-    def test_system_install_refuses_when_a_user_unit_exists(self, tmp_path, monkeypatch, capsys):
-        with pytest.raises(SystemExit) as excinfo:
+    def test_it_works_in_the_other_direction_too(self, tmp_path, monkeypatch, capsys):
+        with pytest.raises(SystemExit):
             self._install(tmp_path, monkeypatch, user_mode=False, existing="user")
-        assert excinfo.value.code == 1
-
         out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
-        assert "already installed per-user" in out
         assert "hle service uninstall --user --label agent" in out
 
+    def test_the_same_token_file_read_as_the_same_user_counts(self, tmp_path, monkeypatch):
+        """Unreadable tokens, but provably one identity: same file, same user."""
+        shared = tmp_path / "shared-agent.toml"  # deliberately never written
+        system_dir = tmp_path / "system"
+        system_dir.mkdir(parents=True)
+        user_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+        user_dir.mkdir(parents=True)
+        monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", system_dir)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
+        monkeypatch.setattr(service_cmd, "_systemctl", lambda *a, **k: None)
+
+        # The incumbent lives in the *other* scope from the one being installed.
+        (user_dir / unit_name(AGENT_LABEL, None)).write_text(
+            f"[Service]\nEnvironment=HLE_AGENT_CONFIG={shared}\nUser=mimos\n"
+        )
+
+        with pytest.raises(SystemExit):
+            service_cmd._systemd_install(
+                label=AGENT_LABEL,
+                run_args=["agent", "run"],
+                name=None,
+                user_mode=False,
+                run_as="mimos",
+                start=False,
+                agent_config=str(shared),
+            )
+
+    # -- the legitimate second agent ------------------------------------------
+
+    def test_a_different_token_is_allowed(self, tmp_path, monkeypatch, capsys):
+        """Two agents on one machine is a real setup, not a mistake.
+
+        One per OS user, or a beginner with a spare. The credential decides,
+        and these are two different enrollments.
+        """
+        self._install(
+            tmp_path,
+            monkeypatch,
+            user_mode=True,
+            existing="system",
+            existing_token="hlea_one",
+            new_token="hlea_two",
+        )
+        written = tmp_path / "home" / ".config" / "systemd" / "user" / unit_name(AGENT_LABEL, None)
+        assert written.exists()
+
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "also exists system-wide" in out
+        assert "--name" in out  # how to keep the two distinguishable
+
+    def test_an_unreadable_token_gets_the_benefit_of_the_doubt(self, tmp_path, monkeypatch):
+        """A per-user install cannot read root's token file — the normal case.
+
+        Refusing on "cannot tell" would block the legitimate setup outright,
+        while a duplicate that slips through is still refused by the relay.
+        """
+        self._install(
+            tmp_path,
+            monkeypatch,
+            user_mode=True,
+            existing="system",
+            existing_token=None,  # file never written
+            new_token="hlea_two",
+        )
+        written = tmp_path / "home" / ".config" / "systemd" / "user" / unit_name(AGENT_LABEL, None)
+        assert written.exists()
+
+    def test_the_same_file_under_a_different_user_is_not_the_same_agent(
+        self, tmp_path, monkeypatch
+    ):
+        """``~/.config/hle/agent.toml`` resolves per user; same text, different files."""
+        assert (
+            service_cmd._same_agent(
+                "[Service]\nEnvironment=HLE_AGENT_CONFIG=/home/a/.config/hle/agent.toml\nUser=a\n",
+                "[Service]\nEnvironment=HLE_AGENT_CONFIG=/home/a/.config/hle/agent.toml\nUser=b\n",
+            )
+            is None
+        )
+
+    def test_non_agent_units_are_not_judged_on_tokens(self, tmp_path):
+        """A plain `hle expose` unit carries no token; its label already separates it."""
+        assert service_cmd._same_agent("[Service]\nExecStart=/usr/bin/hle expose\n", "") is None
+
+    # -- unchanged behaviour ---------------------------------------------------
+
     def test_a_clean_host_still_installs(self, tmp_path, monkeypatch):
-        """The guard must only fire on a genuine cross-scope duplicate."""
         self._install(tmp_path, monkeypatch, user_mode=True, existing=None)
         written = tmp_path / "home" / ".config" / "systemd" / "user" / unit_name(AGENT_LABEL, None)
         assert written.exists()

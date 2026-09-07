@@ -304,6 +304,75 @@ def _unit_path_in_other_scope(uname: str, user_mode: bool) -> Path | None:
     return other if other.exists() else None
 
 
+def _unit_field(unit_text: str, key: str) -> str | None:
+    """Read a single ``Key=value`` out of a rendered unit, or an Environment= one."""
+    for raw in unit_text.splitlines():
+        line = raw.strip()
+        if line.startswith(f"{key}="):
+            return line[len(key) + 1 :].strip() or None
+        if line.startswith("Environment=") and line[len("Environment=") :].startswith(f"{key}="):
+            return line[len("Environment=") + len(key) + 1 :].strip() or None
+    return None
+
+
+def _read_token(config_path: str | None) -> str | None:
+    """The enrollment token a unit would use, if it can be read from here.
+
+    Often it cannot — a per-user install has no business reading root's token
+    file, and that is the normal case rather than an error. Callers must treat
+    ``None`` as "don't know", never as "different".
+    """
+    if not config_path:
+        return None
+    try:
+        import tomllib
+
+        with open(Path(config_path).expanduser(), "rb") as f:
+            token = tomllib.load(f).get("token")
+    except (OSError, ValueError):
+        return None
+    return token if isinstance(token, str) and token else None
+
+
+def _same_agent(existing_unit: str, new_unit: str) -> bool | None:
+    """Whether two units run the *same* agent identity.
+
+    ``True`` means certainly the same — the same enrollment token, or the same
+    token file read by the same OS user. ``False`` means certainly different.
+    ``None`` means it cannot be told from here, which is common and not an
+    error: a per-user install cannot read root's token file.
+
+    Only the first justifies refusing an install. Two agents on one machine is
+    a legitimate setup — a beginner finding their feet, or one agent per OS
+    user for logical separation — and the credential, not the unit name, is
+    what decides. Where this cannot tell, the relay still can: it sees both
+    connections and refuses the duplicate itself.
+    """
+    existing_config = _unit_field(existing_unit, "HLE_AGENT_CONFIG")
+    new_config = _unit_field(new_unit, "HLE_AGENT_CONFIG")
+    if existing_config is None and new_config is None:
+        # Not agent units at all (a plain `hle expose` tunnel, say). Those are
+        # told apart by their label, which is already in the unit name.
+        return None
+
+    existing_token = _read_token(existing_config)
+    new_token = _read_token(new_config)
+    if existing_token and new_token:
+        return existing_token == new_token
+
+    # The same token file, read as the same user, is the same agent even when
+    # neither token can be read from here. The user has to match too:
+    # ~/.config/hle/agent.toml is a different file for every account.
+    if (
+        existing_config
+        and existing_config == new_config
+        and _unit_field(existing_unit, "User") == _unit_field(new_unit, "User")
+    ):
+        return True
+
+    return None
+
+
 def _systemd_install(
     *,
     label: str,
@@ -329,27 +398,44 @@ def _systemd_install(
     )
     uname = unit_name(label, name)
 
-    # Installing into one scope while the same unit is live in the other gives
-    # two copies of the same service sharing one set of credentials. For an
-    # agent that is actively harmful: both register the same endpoints, the
-    # relay hands each label to whichever connected last, and the two evict
-    # each other about once a second — a reconnect storm that looks like a
-    # network fault. Seen in the wild as a per-user unit installed months after
-    # a system-wide one, with nothing on either side aware of the other.
+    # A unit of this name in the other systemd scope may be the same agent
+    # installed twice — which fights itself for every label — or two genuinely
+    # different agents, one per OS user, which is a perfectly reasonable way to
+    # separate things. The unit *name* cannot tell those apart; the enrollment
+    # token can. Refuse only on certainty, and let anything else through: a
+    # false refusal blocks a legitimate setup outright, while a duplicate that
+    # slips past is still caught by the relay, which sees both connections.
     clash = _unit_path_in_other_scope(uname, user_mode)
     if clash is not None:
         scope_here = "per-user" if user_mode else "system-wide"
         scope_there = "system-wide" if user_mode else "per-user"
+        try:
+            existing_text = clash.read_text()
+        except OSError:
+            existing_text = ""
+        verdict = _same_agent(existing_text, unit) if existing_text else None
+
+        if verdict is True:
+            console.print(
+                f"[red]This same agent is already installed {scope_there}[/red] at {clash}.\n"
+                f"Both units use the same enrollment token, so installing it {scope_here} "
+                "as well would run two copies on one credential — they take every tunnel "
+                "off each other about once a second.\n"
+                "Remove the existing one first:\n"
+                f"  hle service uninstall{'' if user_mode else ' --user'} --label {label}\n"
+                "or keep it and skip this install."
+            )
+            raise SystemExit(1)
+
         console.print(
-            f"[red]{uname} is already installed {scope_there}[/red] at {clash}.\n"
-            f"Installing it {scope_here} as well would run two copies on the same "
-            "credentials, which fight each other for every tunnel label.\n"
-            f"Remove the existing one first:\n"
-            f"  hle service uninstall{'' if user_mode else ' --user'} "
-            f"--label {label}\n"
-            f"or keep it and skip this install."
+            f"[yellow]Note:[/yellow] {uname} also exists {scope_there} at {clash}.\n"
+            "        Continuing — the two use different credentials, or this cannot be "
+            "checked from here.\n"
+            "        If they are meant to be one agent, stop one of them; two copies on "
+            "one enrollment token\n"
+            "        fight over every tunnel. Pass --name to give this unit a distinct "
+            "name if you want both."
         )
-        raise SystemExit(1)
 
     path = _unit_dir(user_mode) / uname
     try:
