@@ -1203,6 +1203,80 @@ class TestTunnelReconnectBackoff:
         )
         assert slept == [1.0, 2.0, 4.0, 1.0, 2.0]
 
+    async def test_a_duplicate_instance_stops_too(self):
+        """The other end of a takeover: this client arrived second and lost.
+
+        4009 goes to the connection being replaced; 4010 goes to the one being
+        turned away because a healthy instance already holds the label. Both
+        must stop — if either retries, the two ends trade the label forever.
+        """
+        tunnel = _tunnel(service_label="mimos-ssh")
+        tunnel._proxy.start = AsyncMock()
+
+        with (
+            patch.object(tunnel, "_connect_once", side_effect=self._closed(4010)),
+            patch.object(tunnel, "_cleanup", AsyncMock()),
+            pytest.raises(TunnelFatalError) as excinfo,
+        ):
+            await tunnel.connect()
+
+        message = str(excinfo.value)
+        assert "still connected and healthy" in message
+        assert "hle service list" in message
+
+    async def test_a_flood_close_waits_instead_of_giving_up(self):
+        """4029 is the relay saying "slow down", not "stop".
+
+        The cause is usually a supervisor restarting something, so giving up
+        would leave the tunnel down for good over a transient. But the local
+        backoff resets to a second after any registered session, which is
+        exactly the wrong answer to "you are registering too fast" — so the
+        relay's own figure wins.
+        """
+        tunnel = _tunnel(max_reconnect_delay=600.0)
+        slept = await self._delays(tunnel, [self._closed(4029), ConnectionError("blip")])
+
+        assert slept[0] >= 60.0
+        # And it does not immediately fall back to a one-second retry.
+        assert slept[1] >= 60.0
+
+    async def test_the_registration_says_which_process_it_comes_from(self):
+        """Without this the relay cannot tell a reconnect from a second machine."""
+        # Read the binding the tunnel actually uses, not a fresh import: the
+        # id is captured at module import, so a test elsewhere reloading
+        # hle_client.identity would otherwise make this compare two processes.
+        from hle_client.tunnel import instance_id
+
+        tunnel = _tunnel(service_label="myapp", api_key="hle_testkey_for_handshake")
+        sent: list[str] = []
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+        ack = ProtocolMessage(
+            type=MessageType.TUNNEL_ACK,
+            payload={
+                "tunnel_id": "t-1",
+                "subdomain": "myapp-abc",
+                "public_url": "https://myapp-abc.hle.world",
+                "websocket_enabled": True,
+                "user_code": "abc",
+                "service_label": "myapp",
+            },
+        )
+        mock_ws.recv = AsyncMock(return_value=ack.model_dump_json())
+        mock_ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("hle_client.tunnel.websockets.connect", return_value=mock_ctx):
+            await tunnel._proxy.start()
+            await tunnel._connect_once()
+            await tunnel._proxy.stop()
+
+        payload = ProtocolMessage.model_validate_json(sent[0]).payload
+        assert payload["instance_id"] == instance_id()
+        assert payload["hostname"]
+
     async def test_being_replaced_stops_rather_than_fights_for_the_label(self):
         """4009 means another connection took this label.
 

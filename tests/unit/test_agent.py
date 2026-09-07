@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 
+import websockets.exceptions
+from websockets.frames import Close
+
 from hle_client.agent import AgentClient
-from hle_common.agent_protocol import EndpointSpec
+from hle_common.agent_protocol import AgentHello, EndpointSpec
 
 
 class FakeTunnel:
@@ -295,3 +298,111 @@ class TestPreflightRequests:
         assert ws.sent == []
         for task in list(client._preflight_tasks):
             task.cancel()
+
+
+class TestFatalCloses:
+    """Closes the agent must not retry.
+
+    Two agents sharing one enrollment token is the failure this guards. Each
+    registers the same endpoints, the relay gives them to whichever connected
+    last, and if both keep retrying they take every tunnel off each other about
+    once a second — for as long as both are running. Observed on a host with a
+    system unit from August and a per-user unit from September: a tunnel that
+    reconnected every 1.4 seconds for a day, and 67 minutes of CPU burned by
+    each agent.
+    """
+
+    @staticmethod
+    def _closed(code: int, reason: str = "") -> websockets.exceptions.ConnectionClosedError:
+        return websockets.exceptions.ConnectionClosedError(Close(code, reason), None)
+
+    async def _run_until_stopped(self, monkeypatch, exc) -> tuple[AgentClient, list[float]]:
+        client = AgentClient("hlea_x")
+        slept: list[float] = []
+        attempts = 0
+
+        async def fake_connect_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts > 5:
+                client._running = False
+                return
+            client._registered = True
+            raise exc
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await client.run()
+        return client, slept
+
+    async def test_a_duplicate_instance_stops_the_agent(self, monkeypatch):
+        client, slept = await self._run_until_stopped(
+            monkeypatch, self._closed(4010, "already connected from nas")
+        )
+        # It stopped on the first close rather than reconnecting at all.
+        assert slept == []
+        assert client.fatal_error is not None
+        assert "already in use by another agent" in client.fatal_error
+
+    async def test_the_message_names_the_other_machine_and_what_to_do(self, monkeypatch):
+        client, _ = await self._run_until_stopped(
+            monkeypatch, self._closed(4010, "already connected from nas")
+        )
+        assert "nas" in client.fatal_error
+        assert "hle service list" in client.fatal_error
+
+    async def test_being_replaced_also_stops(self, monkeypatch):
+        client, slept = await self._run_until_stopped(monkeypatch, self._closed(4009, "replaced"))
+        assert slept == []
+        assert "took this token over" in client.fatal_error
+
+    async def test_a_revoked_token_stops_and_says_to_re_enroll(self, monkeypatch):
+        client, _ = await self._run_until_stopped(monkeypatch, self._closed(4001, "revoked"))
+        assert "re-enroll" in client.fatal_error.lower()
+
+    async def test_endpoints_are_torn_down_on_the_way_out(self, monkeypatch):
+        """Stopping must not leave tunnels running on a machine that lost the argument."""
+        client, created = _make_client()
+        await client.reconcile([_spec("tv")])
+        await asyncio.sleep(0)  # let the endpoint task start
+        assert created[0].connected is True
+
+        async def fake_connect_once() -> None:
+            raise self._closed(4010, "already connected from nas")
+
+        async def fake_sleep(seconds: float) -> None:
+            pass
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await client.run()
+
+        assert client._endpoints == {}
+        assert created[0].connected is False
+
+    async def test_an_ordinary_drop_still_reconnects(self, monkeypatch):
+        """The guard must only catch codes that mean stop."""
+        client, slept = await self._run_until_stopped(monkeypatch, self._closed(1006, "bye"))
+        assert slept  # it kept trying
+        assert client.fatal_error is None
+
+    async def test_a_flood_close_waits_rather_than_stopping(self, monkeypatch):
+        """4029 says slow down. Giving up would leave the agent down over a transient."""
+        client, slept = await self._run_until_stopped(monkeypatch, self._closed(4029, "too fast"))
+        assert client.fatal_error is None
+        assert slept and slept[0] >= 60.0
+
+    async def test_the_hello_says_which_process_it_comes_from(self):
+        """Without this the relay cannot tell a reconnect from a second machine."""
+        from hle_client.agent import instance_id
+
+        hello = AgentHello(
+            token="hlea_x",
+            instance_id=instance_id(),
+            hostname="mimos",
+        )
+        assert hello.instance_id == instance_id()
+        assert hello.hostname == "mimos"

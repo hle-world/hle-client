@@ -494,6 +494,15 @@ def run(token: str | None, relay_host: str, relay_port: int) -> None:
         asyncio.run(client.run())
     except KeyboardInterrupt:
         console.print("\n[yellow]Agent stopped.[/yellow]")
+        return
+
+    # The relay can end the agent deliberately — a duplicate on another
+    # machine, a revoked token. Exiting 0 there would let a service manager
+    # report "stopped successfully" and, with Restart=always, start the whole
+    # argument over. Say what happened and exit non-zero.
+    if client.fatal_error:
+        console.print(f"\n[red]Agent stopped by the relay.[/red]\n{client.fatal_error}")
+        raise SystemExit(1)
 
 
 @agent.command("status")
