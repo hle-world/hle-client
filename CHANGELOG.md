@@ -1,5 +1,76 @@
 # Changelog
 
+## v2609.4 — 2026-09-07
+
+### Fixed
+
+- **An upgrade could restart the wrong copy of a service and call it done.**
+  `hle update` restarted a system unit, was told `Access denied`, quietly
+  retried in the per-user scope, and reported the result of *that*:
+
+  ```
+  Failed to restart hle-agent.service: Access denied
+    restarted hle-agent.service
+  ```
+
+  On a machine carrying the same unit in both scopes — the duplicate
+  `hle service install` now refuses to create — this restarted the per-user
+  copy onto the new version while the system unit actually serving traffic
+  stayed on the old one. The upgrade then said it had finished.
+
+  A restart now happens in the scope the service was found in and does not
+  cross into the other. Every line names its scope, because
+  "hle-agent.service: restarted" cannot say which of two identically-named
+  units it means.
+
+- **`hle service list` could not show a duplicate**, which is a problem for the
+  command people are sent to in order to find one — the install guard added in
+  v2609.2 says, in as many words, to run it on each machine. It listed a single
+  scope, defaulting to system, so a per-user unit beside a system one of the
+  same name simply did not appear. Both scopes are listed now, with `--user`
+  and `--system` to narrow, and a unit present in both is called out by name.
+  Nothing else on the machine says so: systemd treats the two as unrelated and
+  both report healthy.
+
+- **A denied restart suggested a command that cannot work.** `sudo hle service
+  restart --all` answers `sudo: hle: command not found`, because `hle` lives in
+  `~/.local/bin` and sudo's `secure_path` drops it. The message now names
+  `sudo systemctl restart <unit>`, and says nothing about sudo when the unit is
+  per-user or you are already root.
+
+- **`hle agent list` and `hle fp` ignored `HLE_API_KEY`** despite both
+  promising "API key (else env/config)" in their own help. Only `expose` and
+  `config` ever declared it. So a host whose key arrives from a systemd
+  `EnvironmentFile` — which is how the installer sets one up — could export it,
+  run either command, and be told there was no API key. It also made `hle fp`
+  unusable anywhere a key comes from the environment: CI, a container, a unit.
+
+- **A machine enrolled the old way looked like it had no credential.** Agents
+  now enrol with a scoped `hle_` API key, so there is one credential shape;
+  earlier enrolments left an `hlea_` agent token in `HLE_API_KEY`, which is
+  what the unit file sets and what the relay still accepts for registering
+  tunnels. The tunnel therefore ran fine while everything reading
+  `HLE_AGENT_TOKEN` — the variable an agent token now belongs in — saw nothing
+  there at all.
+
+  A legacy token found in `HLE_API_KEY` is read as an agent token too, with a
+  one-line note on stderr saying so. `HLE_API_KEY` is left exactly as it was:
+  the relay accepts it there, and clearing it would break the installs this is
+  meant to help.
+
+### Changed
+
+- **A rejected credential now explains itself in the relay's words.** On a 401
+  the client prints the reason the relay gave rather than a message composed
+  locally. The relay knows which credential arrived: an agent enrollment token
+  is a real, working credential of the wrong kind, and "API key rejected, run
+  hle auth login" is advice that cannot help — as one host found, where the
+  tunnel had been running for weeks on exactly that token.
+
+  Keeping the reasoning on the relay means an installation from months ago gets
+  the better answer the moment the relay is deployed, rather than every client
+  carrying its own copy of the rules to drift from.
+
 ## v2609.3 — 2026-09-07
 
 ### Changed
