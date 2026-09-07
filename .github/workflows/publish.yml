@@ -74,6 +74,42 @@ jobs:
           echo "::error::hle-client==${VERSION} did not become installable within ~15 minutes"
           exit 1
 
+  publish-plugins:
+    name: Publish plugins to PyPI
+    # After the core, because a plugin depends on the client version being
+    # released here. Publishing it first would put a package on PyPI whose
+    # dependency does not exist yet.
+    needs: publish
+    runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
+    environment: pypi
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install build and publish tools
+        run: pip install build twine
+
+      - name: Build and publish each plugin
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for plugin in plugins/*/; do
+            [ -f "${plugin}pyproject.toml" ] || continue
+            name=$(basename "$plugin")
+            echo "::group::${name}"
+            # A plugin at a version already on PyPI is not an error: the core
+            # releases more often than a plugin changes, and re-uploading the
+            # same version fails the whole job for no reason.
+            python -m build --outdir "dist-${name}" "$plugin"
+            twine upload --skip-existing "dist-${name}"/*
+            echo "::endgroup::"
+          done
+
   notify-operator:
     name: Notify hle-operator
     needs: publish
