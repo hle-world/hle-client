@@ -5,9 +5,9 @@ from __future__ import annotations
 import io
 
 import pytest
-from rich.console import Console
 
 from hle_client import notices
+from hle_client.richcompat import Console
 from hle_common.protocol import NoticePayload
 
 

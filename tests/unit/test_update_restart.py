@@ -57,7 +57,7 @@ class TestUpdateRestartsServices:
         """Not restarting is a valid choice, but it must not be a silent one."""
         result, restart = self._run([("hle_agent", False)], confirm_reply="y\nn\n")
         assert result.exit_code == 0, result.output
-        assert "hle service restart --all" in result.output
+        assert "hle daemon restart --all" in result.output
         restart.assert_not_called()
 
     def test_yes_flag_restarts_without_asking(self):

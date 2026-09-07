@@ -580,7 +580,7 @@ class Tunnel:
                 "still connected and healthy.\n"
                 f"{reason or 'Another instance holds this label.'}\n"
                 "This one has stopped rather than take the label off it. Stop whichever "
-                "copy you did not mean to run — `hle service list` on each machine shows "
+                "copy you did not mean to run — `hle daemon list` on each machine shows "
                 "what is installed."
             )
         if code == close_codes.LABEL_IN_USE:

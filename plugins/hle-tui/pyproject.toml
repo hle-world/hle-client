@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hle-tui"
+version = "2609.5"
+description = "Interactive terminal dashboard for HLE — an hle-client plugin"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "HLE" }]
+keywords = ["hle", "homelab", "tunnel", "tui"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console :: Curses",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+]
+
+# The point of shipping this separately: textual and its dependencies land only
+# on machines that asked for a dashboard, never on the router running a tunnel.
+dependencies = [
+    "hle-client>=2609.5",
+    "textual>=0.80",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+# This is the whole integration. Installing the package makes `hle tui` exist;
+# uninstalling it makes `hle tui` stop existing. The core is not edited either
+# way, and knows nothing about textual.
+[project.entry-points."hle_client.plugins"]
+tui = "hle_tui.plugin:tui"
+
+[project.urls]
+Homepage = "https://hle.world"
+Repository = "https://github.com/hle-world/hle-client"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hle_tui"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "A", "SIM", "TC"]

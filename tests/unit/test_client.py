@@ -1222,7 +1222,7 @@ class TestTunnelReconnectBackoff:
 
         message = str(excinfo.value)
         assert "still connected and healthy" in message
-        assert "hle service list" in message
+        assert "hle daemon list" in message
 
     async def test_a_flood_close_waits_instead_of_giving_up(self):
         """4029 is the relay saying "slow down", not "stop".
