@@ -198,7 +198,7 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
     if not services:
         console.print(
             "[dim]No hle services installed. Restart anything you started by hand "
-            "(e.g. re-run 'hle expose ...') so it picks up the new version.[/dim]"
+            "(e.g. re-run 'hle tunnel create ...') so it picks up the new version.[/dim]"
         )
         return
 
@@ -206,7 +206,7 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
     console.print(f"Still running the previous version: [bold]{listed}[/bold]")
     if not (yes or click.confirm(f"Restart {len(services)} service(s) now?", default=True)):
         console.print("[yellow]Left running the old version.[/yellow] Restart later with:")
-        console.print("  hle service restart --all")
+        console.print("  hle daemon restart --all")
         return
 
     failed = []
@@ -222,10 +222,10 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
     if failed:
         console.print(
             "[yellow]Some services did not restart.[/yellow] They are still on the old "
-            "version — check 'hle service status --agent' and the service log."
+            "version — check 'hle daemon status --agent' and the service log."
         )
         if needs_root and os.geteuid() != 0:
-            # `sudo hle service restart --all` is the obvious next thing to try
+            # `sudo hle daemon restart --all` is the obvious next thing to try
             # and it does not work: hle lives in ~/.local/bin, which sudo's
             # secure_path drops. Give the command that does.
             units = " ".join(svc for svc, user_mode in failed if not user_mode)

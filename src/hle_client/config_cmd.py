@@ -119,7 +119,7 @@ async def _warn_if_basic_auth_active(client: ApiClient, subdomain: str) -> None:
         f"[yellow]Warning:[/yellow] Basic Auth is currently active on "
         f"[cyan]{subdomain}[/cyan].\n"
         "  Email rules and PIN are bypassed while it's active.\n"
-        "  Remove Basic Auth first ([dim]hle config basic-auth remove "
+        "  Remove Basic Auth first ([dim]hle tunnel basic-auth remove "
         f"{subdomain}[/dim]) to re-enable SSO/PIN access control."
     )
     if not click.confirm("  Continue anyway?", default=False):
@@ -521,7 +521,7 @@ def access_replace(
 
     Example:
 
-        hle config access replace ha google:alice@x.com github:bob@y.com
+        hle tunnel access replace ha google:alice@x.com github:bob@y.com
     """
     if do_clear and specs:
         raise click.ClickException("Pass either SPECS or --clear, not both.")

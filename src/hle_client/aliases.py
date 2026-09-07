@@ -116,6 +116,49 @@ class AliasedGroup(click.Group):
         return name, command, rest
 
 
+class ModeGroup(click.Group):
+    """A group whose subcommands replace a flag that switched modes.
+
+    ``hle service install`` carried twenty flags across three mutually
+    exclusive modes, with help text that had to prefix individual options with
+    "fp mode:" — the code saying, in as many words, that it wanted to be three
+    commands.
+
+    It is three commands now. The flag form still works: anything that does not
+    begin with a known subcommand is handed to the original command unchanged,
+    so every unit file and install script written against it keeps working.
+    """
+
+    #: Name of the hidden command that accepts the old flag form.
+    LEGACY = "_flags"
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        first = args[0] if args else ""
+        # `--help` belongs to the group: it is where the modes are listed.
+        # An unknown bare word is reported against the group too, for the same
+        # reason. Anything else that starts with a dash is the old flag form.
+        if first.startswith("-") and first not in ("-h", "--help"):
+            args = [self.LEGACY, *args]
+        return super().parse_args(ctx, args)
+
+
+class LegacyModeCommand(click.Command):
+    """The old flag form, hidden behind a group without saying so.
+
+    It is registered under an internal name so Click can dispatch to it, and
+    that name has no business appearing in a usage line the user is meant to
+    retype.
+    """
+
+    def format_usage(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        # Click composes the usage line from ctx.command_path, so this is the
+        # hook that covers both `--help` and the usage shown with an error.
+        formatter.write_usage(
+            ctx.command_path.replace(f" {ModeGroup.LEGACY}", ""),
+            " ".join(self.collect_usage_pieces(ctx)),
+        )
+
+
 class RootGroup(AliasedGroup):
     """The top-level group: legacy names, plus global options anywhere."""
 

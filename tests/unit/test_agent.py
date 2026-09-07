@@ -352,7 +352,7 @@ class TestFatalCloses:
             monkeypatch, self._closed(4010, "already connected from nas")
         )
         assert "nas" in client.fatal_error
-        assert "hle service list" in client.fatal_error
+        assert "hle daemon list" in client.fatal_error
 
     async def test_being_replaced_also_stops(self, monkeypatch):
         client, slept = await self._run_until_stopped(monkeypatch, self._closed(4009, "replaced"))

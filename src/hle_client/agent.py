@@ -51,7 +51,7 @@ WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 AGENT_CONFIG_PATH = Path.home() / ".config" / "hle" / "agent.toml"
 AGENT_TOKEN_PREFIX = "hlea_"
 
-# Set by `hle service install --agent` to the file the token was actually found
+# Set by `hle daemon install agent` to the file the token was actually found
 # in, so the service does not have to reconstruct the path from HOME. A service
 # manager starts processes with an environment of its own choosing: on pfSense
 # the agent enrolls as `admin` and runs from rc.d, and if those two disagree
@@ -73,7 +73,7 @@ def _fatal_agent_message(code: int | None, reason: str) -> str:
             f"and healthy. {reason}\n"
             "This one has stopped rather than take the endpoints off it. Two agents "
             "sharing one token take every tunnel off each other about once a second.\n"
-            "Run `hle service list` on each machine to find the copy you did not mean "
+            "Run `hle daemon list` on each machine to find the copy you did not mean "
             "to run, or enroll this machine as its own agent from the dashboard."
         )
     if code == close_codes.REPLACED:
