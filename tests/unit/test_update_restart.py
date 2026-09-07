@@ -45,15 +45,17 @@ class TestUpdateRestartsServices:
         return result, restart
 
     def test_offers_to_restart_and_does_it(self):
-        result, restart = self._run(["hle_agent"], confirm_reply="y\ny\n")
+        result, restart = self._run([("hle_agent", False)], confirm_reply="y\ny\n")
         assert result.exit_code == 0, result.output
         assert "Still running the previous version" in result.output
-        restart.assert_called_once_with("hle_agent")
+        # The scope goes with the name: restarting a system unit in the user
+        # scope is how the wrong copy got restarted and reported as success.
+        restart.assert_called_once_with("hle_agent", False)
         assert "restarted" in result.output
 
     def test_declining_says_how_to_do_it_later(self):
         """Not restarting is a valid choice, but it must not be a silent one."""
-        result, restart = self._run(["hle_agent"], confirm_reply="y\nn\n")
+        result, restart = self._run([("hle_agent", False)], confirm_reply="y\nn\n")
         assert result.exit_code == 0, result.output
         assert "hle service restart --all" in result.output
         restart.assert_not_called()
@@ -64,16 +66,54 @@ class TestUpdateRestartsServices:
         restart.assert_not_called()  # nothing installed to restart
 
     def test_restarts_every_installed_service(self):
-        result, restart = self._run(["hle_agent", "hle_jellyfin"], confirm_reply="y\ny\n")
+        result, restart = self._run(
+            [("hle_agent", False), ("hle_jellyfin", True)], confirm_reply="y\ny\n"
+        )
         assert result.exit_code == 0, result.output
         assert restart.call_count == 2
 
+    def test_both_scopes_are_named_so_a_duplicate_is_visible(self):
+        """A host can carry the same unit twice; "hle-agent restarted" hides which.
+
+        Observed in the field: a system unit and a per-user unit of the same
+        name, the system one failing on permissions and the user one — the
+        duplicate — restarting and being reported as the success.
+        """
+        result, _ = self._run(
+            [("hle-agent.service", False), ("hle-agent.service", True)], confirm_reply="y\ny\n"
+        )
+        out = plain(result.output)
+        assert "hle-agent.service (system)" in out
+        assert "hle-agent.service (user)" in out
+
     def test_a_failed_restart_is_loud(self):
         """Otherwise the old version keeps serving and the upgrade looks done."""
-        result, _ = self._run(["hle_agent"], confirm_reply="y\ny\n", restart_ok=False)
+        result, _ = self._run([("hle_agent", False)], confirm_reply="y\ny\n", restart_ok=False)
         assert result.exit_code == 1
         assert "failed" in result.output
         assert "still on the old" in result.output
+
+    def test_a_denied_system_restart_names_a_command_that_works(self):
+        """`sudo hle ...` is the obvious next try and it fails.
+
+        hle lives in ~/.local/bin, which sudo's secure_path drops, so it
+        answers "sudo: hle: command not found" — leaving the operator with a
+        failure and no way forward.
+        """
+        with patch("hle_client.update_cmd.os.geteuid", return_value=1000):
+            result, _ = self._run(
+                [("hle-agent.service", False)], confirm_reply="y\ny\n", restart_ok=False
+            )
+        out = plain(result.output)
+        assert "sudo systemctl restart hle-agent.service" in out
+
+    def test_a_user_scope_failure_does_not_suggest_sudo(self):
+        """Root is not the answer for a per-user unit, and saying so misleads."""
+        with patch("hle_client.update_cmd.os.geteuid", return_value=1000):
+            result, _ = self._run(
+                [("hle-agent.service", True)], confirm_reply="y\ny\n", restart_ok=False
+            )
+        assert "sudo systemctl" not in plain(result.output)
 
     def test_no_services_explains_the_manual_case(self):
         result, restart = self._run([], confirm_reply="y\n")

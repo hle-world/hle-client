@@ -8,6 +8,7 @@ the matching upgrade. Keeps users from having to remember the install method
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -201,7 +202,7 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
         )
         return
 
-    listed = ", ".join(services)
+    listed = ", ".join(f"{svc} ({'user' if user else 'system'})" for svc, user in services)
     console.print(f"Still running the previous version: [bold]{listed}[/bold]")
     if not (yes or click.confirm(f"Restart {len(services)} service(s) now?", default=True)):
         console.print("[yellow]Left running the old version.[/yellow] Restart later with:")
@@ -209,15 +210,24 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
         return
 
     failed = []
-    for svc in services:
-        if restart_service(svc):
-            console.print(f"  [green]restarted[/green] {svc}")
+    needs_root = False
+    for svc, user_mode in services:
+        scope = "user" if user_mode else "system"
+        if restart_service(svc, user_mode):
+            console.print(f"  [green]restarted[/green] {svc} ({scope})")
         else:
-            failed.append(svc)
-            console.print(f"  [red]failed[/red] {svc}")
+            failed.append((svc, user_mode))
+            needs_root = needs_root or not user_mode
+            console.print(f"  [red]failed[/red] {svc} ({scope})")
     if failed:
         console.print(
             "[yellow]Some services did not restart.[/yellow] They are still on the old "
             "version — check 'hle service status --agent' and the service log."
         )
+        if needs_root and os.geteuid() != 0:
+            # `sudo hle service restart --all` is the obvious next thing to try
+            # and it does not work: hle lives in ~/.local/bin, which sudo's
+            # secure_path drops. Give the command that does.
+            units = " ".join(svc for svc, user_mode in failed if not user_mode)
+            console.print(f"[dim]Run: sudo systemctl restart {units}[/dim]")
         raise SystemExit(1)

@@ -857,25 +857,31 @@ def _rcd_list() -> None:
 # --------------------------------------------------------------------------- #
 # Enumerate and restart, for `hle update`
 # --------------------------------------------------------------------------- #
-def installed_services() -> list[str]:
-    """Every hle service installed on this machine, as its manager names it.
+def installed_services() -> list[tuple[str, bool]]:
+    """Every hle service installed here, as ``(name, user_mode)``.
 
     Used by ``hle update``: a client upgraded underneath a running service is
     still the old code in memory, and the only sign is a version that never
     changes. Knowing what is installed lets the upgrade offer to restart it
     instead of printing advice the user has to act on later.
+
+    The scope travels with the name because restarting needs it and because a
+    machine can carry the same unit in both. On non-systemd platforms there is
+    only one scope, so the flag is always ``False`` there.
     """
     plat = current_platform()
     if plat == "freebsd":
         if not _RCD_DIR.exists():
             return []
-        return sorted(p.name for p in _RCD_DIR.glob("hle_*"))
+        return sorted((p.name, False) for p in _RCD_DIR.glob("hle_*"))
     if plat == "darwin":
         result = subprocess.run(  # noqa: S603 — argv built internally
             ["launchctl", "list"], check=False, capture_output=True, text=True
         )
         return sorted(
-            ln.split()[-1] for ln in result.stdout.splitlines() if _LAUNCHD_LABEL_PREFIX in ln
+            (ln.split()[-1], False)
+            for ln in result.stdout.splitlines()
+            if _LAUNCHD_LABEL_PREFIX in ln
         )
     result = subprocess.run(  # noqa: S603 — argv built internally
         ["systemctl", "list-units", "--type=service", "--all", "--plain", "--no-legend", "hle-*"],
@@ -883,10 +889,13 @@ def installed_services() -> list[str]:
         capture_output=True,
         text=True,
     )
-    units = [ln.split()[0] for ln in result.stdout.splitlines() if ln.strip()]
-    if units:
-        return sorted(units)
-    # Fall back to per-user units, which a non-root install uses.
+    units = [(ln.split()[0], False) for ln in result.stdout.splitlines() if ln.strip()]
+
+    # Both scopes, not one or the other. Listing system units and stopping
+    # there hid a per-user unit of the same name — exactly the duplicate that
+    # `hle service install` now refuses to create, and the one an upgrade most
+    # needs to see, because leaving it on the old code is what makes a restart
+    # look like it worked.
     result = subprocess.run(  # noqa: S603 — argv built internally
         [
             "systemctl",
@@ -902,20 +911,42 @@ def installed_services() -> list[str]:
         capture_output=True,
         text=True,
     )
-    return sorted(ln.split()[0] for ln in result.stdout.splitlines() if ln.strip())
+    units += [(ln.split()[0], True) for ln in result.stdout.splitlines() if ln.strip()]
+    return sorted(units)
 
 
-def restart_service(name: str) -> bool:
-    """Restart one service by the name ``installed_services()`` returned."""
+def restart_service(name: str, user_mode: bool | None = None) -> bool:
+    """Restart one service, in the scope it was found in.
+
+    ``user_mode`` of ``None`` means "work it out", which is only right when the
+    caller genuinely does not know. Passing it is what stops the failure this
+    replaced: restarting a system unit without privileges returns "Access
+    denied", and the old code answered that by retrying in the *user* scope and
+    reporting whatever happened there. On a host carrying both, that restarted
+    the per-user duplicate and printed success while the system unit — the one
+    actually serving — stayed on the previous version.
+    """
     plat = current_platform()
     if plat == "freebsd":
         return _service_cmd(name, "restart").returncode == 0
     if plat == "darwin":
         domain = "system" if os.geteuid() == 0 else f"gui/{os.getuid()}"
         return _launchctl("kickstart", "-k", f"{domain}/{name}").returncode == 0
-    if _systemctl(False, "restart", name).returncode == 0:
+    if user_mode is None:
+        if _systemctl(False, "restart", name).returncode == 0:
+            return True
+        return _systemctl(True, "restart", name).returncode == 0
+    if _systemctl(user_mode, "restart", name).returncode == 0:
         return True
-    return _systemctl(True, "restart", name).returncode == 0
+    if not user_mode and os.geteuid() != 0:
+        # The usual cause, and `sudo hle ...` is not the answer: hle lives in
+        # ~/.local/bin, which sudo's secure_path drops, so it answers "command
+        # not found". Name the command that does work.
+        console.print(
+            f"[dim]        {name} is a system unit — restart it with:\n"
+            f"          sudo systemctl restart {name}[/dim]"
+        )
+    return False
 
 
 def _resolve_label(label: str | None, agent_mode: bool, *, extra_hint: str = "") -> str:
@@ -1230,10 +1261,16 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
         if not services:
             console.print("No hle services installed.")
             return
-        failed = [svc for svc in services if not restart_service(svc)]
-        for svc in services:
-            mark = "[red]failed[/red]" if svc in failed else "[green]restarted[/green]"
-            console.print(f"{svc}: {mark}")
+        failed: list[str] = []
+        for svc, user_mode in services:
+            scope = "user" if user_mode else "system"
+            if restart_service(svc, user_mode):
+                console.print(f"{svc} ({scope}): [green]restarted[/green]")
+            else:
+                # Named by scope, because a host can carry both and "failed"
+                # against a bare unit name does not say which one.
+                console.print(f"{svc} ({scope}): [red]failed[/red]")
+                failed.append(f"{svc} ({scope})")
         if failed:
             raise SystemExit(1)
         return
