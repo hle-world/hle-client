@@ -1,3 +1,3 @@
 """HLE Client — HomeLab Everywhere tunnel client."""
 
-__version__ = "2609.1"
+__version__ = "2609.2"
