@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
+from hle_client import service_cmd
 from hle_client.service_cmd import (
     AGENT_LABEL,
     build_agent_args,
@@ -331,3 +333,95 @@ class TestRestartWithoutATarget:
         # Proves the hint is per-command, and that we got past the platform gate.
         assert "--label is required" in out
         assert "--all" not in out
+
+
+class TestDuplicateScopeInstall:
+    """Installing a unit that is already live in the other systemd scope.
+
+    A per-user agent installed alongside a system-wide one gives two copies
+    running on the same credentials. Both register the same endpoints, the
+    relay hands each label to whichever connected most recently, and the two
+    evict each other about once a second. Observed in the wild: a system unit
+    from August, a user unit added in September, and a tunnel that reconnected
+    every 1.4s for a day with nothing on the host looking wrong.
+    """
+
+    @staticmethod
+    def _install(tmp_path, monkeypatch, *, user_mode: bool, existing: str | None):
+        """Attempt an install, having optionally planted a unit in the other scope."""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+        system_dir.mkdir(parents=True)
+        user_dir.mkdir(parents=True)
+
+        monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", system_dir)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
+        monkeypatch.setattr(service_cmd, "_systemctl", lambda *a, **k: None)
+
+        uname = unit_name(AGENT_LABEL, None)
+        if existing == "system":
+            (system_dir / uname).write_text("[Unit]\n")
+        elif existing == "user":
+            (user_dir / uname).write_text("[Unit]\n")
+
+        return service_cmd._systemd_install(
+            label=AGENT_LABEL,
+            run_args=["agent", "run"],
+            name=None,
+            user_mode=user_mode,
+            run_as=None,
+            start=False,
+        )
+
+    def test_user_install_refuses_when_a_system_unit_exists(self, tmp_path, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            self._install(tmp_path, monkeypatch, user_mode=True, existing="system")
+        assert excinfo.value.code == 1
+
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "already installed system-wide" in out
+        assert "fight each other" in out
+        # And says exactly which command clears it.
+        assert "hle service uninstall --label agent" in out
+
+    def test_system_install_refuses_when_a_user_unit_exists(self, tmp_path, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as excinfo:
+            self._install(tmp_path, monkeypatch, user_mode=False, existing="user")
+        assert excinfo.value.code == 1
+
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "already installed per-user" in out
+        assert "hle service uninstall --user --label agent" in out
+
+    def test_a_clean_host_still_installs(self, tmp_path, monkeypatch):
+        """The guard must only fire on a genuine cross-scope duplicate."""
+        self._install(tmp_path, monkeypatch, user_mode=True, existing=None)
+        written = tmp_path / "home" / ".config" / "systemd" / "user" / unit_name(AGENT_LABEL, None)
+        assert written.exists()
+
+    def test_reinstalling_in_the_same_scope_is_still_allowed(self, tmp_path, monkeypatch):
+        """Overwriting your own unit is an upgrade, not a duplicate."""
+        self._install(tmp_path, monkeypatch, user_mode=True, existing="user")
+        written = tmp_path / "home" / ".config" / "systemd" / "user" / unit_name(AGENT_LABEL, None)
+        assert "ExecStart" in written.read_text()
+
+    def test_asking_the_question_does_not_create_the_user_directory(self, tmp_path, monkeypatch):
+        """A system install must not leave a stray ~/.config/systemd/user behind."""
+        system_dir = tmp_path / "system"
+        system_dir.mkdir(parents=True)
+        monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", system_dir)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
+        monkeypatch.setattr(service_cmd, "_systemctl", lambda *a, **k: None)
+
+        service_cmd._systemd_install(
+            label=AGENT_LABEL,
+            run_args=["agent", "run"],
+            name=None,
+            user_mode=False,
+            run_as=None,
+            start=False,
+        )
+
+        assert not (tmp_path / "home" / ".config" / "systemd" / "user").exists()
