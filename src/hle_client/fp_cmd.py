@@ -164,6 +164,60 @@ def _build_forwards(
     return forwards
 
 
+def _looks_like_target(value: str) -> bool:
+    """Whether *value* could be a forward target rather than a command word.
+
+    Used only to find where the targets stop and a trailing command starts.
+    ``parse_target`` is still what validates the ones that are kept, so this
+    can be permissive without letting a bad target through.
+    """
+    try:
+        parse_target(value)
+    except click.BadParameter:
+        return False
+    return True
+
+
+def _split_positionals(
+    agent: str | None,
+    targets: tuple[str, ...],
+    command: tuple[str, ...],
+) -> tuple[str | None, tuple[str, ...], tuple[str, ...]]:
+    """Read `hle forward <agent> <target>...` out of the trailing arguments.
+
+    The command already collects everything after its options so that
+    ``-- ssh ...`` can be passed through untouched, which means the positional
+    agent and targets arrive in the same bucket. They are whatever precedes
+    the ``--`` separator; anything after it is the command to run.
+
+    Explicit ``--agent`` / ``--to`` win, so the old form is unaffected: if both
+    were given, every positional is part of the command.
+    """
+    if agent and targets:
+        return agent, targets, command
+
+    leading: list[str] = []
+    rest: list[str] = list(command)
+    if not agent and rest and rest[0] != "--":
+        leading.append(rest.pop(0))
+    # `--` cannot be relied on to still be here: with ignore_unknown_options,
+    # Click drops it unless the next token looks like an option, so
+    # `hle forward rpi 22 -- ssh me@host` arrives with no separator at all.
+    # A target has a recognisable shape (a bare port, or host:port); the first
+    # argument that does not have it is where the command begins.
+    while rest and rest[0] != "--" and _looks_like_target(rest[0]):
+        leading.append(rest.pop(0))
+
+    if not leading:
+        return agent, targets, tuple(rest)
+
+    if not agent:
+        agent = leading.pop(0)
+    if leading:
+        targets = (*targets, *leading)
+    return agent, targets, tuple(rest)
+
+
 def _resolve_command(command: tuple[str, ...], forwards: list[Forward]) -> list[str] | None:
     """Substitute ``{port}`` / ``{portN}`` in the command to run, if there is one.
 
@@ -489,11 +543,10 @@ async def _read_loop(ws: websockets.ClientConnection, client: FpLocalClient) -> 
     "fp",
     context_settings={"ignore_unknown_options": True},
 )
-@click.option("--agent", required=True, help="Agent name or id to forward through")
+@click.option("--agent", default=None, help="Agent to forward through (or the first argument)")
 @click.option(
     "--to",
     "targets",
-    required=True,
     multiple=True,
     metavar="HOST:PORT",
     help="Target as seen by the agent (e.g. localhost:22, or just 22). Repeatable.",
@@ -522,7 +575,7 @@ async def _read_loop(ws: websockets.ClientConnection, client: FpLocalClient) -> 
 @click.option("--relay-port", default=443, type=int, help="Relay port")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
 def fp(
-    agent: str,
+    agent: str | None,
     targets: tuple[str, ...],
     bind_ports: tuple[int, ...],
     bind_host: str,
@@ -533,16 +586,20 @@ def fp(
 ) -> None:
     """Forward TCP ports from a remote agent to this machine.
 
+    AGENT is the agent to reach through; each TARGET is a port or HOST:PORT as
+    the agent sees it. Both were required flags; a flag you must always pass is
+    an argument wearing a costume. `--agent` and `--to` still work.
+
     \b
     Examples:
-      hle fp --agent rpi --to 22 --port 9922       # then: ssh -p 9922 root@localhost
-      hle fp --agent nas --to 192.168.1.50:5432    # postgres on the agent's LAN
-      hle fp --agent rpi --to 22 --to nas:445      # two forwards, one command
+      hle forward rpi 22 --port 9922        # then: ssh -p 9922 root@localhost
+      hle forward nas 192.168.1.50:5432     # postgres on the agent's LAN
+      hle forward rpi 22 nas:445            # two forwards, one command
 
     \b
     Run a command and tear the forwards down when it exits:
-      hle fp --agent rpi --to 22 -- ssh -p '{port}' me@127.0.0.1
-      hle fp --agent rpi --to 22 --to 5432 -- ./backup.sh
+      hle forward rpi 22 -- ssh -p '{port}' me@127.0.0.1
+      hle forward rpi 22 5432 -- ./backup.sh
 
     \b
     In the command, {port} is the first local port and {port1}, {port2}, ...
@@ -554,6 +611,18 @@ def fp(
     agent is attached to — its LAN, Docker, Kubernetes, any VPN — but not the
     public internet; widen or narrow it per agent in the dashboard.
     """
+    agent, targets, command = _split_positionals(agent, targets, command)
+    if not agent:
+        raise click.UsageError(
+            "No agent given. Name it first: hle forward <agent> <target>\n"
+            "Run 'hle agent list' to see the agents on your account."
+        )
+    if not targets:
+        raise click.UsageError(
+            f"No target given. hle forward {agent} <port|host:port>\n"
+            "The target is a port on the agent's side, e.g. 22 or 192.168.1.50:5432."
+        )
+
     forwards = _build_forwards(targets, bind_ports, bind_host)
 
     key = api_key or _load_api_key()

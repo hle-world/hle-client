@@ -257,7 +257,12 @@ def expose(
         console.print("[red]Error:[/red] --apex requires --zone (e.g. --zone t00t.us).")
         raise SystemExit(1)
     if not apex and not service_label:
-        console.print("[red]Error:[/red] --label is required (or use --apex with --zone).")
+        # Names the form being taught, not the flag it replaced.
+        console.print(
+            "[red]Error:[/red] a label is required — it names the tunnel.\n"
+            "         [cyan]hle tunnel create <label> <url>[/cyan]  "
+            "(or use --apex with --zone to serve a bare zone root)."
+        )
         raise SystemExit(1)
 
     upstream_auth_tuple: tuple[str, str] | None = None
@@ -505,8 +510,12 @@ def logout() -> None:
 
 
 @click.command("create")
-@click.argument("label", required=False)
-@click.argument("url")
+# Declared as two plain arguments and sorted out below. Click fills an
+# optional argument before a required one, so `[LABEL] URL` made
+# `hle tunnel create http://localhost:8080` fail with "Missing argument URL" —
+# the label-less form the docs have always shown, and the one --apex needs.
+@click.argument("first", metavar="[LABEL] URL")
+@click.argument("second", required=False, metavar="")
 @click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
 @click.option("--zone", default=None, help="Custom zone to publish under (e.g. t00t.us).")
 @click.option(
@@ -525,7 +534,7 @@ def logout() -> None:
 @click.option("--forward-host", is_flag=True, default=False, help="Forward the browser's Host.")
 @click.option("--allow", multiple=True, metavar="[PROVIDER:]EMAIL", help="Allow an email via SSO.")
 @click.pass_context
-def tunnel_create(ctx: click.Context, /, label: str | None, url: str, **kwargs: Any) -> None:
+def tunnel_create(ctx: click.Context, /, first: str, second: str | None, **kwargs: Any) -> None:
     """Expose a local service to the internet.
 
     LABEL is the name the tunnel is published under; URL is the local service.
@@ -539,6 +548,7 @@ def tunnel_create(ctx: click.Context, /, label: str | None, url: str, **kwargs: 
       hle tunnel create jellyfin http://192.168.1.10:8096 --allow you@example.com
       hle tunnel create --apex --zone t00t.us http://localhost:3000
     """
+    label, url = (first, second) if second is not None else (None, first)
     kwargs["api_key"] = api_key_from_ctx(ctx, kwargs.get("api_key"))
     ctx.invoke(expose, service=url, service_label=label, **kwargs)
 

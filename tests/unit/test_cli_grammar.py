@@ -12,6 +12,8 @@ years of support answers are written against them.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import click
 import pytest
 from click.testing import CliRunner
@@ -75,11 +77,35 @@ class TestDeprecationNotice:
 class TestTunnelIsANoun:
     """The central object had no name; `config` was doing duty for it."""
 
-    def test_create_takes_a_label_and_a_url_as_arguments(self):
-        tunnel = main.commands["tunnel"]
-        create = tunnel.commands["create"]
-        params = [p.name for p in create.params if isinstance(p, click.Argument)]
-        assert params == ["label", "url"]
+    def test_create_takes_its_label_and_url_as_arguments(self):
+        """Not as required flags. `--service X --label ha` was the long way."""
+        create = main.commands["tunnel"].commands["create"]
+        args = [p for p in create.params if isinstance(p, click.Argument)]
+        assert len(args) == 2
+        assert "[LABEL] URL" in create.collect_usage_pieces(click.Context(create))
+
+    def test_a_url_on_its_own_is_read_as_the_url(self):
+        """Click fills an optional argument before a required one.
+
+        Declared as `[LABEL] URL`, `hle tunnel create http://localhost:8080`
+        failed with "Missing argument URL" — the label-less form the docs have
+        always shown, and the one --apex needs.
+        """
+        from hle_client.cli import expose
+
+        with patch.object(expose, "callback") as impl:
+            result = CliRunner().invoke(main, ["tunnel", "create", "http://localhost:8080"])
+        assert result.exit_code == 0, result.output
+        assert impl.call_args.kwargs["service"] == "http://localhost:8080"
+        assert impl.call_args.kwargs["service_label"] is None
+
+    def test_two_arguments_are_label_then_url(self):
+        from hle_client.cli import expose
+
+        with patch.object(expose, "callback") as impl:
+            CliRunner().invoke(main, ["tunnel", "create", "ha", "http://localhost:8123"])
+        assert impl.call_args.kwargs["service_label"] == "ha"
+        assert impl.call_args.kwargs["service"] == "http://localhost:8123"
 
     @pytest.mark.parametrize("verb", ["create", "list", "get", "delete", "webhook", "preflight"])
     def test_the_verbs_live_under_the_noun(self, verb):
