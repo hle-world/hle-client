@@ -556,6 +556,106 @@ class TestAgentList:
         assert result.exit_code == 0
         assert "No agents yet" in result.output
 
+    def test_on_an_agent_host_it_says_why_the_token_it_has_is_not_enough(self) -> None:
+        """ "No API key" on a machine that is plainly set up reads as broken.
+
+        Reported from an enrolled host: `hle agent list` answered "No API key.
+        Run hle auth login first." while the machine was happily running an
+        agent. It has a credential — just not one allowed to read account data,
+        and nothing said so.
+        """
+        runner = CliRunner()
+        with (
+            patch("hle_client.cli._load_api_key", return_value=None),
+            patch("hle_client.cli.load_agent_token", return_value="hlea_something"),
+        ):
+            result = runner.invoke(main, ["agent", "list"])
+
+        assert result.exit_code == 1
+        out = " ".join(result.output.split())
+        assert "enrolled as an agent" in out
+        assert "cannot read your account" in out
+        # And points at the command that does work here.
+        assert "hle agent status" in out
+
+    def test_without_an_agent_token_the_message_stays_short(self) -> None:
+        """No agent on this machine means there is nothing extra to explain."""
+        runner = CliRunner()
+        with (
+            patch("hle_client.cli._load_api_key", return_value=None),
+            patch("hle_client.cli.load_agent_token", return_value=None),
+        ):
+            result = runner.invoke(main, ["agent", "list"])
+
+        assert result.exit_code == 1
+        assert "enrolled as an agent" not in result.output
+
+    def test_it_reads_the_env_var_its_help_promises(self, monkeypatch) -> None:
+        """The help said "else env/config" and only ever read config.
+
+        Found on a host whose API key lives in a systemd EnvironmentFile:
+        exporting HLE_API_KEY and running this still answered "No API key",
+        because the option never declared `envvar`.
+        """
+        monkeypatch.setenv("HLE_API_KEY", _KEY)
+        runner = CliRunner()
+        mock_client = AsyncMock()
+        mock_client.list_agents.return_value = []
+        with (
+            patch("hle_client.cli._load_api_key", return_value=None),
+            patch("hle_client.api.ApiClient", return_value=mock_client),
+        ):
+            result = runner.invoke(main, ["agent", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert "No API key" not in result.output
+
+    def test_a_401_prints_what_the_relay_said(self, monkeypatch) -> None:
+        """The relay knows which credential arrived; the client just relays it.
+
+        Seen in the field: `/etc/hle/otsiasi.env` set HLE_API_KEY to an `hlea_`
+        enrollment token. The tunnel it was installed for ran happily for weeks
+        while this command answered "API key rejected. Run hle auth login." —
+        advice that could not have helped. The explanation lives on the relay
+        so an already-installed client gets it without upgrading.
+        """
+        import httpx
+
+        request = httpx.Request("GET", "https://hle.world/api/agents")
+        response = httpx.Response(
+            401,
+            json={"detail": "That is an agent enrollment token, not an API key."},
+            request=request,
+        )
+        mock_client = AsyncMock()
+        mock_client.list_agents.side_effect = httpx.HTTPStatusError(
+            "401", request=request, response=response
+        )
+        runner = CliRunner()
+        with patch("hle_client.api.ApiClient", return_value=mock_client):
+            result = runner.invoke(main, ["agent", "list", "--api-key", _KEY])
+
+        out = " ".join(result.output.split())
+        assert result.exit_code == 1
+        assert "agent enrollment token, not an API key" in out
+
+    def test_a_401_without_a_detail_still_says_something(self, monkeypatch) -> None:
+        """An older relay, or an unparseable body, must not print an empty error."""
+        import httpx
+
+        request = httpx.Request("GET", "https://hle.world/api/agents")
+        response = httpx.Response(401, content=b"nope", request=request)
+        mock_client = AsyncMock()
+        mock_client.list_agents.side_effect = httpx.HTTPStatusError(
+            "401", request=request, response=response
+        )
+        runner = CliRunner()
+        with patch("hle_client.api.ApiClient", return_value=mock_client):
+            result = runner.invoke(main, ["agent", "list", "--api-key", _KEY])
+
+        assert result.exit_code == 1
+        assert "API key rejected" in result.output
+
     def test_json_output_is_machine_readable(self) -> None:
         import json
 

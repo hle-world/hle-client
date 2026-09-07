@@ -54,6 +54,21 @@ def main(debug: bool) -> None:
 _VALID_AUTH_PROVIDERS = {"any", "google", "github", "hle"}
 
 
+def _server_detail(exc: Any) -> str | None:
+    """The relay's own explanation for a failed request, if it gave one.
+
+    Preferring it to a message composed here keeps the reasoning on the side
+    that can be updated: the relay knows which credential arrived and why it
+    was refused, and a client installed months ago gets the better wording the
+    moment the relay is deployed.
+    """
+    try:
+        detail = exc.response.json().get("detail")
+    except Exception:  # noqa: BLE001 — an unparseable body is just "no detail"
+        return None
+    return str(detail) if detail else None
+
+
 def _parse_auth_spec(spec: str) -> tuple[str, str]:
     """Parse ``[provider:]email`` into ``(provider, email)``."""
     if ":" in spec:
@@ -526,7 +541,13 @@ def agent_status() -> None:
 
 
 @agent.command("list")
-@click.option("--api-key", "api_key", default=None, help="API key (else env/config)")
+@click.option(
+    "--api-key",
+    "api_key",
+    default=None,
+    envvar="HLE_API_KEY",
+    help="API key (also reads HLE_API_KEY env var, then ~/.config/hle/config.toml)",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output")
 def agent_list(api_key: str | None, as_json: bool) -> None:
     """List the agents on your account, and whether they're online.
@@ -544,6 +565,18 @@ def agent_list(api_key: str | None, as_json: bool) -> None:
     key = api_key or _load_api_key()
     if not key:
         console.print("[red]Error:[/red] No API key. Run [cyan]hle auth login[/cyan] first.")
+        # "No API key" on a machine that plainly *is* set up reads as a broken
+        # install. It has a credential — just not one that may read account
+        # data. An agent token authenticates carrying traffic; letting it list
+        # an account's agents would make a data-plane secret an account secret.
+        if load_agent_token():
+            console.print(
+                "[dim]This machine is enrolled as an agent, but an agent token cannot "
+                "read your account — it only authorises the tunnels it carries.\n"
+                "Log in here, or run this from a machine where you already have.\n"
+                "To check the agent on this machine instead: "
+                "[cyan]hle agent status[/cyan][/dim]"
+            )
         raise SystemExit(1)
 
     async def _fetch() -> list[dict[str, Any]]:
@@ -554,7 +587,13 @@ def agent_list(api_key: str | None, as_json: bool) -> None:
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         if status == 401:
-            console.print("[red]Error:[/red] API key rejected. Run [cyan]hle auth login[/cyan].")
+            # Print what the relay said rather than a guess made here. It knows
+            # which credential arrived and why it was refused — an agent token
+            # is a valid credential of the wrong kind, and "API key rejected,
+            # run hle auth login" is advice that cannot help. Keeping the
+            # explanation server-side also means it improves for clients that
+            # are already installed.
+            console.print(f"[red]Error:[/red] {_server_detail(exc) or 'API key rejected.'}")
         elif status == 404:
             # The endpoint 404s (rather than 403s) when the feature flag is off.
             console.print("[yellow]Agents are not enabled on this server.[/yellow]")
