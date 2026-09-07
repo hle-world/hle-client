@@ -120,16 +120,6 @@ class ApiClient:
             result: list[dict[str, Any]] = resp.json()
             return result
 
-    async def disconnect_tunnel(self, tunnel_id: str) -> dict[str, Any]:
-        """Drop a live tunnel's connection, leaving its record in place."""
-        async with httpx.AsyncClient() as client:
-            resp = await client.delete(
-                f"{self._base_url}/api/tunnels/{tunnel_id}",
-                headers=self._headers,
-            )
-            resp.raise_for_status()
-            return {"message": "ok"}
-
     async def delete_tunnel_record(self, tunnel_id: str) -> dict[str, Any]:
         """Delete a tunnel's stored record.
 

@@ -296,72 +296,27 @@ def list_cmd(ctx: click.Context, api_key: str | None) -> None:
     asyncio.run(_run())
 
 
-@config.command("stop")
-@click.argument("label")
-@_api_key_option
-@click.pass_context
-def stop_cmd(ctx: click.Context, label: str, api_key: str | None) -> None:
-    """Disconnect a tunnel, keeping its record and access rules.
-
-    The docs have told people to run `hle stop <label>` for a long time, and
-    there has never been such a command — the relay could do it, nothing
-    exposed it. Use this to take a published host offline without losing the
-    rules that protect it; `hle tunnel delete` is the one that forgets.
-
-    \b
-    Example:
-      hle tunnel stop ha
-    """
-    out = from_ctx(ctx)
-    key = api_key_from_ctx(ctx, api_key)
-
-    async def _run() -> None:
-        api = _client(key)
-        subdomain = await _resolve_subdomain(api, label)
-        try:
-            tunnels = await api.list_tunnels()
-        except Exception as exc:
-            _handle_exc(exc, subdomain)
-
-        match = next((t for t in tunnels if t.get("subdomain") == subdomain), None)
-        if match is None or not match.get("is_active"):
-            out.print(f"[dim]{subdomain} is not connected.[/dim]")
-            return
-        try:
-            await api.disconnect_tunnel(str(match.get("tunnel_id")))
-        except Exception as exc:
-            _handle_exc(exc, subdomain)
-
-        if out.json_mode:
-            out.data({"subdomain": subdomain, "stopped": True})
-            return
-        out.print(f"[green]Stopped[/green] {subdomain}")
-
-    asyncio.run(_run())
-
-
 @config.command("delete")
 @click.argument("label")
-@click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Disconnect the tunnel first if it is live.",
-)
 @click.option("--yes", "-y", is_flag=True, default=False, help="Do not ask for confirmation.")
 @_api_key_option
 @click.pass_context
-def delete_cmd(ctx: click.Context, label: str, force: bool, yes: bool, api_key: str | None) -> None:
+def delete_cmd(ctx: click.Context, label: str, yes: bool, api_key: str | None) -> None:
     """Delete a tunnel's record.
 
     Creating without deleting was the gap people hit first: a tunnel could be
     published but never taken back, and its access rules outlived any memory
     of it.
 
+    A live tunnel is refused rather than disconnected first. Asking the relay
+    to drop the connection does not stop anything — the close it sends is not
+    fatal, so the client reconnects — and deleting the record out from under a
+    connection that is about to come back is a race, not a feature. Stop the
+    client instead.
+
     \b
     Example:
       hle tunnel delete ha
-      hle tunnel delete ha --force     # drop the live connection first
     """
     out = from_ctx(ctx)
     key = api_key_from_ctx(ctx, api_key)
@@ -394,15 +349,11 @@ def delete_cmd(ctx: click.Context, label: str, force: bool, yes: bool, api_key: 
             )
 
         if match.get("is_active"):
-            if not force:
-                raise click.ClickException(
-                    f"{subdomain} is connected. Stop the client, or pass --force to "
-                    "disconnect it first."
-                )
-            try:
-                await api.disconnect_tunnel(str(tunnel_id))
-            except Exception as exc:
-                _handle_exc(exc, subdomain)
+            raise click.ClickException(
+                f"{subdomain} is connected — stop it before deleting its record.\n"
+                "  Foreground:  Ctrl-C the 'hle tunnel create' that is running it.\n"
+                "  As a service: hle daemon list, then hle daemon uninstall --label <label>."
+            )
 
         try:
             await api.delete_tunnel_record(str(tunnel_id))
