@@ -14,9 +14,9 @@ import sys
 from pathlib import Path
 
 import click
-from rich.console import Console
 
 from hle_client import __version__
+from hle_client.richcompat import Console
 
 console = Console()
 

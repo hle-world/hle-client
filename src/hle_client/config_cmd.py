@@ -14,10 +14,11 @@ from typing import Any, TypeVar
 
 import click
 import httpx
-from rich.console import Console
-from rich.table import Table
 
+from hle_client.aliases import AliasedGroup
 from hle_client.api import ApiClient, ApiClientConfig
+from hle_client.output import api_key_from_ctx, from_ctx
+from hle_client.richcompat import Console, Table
 
 console = Console()
 
@@ -202,27 +203,48 @@ def _print_status(status: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@click.group()
+@click.group(cls=AliasedGroup, aliases={"show": "get"})
 def config() -> None:
-    """Configure tunnels (auth mode, access, pin, basic-auth, share)."""
+    """Create, inspect and secure tunnels.
+
+    \b
+    Examples:
+      hle tunnel create ha http://localhost:8123   Run a tunnel
+      hle tunnel list                              What is published
+      hle tunnel get ha                            One tunnel, in full
+      hle tunnel access add ha you@example.com     Let someone in
+      hle tunnel delete ha                         Remove the record
+    """
 
 
-# ---- show / list ----------------------------------------------------------
+# ---- get / list -----------------------------------------------------------
 
 
-@config.command("show")
+@config.command("get")
 @click.argument("label")
 @_api_key_option
-def show_cmd(label: str, api_key: str | None) -> None:
-    """Show full configuration and live state for a tunnel."""
+@click.pass_context
+def show_cmd(ctx: click.Context, label: str, api_key: str | None) -> None:
+    """Show full configuration and live state for a tunnel.
+
+    \b
+    Example:
+      hle tunnel get ha
+      hle tunnel get ha -o json
+    """
+    out = from_ctx(ctx)
+    key = api_key_from_ctx(ctx, api_key)
 
     async def _run() -> None:
-        api = _client(api_key)
+        api = _client(key)
         subdomain = await _resolve_subdomain(api, label)
         try:
             status = await api.get_tunnel_status(subdomain)
         except Exception as exc:
             _handle_exc(exc, subdomain)
+        if out.json_mode:
+            out.data(status)
+            return
         _print_status(status)
 
     asyncio.run(_run())
@@ -230,15 +252,28 @@ def show_cmd(label: str, api_key: str | None) -> None:
 
 @config.command("list")
 @_api_key_option
-def list_cmd(api_key: str | None) -> None:
-    """List active tunnels for your account."""
+@click.pass_context
+def list_cmd(ctx: click.Context, api_key: str | None) -> None:
+    """List active tunnels for your account.
+
+    \b
+    Example:
+      hle tunnel list
+      hle tunnel list -o json | jq '.[].subdomain'
+    """
+    out = from_ctx(ctx)
+    key = api_key_from_ctx(ctx, api_key)
 
     async def _run() -> None:
-        api = _client(api_key)
+        api = _client(key)
         try:
             tunnel_list = await api.list_tunnels()
         except Exception as exc:
             _handle_exc(exc)
+
+        if out.json_mode:
+            out.data(tunnel_list)
+            return
 
         if not tunnel_list:
             console.print("[dim]No active tunnels.[/dim]")
@@ -257,6 +292,83 @@ def list_cmd(api_key: str | None) -> None:
                 t.get("connected_at", ""),
             )
         console.print(table)
+
+    asyncio.run(_run())
+
+
+@config.command("delete")
+@click.argument("label")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Disconnect the tunnel first if it is live.",
+)
+@click.option("--yes", "-y", is_flag=True, default=False, help="Do not ask for confirmation.")
+@_api_key_option
+@click.pass_context
+def delete_cmd(ctx: click.Context, label: str, force: bool, yes: bool, api_key: str | None) -> None:
+    """Delete a tunnel's record.
+
+    Creating without deleting was the gap people hit first: a tunnel could be
+    published but never taken back, and its access rules outlived any memory
+    of it.
+
+    \b
+    Example:
+      hle tunnel delete ha
+      hle tunnel delete ha --force     # drop the live connection first
+    """
+    out = from_ctx(ctx)
+    key = api_key_from_ctx(ctx, api_key)
+    no_input = bool((ctx.obj or {}).get("no_input")) if isinstance(ctx.obj, dict) else False
+
+    async def _run() -> None:
+        api = _client(key)
+        subdomain = await _resolve_subdomain(api, label)
+        try:
+            tunnels = await api.list_tunnels()
+        except Exception as exc:
+            _handle_exc(exc, subdomain)
+
+        match = next((t for t in tunnels if t.get("subdomain") == subdomain), None)
+        if match is None:
+            raise click.ClickException(
+                f"No tunnel named {subdomain!r}. Run 'hle tunnel list' to see what exists."
+            )
+        tunnel_id = match.get("tunnel_id")
+        if not tunnel_id:
+            raise click.ClickException(f"The relay returned no id for {subdomain!r}.")
+
+        if not yes and not no_input:
+            # Deleting takes the access rules with it, which is the part that
+            # is not obvious and not recoverable.
+            click.confirm(
+                f"Delete {subdomain} and its access rules?",
+                default=False,
+                abort=True,
+            )
+
+        if match.get("is_active"):
+            if not force:
+                raise click.ClickException(
+                    f"{subdomain} is connected. Stop the client, or pass --force to "
+                    "disconnect it first."
+                )
+            try:
+                await api.disconnect_tunnel(str(tunnel_id))
+            except Exception as exc:
+                _handle_exc(exc, subdomain)
+
+        try:
+            await api.delete_tunnel_record(str(tunnel_id))
+        except Exception as exc:
+            _handle_exc(exc, subdomain)
+
+        if out.json_mode:
+            out.data({"subdomain": subdomain, "deleted": True})
+            return
+        out.print(f"[green]Deleted[/green] {subdomain}")
 
     asyncio.run(_run())
 

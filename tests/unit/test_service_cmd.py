@@ -290,8 +290,27 @@ class TestServiceWiring:
     def test_registered_on_cli(self):
         from hle_client.cli import main
 
-        assert "service" in main.commands
-        assert "install" in main.commands["service"].commands
+        assert "daemon" in main.commands
+        assert "install" in main.commands["daemon"].commands
+
+    def test_the_old_name_still_resolves(self):
+        """`hle service ...` is in units, scripts and every answer ever given.
+
+        The name moved to `daemon` because "service" meant three unrelated
+        things; that is not a reason to break a machine that already runs it.
+        """
+        import click
+
+        from hle_client.cli import main
+
+        ctx = click.Context(main)
+        assert main.get_command(ctx, "service") is main.commands["daemon"]
+
+    def test_the_old_name_is_not_advertised(self):
+        """Hidden, so what gets taught is one grammar."""
+        from hle_client.cli import main
+
+        assert "service" not in main.commands
 
 
 class TestRestartWithoutATarget:

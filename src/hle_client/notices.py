@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from rich.console import Console
+from hle_client.richcompat import Console
 
 if TYPE_CHECKING:
     from hle_common.protocol import NoticePayload

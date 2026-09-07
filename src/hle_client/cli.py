@@ -6,14 +6,14 @@ import asyncio
 import logging
 import os
 import re
+import sys
 import webbrowser
 from datetime import UTC
 from typing import Any
 
 import click
-from rich.console import Console
 
-from hle_client import __version__
+from hle_client import __version__, plugins
 from hle_client.agent import (
     AGENT_TOKEN_PREFIX,
     AgentClient,
@@ -21,9 +21,12 @@ from hle_client.agent import (
     remove_agent_token,
     save_agent_token,
 )
+from hle_client.aliases import RootGroup
 from hle_client.config_cmd import config as config_group
 from hle_client.credentials import normalize_credential_env
 from hle_client.fp_cmd import fp as fp_command
+from hle_client.output import OUTPUT_FORMATS, TABLE, Output, api_key_from_ctx
+from hle_client.richcompat import Console
 from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import (
     Tunnel,
@@ -42,22 +45,91 @@ err_console = Console(stderr=True)
 logger = logging.getLogger(__name__)
 
 
-@click.group()
+# Every old spelling, pointing at what replaced it. These resolve and work;
+# they are simply not listed in --help, so what gets taught is one grammar.
+LEGACY_ALIASES = {
+    "config": "tunnel",
+    "service": "daemon",
+    "fp": "forward",
+}
+
+
+@click.group(cls=RootGroup, aliases=LEGACY_ALIASES)
 @click.version_option(version=__version__, prog_name="hle")
 @click.option("--debug", is_flag=True, default=False, help="Enable debug logging")
-def main(debug: bool) -> None:
-    """HomeLab Everywhere — Expose homelab services to the internet with built-in SSO."""
+@click.option(
+    "--api-key",
+    "root_api_key",
+    default=None,
+    envvar="HLE_API_KEY",
+    help="API key. Also read from HLE_API_KEY, then ~/.config/hle/config.toml.",
+)
+@click.option(
+    "-o",
+    "--output",
+    "output_format",
+    type=click.Choice(OUTPUT_FORMATS),
+    default=TABLE,
+    help="Output format. 'json' prints the resource and nothing else.",
+)
+@click.option("-q", "--quiet", is_flag=True, default=False, help="Only print errors.")
+@click.option("--no-color", is_flag=True, default=False, help="Disable colour (also NO_COLOR=1).")
+@click.option(
+    "--no-input",
+    is_flag=True,
+    default=False,
+    help="Never prompt; fail instead. For scripts and unattended runs.",
+)
+@click.pass_context
+def main(
+    ctx: click.Context,
+    debug: bool,
+    root_api_key: str | None,
+    output_format: str,
+    quiet: bool,
+    no_color: bool,
+    no_input: bool,
+) -> None:
+    """HomeLab Everywhere — expose homelab services to the internet with built-in SSO.
+
+    \b
+    Get started:
+      hle auth login                              Save your API key
+      hle tunnel create ha http://localhost:8123  Expose a service
+      hle status                                  What is running on this machine
+
+    \b
+    Every command that reads a resource accepts -o json.
+    """
     level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
+    if not debug:
+        # httpx narrates every request at INFO, so `hle status` opened with two
+        # lines of HTTP log before saying anything a person asked for. Someone
+        # debugging still gets them; nobody else has to read them.
+        for noisy in ("httpx", "httpcore", "websockets"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # Runs before the subcommand's own options are resolved, so a token moved
     # here is visible to every `envvar=` lookup below it.
     notice = normalize_credential_env()
     if notice:
         err_console.print(f"[dim]{notice}[/dim]")
+
+    # Declared once here rather than on each leaf. A subcommand's own --api-key
+    # still wins; this is the fallback every one of them shares.
+    ctx.ensure_object(dict)
+    ctx.obj["api_key"] = root_api_key
+    ctx.obj["no_input"] = no_input
+    ctx.obj["output"] = Output(
+        fmt=output_format,
+        color=False if no_color else None,
+        quiet=quiet,
+    )
 
 
 _VALID_AUTH_PROVIDERS = {"any", "google", "github", "hle"}
@@ -92,7 +164,7 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--service", required=True, help="Local service URL (e.g. http://localhost:8080)")
 @click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
 @click.option(
@@ -268,7 +340,7 @@ def expose(
 # ---------------------------------------------------------------------------
 
 
-@main.command()
+@main.command(hidden=True)
 @click.option("--path", required=True, help="Webhook path (e.g. /webhook/github)")
 @click.option("--forward-to", required=True, help="Local URL to forward webhooks to")
 @click.option("--label", "service_label", required=True, help="Webhook label (e.g. github-hook)")
@@ -397,13 +469,62 @@ def logout() -> None:
         console.print("[dim]No API key saved in config file.[/dim]")
 
 
-main.add_command(config_group, name="config")
+@click.command("create")
+@click.argument("label", required=False)
+@click.argument("url")
+@click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
+@click.option("--zone", default=None, help="Custom zone to publish under (e.g. t00t.us).")
+@click.option(
+    "--apex",
+    is_flag=True,
+    default=False,
+    help="Serve at the bare zone root instead of a subdomain. Requires --zone.",
+)
+@click.option("--option", "options", multiple=True, metavar="KEY=VALUE", help="Passed through.")
+@click.option("--api-key", default=None, help="API key. Defaults to the root --api-key.")
+@click.option("--websocket/--no-websocket", default=True, help="Enable WebSocket proxying")
+@click.option("--verify-ssl", is_flag=True, default=False, help="Verify upstream TLS certificates")
+@click.option(
+    "--upstream-basic-auth", default=None, metavar="USER:PASS", help="Basic auth for the upstream."
+)
+@click.option("--forward-host", is_flag=True, default=False, help="Forward the browser's Host.")
+@click.option("--allow", multiple=True, metavar="[PROVIDER:]EMAIL", help="Allow an email via SSO.")
+@click.pass_context
+def tunnel_create(ctx: click.Context, /, label: str | None, url: str, **kwargs: Any) -> None:
+    """Expose a local service to the internet.
+
+    LABEL is the name the tunnel is published under; URL is the local service.
+    Both are arguments rather than required flags — a flag you must always pass
+    is an argument wearing a costume, and `--service X --label ha` was the
+    longest way to say two words.
+
+    \b
+    Examples:
+      hle tunnel create ha http://localhost:8123
+      hle tunnel create jellyfin http://192.168.1.10:8096 --allow you@example.com
+      hle tunnel create --apex --zone t00t.us http://localhost:3000
+    """
+    kwargs["api_key"] = api_key_from_ctx(ctx, kwargs.get("api_key"))
+    ctx.invoke(expose, service=url, service_label=label, **kwargs)
+
+
+config_group.add_command(tunnel_create)
+
+# One grammar: hle <noun> <verb>. The tunnel is the product's central object
+# and now has a name; `config` did not describe it and collided with the
+# client's own configuration, which `hle auth` writes.
+main.add_command(config_group, name="tunnel")
+# `service` meant three unrelated things — the OS unit, the upstream URL, and
+# a discovered LAN service. The OS unit is the daemon.
+main.add_command(service_group, name="daemon")
+# clig.dev, in as many words: don't use abbreviation aliases. Nobody guesses
+# "firepuncher" from `fp`.
+main.add_command(fp_command, name="forward")
 main.add_command(update_command, name="update")
-main.add_command(service_group, name="service")
-main.add_command(fp_command, name="fp")
+plugins.register(main)
 
 
-@main.command("preflight")
+@main.command("preflight", hidden=True)
 @click.argument("service_url")
 @click.option("--host", "tunnel_host", default=None, help="Hostname the tunnel will be reached by")
 @click.option("--verify-ssl", is_flag=True, default=False, help="Verify the upstream certificate")
@@ -567,9 +688,9 @@ def agent_list(api_key: str | None, as_json: bool) -> None:
     import json as _json
 
     import httpx
-    from rich.table import Table
 
     from hle_client.api import ApiClient, ApiClientConfig
+    from hle_client.richcompat import Table
 
     key = api_key or _load_api_key()
     if not key:
@@ -686,9 +807,8 @@ def agent_services(provider: str | None, as_json: bool) -> None:
     """
     import json as _json
 
-    from rich.table import Table
-
     from hle_client.discovery import active_providers, scan_all
+    from hle_client.richcompat import Table
 
     providers = active_providers()
     if provider:
@@ -734,6 +854,65 @@ def agent_logout() -> None:
         console.print("[green]Agent token removed[/green] from ~/.config/hle/agent.toml")
     else:
         console.print("[dim]No agent token saved.[/dim]")
+
+
+# The verbs that act on a tunnel live under the tunnel, including the two that
+# used to be top-level verbs of their own. A webhook forwarder is a kind of
+# tunnel, and preflight asks a question about one.
+config_group.add_command(webhook, name="webhook")
+config_group.add_command(preflight_cmd, name="preflight")
+
+
+@main.command("status")
+@click.pass_context
+def status_cmd(ctx: click.Context) -> None:
+    """What this machine is set up to do, on one screen.
+
+    Nothing answered "what is running here?" before: credentials were in `auth
+    status`, the agent in `agent status`, units in `service list`, and published
+    tunnels only on the relay. This is the command to run first when something
+    looks wrong.
+
+    \b
+    Example:
+      hle status
+      hle status -o json
+    """
+    from hle_client.status_cmd import render_status
+
+    render_status(ctx)
+
+
+@main.command("completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+def completion_cmd(shell: str) -> None:
+    """Print the shell completion script for SHELL.
+
+    Click has always been able to do this; it was simply never exposed, so
+    nobody knew tab completion existed.
+
+    \b
+    To install it:
+      hle completion zsh  > ~/.zfunc/_hle
+      hle completion bash > /etc/bash_completion.d/hle
+      hle completion fish > ~/.config/fish/completions/hle.fish
+    """
+    import subprocess
+
+    var = f"_HLE_COMPLETE={shell}_source"
+    result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, "-c", "from hle_client.cli import main; main()"],
+        env={**os.environ, var.split("=")[0]: var.split("=")[1]},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise click.ClickException(
+            f"Could not generate {shell} completion. "
+            f'Try: eval "$(_HLE_COMPLETE={shell}_source hle)"'
+        )
+    click.echo(result.stdout, nl=False)
 
 
 if __name__ == "__main__":

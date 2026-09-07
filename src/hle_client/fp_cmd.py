@@ -20,10 +20,10 @@ from dataclasses import dataclass
 
 import click
 import websockets
-from rich.console import Console
 
 from hle_client import __version__
 from hle_client.firepuncher import FpLocalClient
+from hle_client.richcompat import Console
 from hle_client.tunnel import _load_api_key
 from hle_common.fp_protocol import (
     LOCAL_NETWORKS,

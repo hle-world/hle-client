@@ -30,7 +30,8 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 
 import click
-from rich.console import Console
+
+from hle_client.richcompat import Console
 
 console = Console()
 
