@@ -291,6 +291,19 @@ def _unit_dir(user_mode: bool) -> Path:
     return _SYSTEM_UNIT_DIR
 
 
+def _unit_path_in_other_scope(uname: str, user_mode: bool) -> Path | None:
+    """The same unit already installed in the *other* systemd scope, if any.
+
+    Read-only on purpose: unlike :func:`_unit_dir` this never creates the
+    per-user directory, because asking the question must not leave a trace.
+    """
+    if user_mode:
+        other = _SYSTEM_UNIT_DIR / uname
+    else:
+        other = Path.home() / ".config" / "systemd" / "user" / uname
+    return other if other.exists() else None
+
+
 def _systemd_install(
     *,
     label: str,
@@ -315,6 +328,29 @@ def _systemd_install(
         restart=restart,
     )
     uname = unit_name(label, name)
+
+    # Installing into one scope while the same unit is live in the other gives
+    # two copies of the same service sharing one set of credentials. For an
+    # agent that is actively harmful: both register the same endpoints, the
+    # relay hands each label to whichever connected last, and the two evict
+    # each other about once a second — a reconnect storm that looks like a
+    # network fault. Seen in the wild as a per-user unit installed months after
+    # a system-wide one, with nothing on either side aware of the other.
+    clash = _unit_path_in_other_scope(uname, user_mode)
+    if clash is not None:
+        scope_here = "per-user" if user_mode else "system-wide"
+        scope_there = "system-wide" if user_mode else "per-user"
+        console.print(
+            f"[red]{uname} is already installed {scope_there}[/red] at {clash}.\n"
+            f"Installing it {scope_here} as well would run two copies on the same "
+            "credentials, which fight each other for every tunnel label.\n"
+            f"Remove the existing one first:\n"
+            f"  hle service uninstall{'' if user_mode else ' --user'} "
+            f"--label {label}\n"
+            f"or keep it and skip this install."
+        )
+        raise SystemExit(1)
+
     path = _unit_dir(user_mode) / uname
     try:
         path.write_text(unit)
