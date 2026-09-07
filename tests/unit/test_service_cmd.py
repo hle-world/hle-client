@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -333,6 +334,127 @@ class TestRestartWithoutATarget:
         # Proves the hint is per-command, and that we got past the platform gate.
         assert "--label is required" in out
         assert "--all" not in out
+
+
+class TestServiceListShowsBothScopes:
+    """`hle service list` is where people are sent to find a duplicate.
+
+    It listed one scope — system by default — so a per-user unit installed
+    beside a system one of the same name did not appear at all. On the host
+    that prompted this work, `hle service list` showed two system units and
+    said nothing about the per-user `hle-agent.service` that was fighting one
+    of them for every tunnel.
+    """
+
+    @staticmethod
+    def _fake_systemctl(monkeypatch, *, system: str, user: str):
+        def fake(cmd, **kwargs):
+            body = user if "--user" in cmd else system
+            return SimpleNamespace(returncode=0, stdout=body, stderr="")
+
+        monkeypatch.setattr(service_cmd.subprocess, "run", fake)
+
+    def test_both_scopes_are_listed(self, monkeypatch, capsys):
+        self._fake_systemctl(
+            monkeypatch,
+            system="hle-ots.service loaded active running HLE tunnel: ots",
+            user="hle-agent.service loaded active running HLE agent",
+        )
+        service_cmd._systemd_list(user_mode=None)
+        out = _ANSI.sub("", capsys.readouterr().out)
+        assert "system-wide" in out
+        assert "per-user" in out
+        assert "hle-ots.service" in out
+        assert "hle-agent.service" in out
+
+    def test_a_unit_in_both_scopes_is_called_out(self, monkeypatch, capsys):
+        """The duplicate is the thing worth saying out loud."""
+        line = "hle-agent.service loaded active running HLE agent"
+        self._fake_systemctl(monkeypatch, system=line, user=line)
+        service_cmd._systemd_list(user_mode=None)
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "Installed twice: hle-agent.service" in out
+        assert "hle service uninstall --user" in out
+
+    def test_distinct_units_are_not_called_a_duplicate(self, monkeypatch, capsys):
+        self._fake_systemctl(
+            monkeypatch,
+            system="hle-ots.service loaded active running HLE tunnel: ots",
+            user="hle-agent.service loaded active running HLE agent",
+        )
+        service_cmd._systemd_list(user_mode=None)
+        assert "Installed twice" not in capsys.readouterr().out
+
+    def test_a_single_scope_can_still_be_asked_for(self, monkeypatch, capsys):
+        self._fake_systemctl(
+            monkeypatch,
+            system="hle-ots.service loaded active running HLE tunnel: ots",
+            user="hle-agent.service loaded active running HLE agent",
+        )
+        service_cmd._systemd_list(user_mode=True)
+        out = _ANSI.sub("", capsys.readouterr().out)
+        assert "hle-agent.service" in out
+        assert "hle-ots.service" not in out
+
+
+class TestRestartStaysInScope:
+    """Restarting must target the unit it was asked about, not a namesake.
+
+    From a real upgrade: a host carried `hle-agent.service` as both a system
+    unit and a per-user one. The system restart returned "Access denied", the
+    code retried in the user scope, that succeeded, and it printed
+
+        Failed to restart hle-agent.service: Access denied
+          restarted hle-agent.service
+
+    The duplicate was restarted onto the new version while the unit actually
+    serving stayed on the old one, reported as a success.
+    """
+
+    @staticmethod
+    def _calls(monkeypatch) -> list[tuple[bool, tuple[str, ...]]]:
+        seen: list[tuple[bool, tuple[str, ...]]] = []
+
+        def fake(user_mode: bool, *args: str):
+            seen.append((user_mode, args))
+            # System scope always denied; user scope always works. This is the
+            # exact shape that produced the false success.
+            return SimpleNamespace(returncode=0 if user_mode else 1)
+
+        monkeypatch.setattr(service_cmd, "_systemctl", fake)
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "linux")
+        return seen
+
+    def test_a_denied_system_restart_is_a_failure_not_a_user_restart(self, monkeypatch, capsys):
+        seen = self._calls(monkeypatch)
+        assert service_cmd.restart_service("hle-agent.service", False) is False
+        # It must not have reached into the other scope at all.
+        assert [user for user, _ in seen] == [False]
+
+    def test_a_user_unit_is_restarted_in_the_user_scope(self, monkeypatch):
+        seen = self._calls(monkeypatch)
+        assert service_cmd.restart_service("hle-agent.service", True) is True
+        assert [user for user, _ in seen] == [True]
+
+    def test_a_denied_system_restart_says_how_to_do_it(self, monkeypatch, capsys):
+        """`sudo hle` does not work — ~/.local/bin is not on root's PATH."""
+        self._calls(monkeypatch)
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: 1000)
+        service_cmd.restart_service("hle-agent.service", False)
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "sudo systemctl restart hle-agent.service" in out
+
+    def test_root_is_not_told_to_use_sudo(self, monkeypatch, capsys):
+        self._calls(monkeypatch)
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: 0)
+        service_cmd.restart_service("hle-agent.service", False)
+        assert "sudo" not in capsys.readouterr().out
+
+    def test_an_unknown_scope_still_falls_back(self, monkeypatch):
+        """Callers that genuinely cannot know keep the old best-effort behaviour."""
+        seen = self._calls(monkeypatch)
+        assert service_cmd.restart_service("hle-agent.service", None) is True
+        assert [user for user, _ in seen] == [False, True]
 
 
 class TestDuplicateScopeInstall:
