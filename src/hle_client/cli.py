@@ -421,8 +421,30 @@ def auth() -> None:
 
 @auth.command()
 @click.option("--api-key", default=None, help="API key to save (skips browser prompt)")
-def login(api_key: str | None) -> None:
-    """Save an API key to ~/.config/hle/config.toml."""
+@click.option(
+    "--agent-token",
+    default=None,
+    help="Agent enrollment token to save instead (same as 'hle agent enroll').",
+)
+def login(api_key: str | None, agent_token: str | None = None) -> None:
+    """Save a credential for this machine.
+
+    One place to put a credential, whichever kind you were given. An agent
+    enrollment token used to have its own verb in its own group, so "where do
+    I put this?" had two answers depending on which string you were holding.
+
+    \b
+    Examples:
+      hle auth login                        Paste an API key from the dashboard
+      hle auth login --api-key hle_...      Non-interactive
+      hle auth login --agent-token hlea_... Enrol this machine as an agent
+    """
+    if agent_token is not None:
+        save_agent_token(agent_token)
+        console.print("[green]Agent token saved[/green] to ~/.config/hle/agent.toml")
+        console.print("[dim]Start it with: hle agent run  (or: hle daemon install agent)[/dim]")
+        return
+
     if api_key is None:
         console.print("Opening [cyan]https://hle.world/dashboard[/cyan] ...")
         webbrowser.open("https://hle.world/dashboard")
@@ -442,22 +464,35 @@ def login(api_key: str | None) -> None:
 
 @auth.command("status")
 def auth_status() -> None:
-    """Show the current API key source and masked value."""
+    """Show which credentials this machine has, and where they came from.
+
+    Both are reported, not just the first one found. A host can hold an API
+    key and an agent token at once, and knowing only about one of them is how
+    "this machine plainly is set up" turns into "no API key".
+    """
+
+    def _mask(value: str) -> str:
+        return f"{value[:8]}...{value[-4:]}" if len(value) > 12 else value
+
     env_key = os.environ.get("HLE_API_KEY")
-    if env_key:
-        masked = f"{env_key[:4]}...{env_key[-4:]}" if len(env_key) > 8 else env_key
-        console.print("API key source: [cyan]HLE_API_KEY environment variable[/cyan]")
-        console.print(f"Key: [dim]{masked}[/dim]")
-        return
-
     config_key = _load_api_key()
-    if config_key:
-        masked = f"{config_key[:4]}...{config_key[-4:]}" if len(config_key) > 8 else config_key
-        console.print("API key source: [cyan]config file (~/.config/hle/config.toml)[/cyan]")
-        console.print(f"Key: [dim]{masked}[/dim]")
-        return
+    if env_key:
+        console.print("API key: [cyan]HLE_API_KEY environment variable[/cyan]")
+        console.print(f"         [dim]{_mask(env_key)}[/dim]")
+    elif config_key:
+        console.print("API key: [cyan]~/.config/hle/config.toml[/cyan]")
+        console.print(f"         [dim]{_mask(config_key)}[/dim]")
+    else:
+        console.print("API key: [dim]none[/dim] — run [cyan]hle auth login[/cyan]")
 
-    console.print("[dim]No API key configured.[/dim]")
+    env_token = os.environ.get("HLE_AGENT_TOKEN")
+    saved_token = load_agent_token()
+    if env_token:
+        console.print("Agent:   [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
+        console.print(f"         [dim]{_mask(env_token)}[/dim]")
+    elif saved_token:
+        console.print("Agent:   [cyan]~/.config/hle/agent.toml[/cyan]")
+        console.print(f"         [dim]{_mask(saved_token)}[/dim]")
 
 
 @auth.command()

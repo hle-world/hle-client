@@ -408,7 +408,7 @@ class TestAuthStatus:
         with patch("hle_client.cli._load_api_key", return_value=valid_key):
             result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
         assert result.exit_code == 0
-        assert "config file" in result.output
+        assert "config.toml" in result.output
         assert valid_key not in result.output  # masked
 
     def test_from_env(self) -> None:
@@ -424,7 +424,25 @@ class TestAuthStatus:
         with patch("hle_client.cli._load_api_key", return_value=None):
             result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
         assert result.exit_code == 0
-        assert "No API key configured" in result.output
+        assert "none" in result.output
+        assert "hle auth login" in result.output
+
+    def test_both_credentials_are_reported(self) -> None:
+        """A host can hold an API key and an agent token at once.
+
+        Reporting only the first one found is how a machine that plainly is
+        set up gets told it has no credential.
+        """
+        runner = CliRunner()
+        with (
+            patch("hle_client.cli._load_api_key", return_value="hle_" + "c" * 32),
+            patch("hle_client.cli.load_agent_token", return_value="hlea_" + "d" * 40),
+        ):
+            result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
+        assert result.exit_code == 0
+        assert "API key" in result.output
+        assert "Agent" in result.output
+        assert "agent.toml" in result.output
 
 
 class TestAuthLogout:
