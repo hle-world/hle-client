@@ -290,8 +290,27 @@ class TestServiceWiring:
     def test_registered_on_cli(self):
         from hle_client.cli import main
 
-        assert "service" in main.commands
-        assert "install" in main.commands["service"].commands
+        assert "daemon" in main.commands
+        assert "install" in main.commands["daemon"].commands
+
+    def test_the_old_name_still_resolves(self):
+        """`hle service ...` is in units, scripts and every answer ever given.
+
+        The name moved to `daemon` because "service" meant three unrelated
+        things; that is not a reason to break a machine that already runs it.
+        """
+        import click
+
+        from hle_client.cli import main
+
+        ctx = click.Context(main)
+        assert main.get_command(ctx, "service") is main.commands["daemon"]
+
+    def test_the_old_name_is_not_advertised(self):
+        """Hidden, so what gets taught is one grammar."""
+        from hle_client.cli import main
+
+        assert "service" not in main.commands
 
 
 class TestRestartWithoutATarget:
@@ -326,7 +345,7 @@ class TestRestartWithoutATarget:
         out = " ".join(_ANSI.sub("", result.output).split())
         assert "--label is required" in out
         assert "--all" in out
-        assert "hle service list" in out
+        assert "hle daemon list" in out
 
     def test_uninstall_does_not_claim_an_all_flag_it_lacks(self):
         result = self._run("uninstall")
@@ -374,7 +393,7 @@ class TestServiceListShowsBothScopes:
         service_cmd._systemd_list(user_mode=None)
         out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
         assert "Installed twice: hle-agent.service" in out
-        assert "hle service uninstall --user" in out
+        assert "hle daemon uninstall --user" in out
 
     def test_distinct_units_are_not_called_a_duplicate(self, monkeypatch, capsys):
         self._fake_systemctl(
@@ -541,13 +560,13 @@ class TestDuplicateScopeInstall:
         out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
         assert "same agent is already installed system-wide" in out
         assert "same enrollment token" in out
-        assert "hle service uninstall --label agent" in out
+        assert "hle daemon uninstall --label agent" in out
 
     def test_it_works_in_the_other_direction_too(self, tmp_path, monkeypatch, capsys):
         with pytest.raises(SystemExit):
             self._install(tmp_path, monkeypatch, user_mode=False, existing="user")
         out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
-        assert "hle service uninstall --user --label agent" in out
+        assert "hle daemon uninstall --user --label agent" in out
 
     def test_the_same_token_file_read_as_the_same_user_counts(self, tmp_path, monkeypatch):
         """Unreadable tokens, but provably one identity: same file, same user."""

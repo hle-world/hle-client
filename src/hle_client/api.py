@@ -120,6 +120,31 @@ class ApiClient:
             result: list[dict[str, Any]] = resp.json()
             return result
 
+    async def disconnect_tunnel(self, tunnel_id: str) -> dict[str, Any]:
+        """Drop a live tunnel's connection, leaving its record in place."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(
+                f"{self._base_url}/api/tunnels/{tunnel_id}",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            return {"message": "ok"}
+
+    async def delete_tunnel_record(self, tunnel_id: str) -> dict[str, Any]:
+        """Delete a tunnel's stored record.
+
+        The relay refuses while the tunnel is connected — the record is what
+        holds its access rules and settings, so removing it under a live
+        connection would silently unprotect a published host.
+        """
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(
+                f"{self._base_url}/api/tunnels/{tunnel_id}/record",
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            return {"message": "ok"}
+
     async def list_agents(self) -> list[dict[str, Any]]:
         """List the authenticated user's agents."""
         async with httpx.AsyncClient() as client:
