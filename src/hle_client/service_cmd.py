@@ -484,12 +484,53 @@ def _systemd_status(*, label: str, name: str | None, user_mode: bool) -> None:
     _systemctl(user_mode, "status", "--no-pager", unit_name(label, name))
 
 
-def _systemd_list(*, user_mode: bool) -> None:
-    cmd = ["systemctl"]
-    if user_mode:
-        cmd.append("--user")
-    cmd += ["list-units", "--type=service", "--all", "hle-*"]
-    subprocess.run(cmd, check=False)  # noqa: S603 — argv built internally
+def _systemd_list(*, user_mode: bool | None) -> None:
+    """List hle units. ``user_mode`` of ``None`` means both scopes.
+
+    Both by default, because listing one and stopping there hid the exact
+    thing this command is reached for. A per-user unit installed alongside a
+    system one of the same name is the duplicate that makes two agents fight
+    over every tunnel, and `hle service install` now points people here to
+    find it — while this showed only the system scope and left the copy
+    invisible.
+    """
+    scopes: list[bool] = [False, True] if user_mode is None else [user_mode]
+    seen: dict[str, list[str]] = {}
+    for is_user in scopes:
+        cmd = ["systemctl"]
+        if is_user:
+            cmd.append("--user")
+        cmd += ["list-units", "--type=service", "--all", "--no-pager", "hle-*"]
+        result = subprocess.run(  # noqa: S603 — argv built internally
+            cmd, check=False, capture_output=True, text=True
+        )
+        label = "per-user" if is_user else "system-wide"
+        body = result.stdout.strip()
+        if not body or result.returncode != 0:
+            if user_mode is not None:
+                console.print(f"[dim]No {label} hle services.[/dim]")
+            continue
+        console.print(f"[bold]{label}[/bold]")
+        print(body)
+        print()
+        for line in body.splitlines():
+            first = line.split()[0] if line.split() else ""
+            if first.endswith(".service"):
+                seen.setdefault(first, []).append(label)
+
+    both = [unit for unit, scopes_found in seen.items() if len(scopes_found) > 1]
+    if both:
+        # The whole point of showing both: naming a unit that exists twice,
+        # because nothing else on the machine will.
+        console.print(
+            f"[yellow]Installed twice:[/yellow] {', '.join(sorted(both))} exists both "
+            "system-wide and per-user."
+        )
+        console.print(
+            "[dim]Two copies of one service run on the same credentials and fight over "
+            "every tunnel. Remove whichever you did not mean to keep:\n"
+            "  hle service uninstall --user --label <label>   (or without --user)[/dim]"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1291,13 +1332,18 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
 
 
 @service.command("list")
-@click.option("--user", "user_mode", is_flag=True, default=False, help="List per-user services")
-def list_services(user_mode: bool) -> None:
-    """List installed hle services."""
+@click.option("--user", "user_only", is_flag=True, default=False, help="Only per-user services")
+@click.option("--system", "system_only", is_flag=True, default=False, help="Only system services")
+def list_services(user_only: bool, system_only: bool) -> None:
+    """List installed hle services, in both scopes by default."""
     plat = _require_supported()
+    if user_only and system_only:
+        console.print("[red]Pass either --user or --system, not both.[/red]")
+        raise SystemExit(1)
+    scope: bool | None = True if user_only else (False if system_only else None)
     if plat == "darwin":
-        _launchd_list(user_mode=user_mode)
+        _launchd_list(user_mode=bool(user_only))
     elif plat == "freebsd":
         _rcd_list()
     else:
-        _systemd_list(user_mode=user_mode)
+        _systemd_list(user_mode=scope)

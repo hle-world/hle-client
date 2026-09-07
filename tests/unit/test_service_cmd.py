@@ -336,6 +336,67 @@ class TestRestartWithoutATarget:
         assert "--all" not in out
 
 
+class TestServiceListShowsBothScopes:
+    """`hle service list` is where people are sent to find a duplicate.
+
+    It listed one scope — system by default — so a per-user unit installed
+    beside a system one of the same name did not appear at all. On the host
+    that prompted this work, `hle service list` showed two system units and
+    said nothing about the per-user `hle-agent.service` that was fighting one
+    of them for every tunnel.
+    """
+
+    @staticmethod
+    def _fake_systemctl(monkeypatch, *, system: str, user: str):
+        def fake(cmd, **kwargs):
+            body = user if "--user" in cmd else system
+            return SimpleNamespace(returncode=0, stdout=body, stderr="")
+
+        monkeypatch.setattr(service_cmd.subprocess, "run", fake)
+
+    def test_both_scopes_are_listed(self, monkeypatch, capsys):
+        self._fake_systemctl(
+            monkeypatch,
+            system="hle-ots.service loaded active running HLE tunnel: ots",
+            user="hle-agent.service loaded active running HLE agent",
+        )
+        service_cmd._systemd_list(user_mode=None)
+        out = _ANSI.sub("", capsys.readouterr().out)
+        assert "system-wide" in out
+        assert "per-user" in out
+        assert "hle-ots.service" in out
+        assert "hle-agent.service" in out
+
+    def test_a_unit_in_both_scopes_is_called_out(self, monkeypatch, capsys):
+        """The duplicate is the thing worth saying out loud."""
+        line = "hle-agent.service loaded active running HLE agent"
+        self._fake_systemctl(monkeypatch, system=line, user=line)
+        service_cmd._systemd_list(user_mode=None)
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "Installed twice: hle-agent.service" in out
+        assert "hle service uninstall --user" in out
+
+    def test_distinct_units_are_not_called_a_duplicate(self, monkeypatch, capsys):
+        self._fake_systemctl(
+            monkeypatch,
+            system="hle-ots.service loaded active running HLE tunnel: ots",
+            user="hle-agent.service loaded active running HLE agent",
+        )
+        service_cmd._systemd_list(user_mode=None)
+        assert "Installed twice" not in capsys.readouterr().out
+
+    def test_a_single_scope_can_still_be_asked_for(self, monkeypatch, capsys):
+        self._fake_systemctl(
+            monkeypatch,
+            system="hle-ots.service loaded active running HLE tunnel: ots",
+            user="hle-agent.service loaded active running HLE agent",
+        )
+        service_cmd._systemd_list(user_mode=True)
+        out = _ANSI.sub("", capsys.readouterr().out)
+        assert "hle-agent.service" in out
+        assert "hle-ots.service" not in out
+
+
 class TestRestartStaysInScope:
     """Restarting must target the unit it was asked about, not a namesake.
 
