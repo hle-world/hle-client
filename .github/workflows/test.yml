@@ -63,9 +63,12 @@ jobs:
 
       - name: Test the plugins
         run: |
-          set -euo pipefail
-          shopt -s nullglob
+          # POSIX sh: these steps run under `sh -e`, where `shopt` does not
+          # exist and cost this job an exit-127 before it ran anything. An
+          # unmatched glob stays literal instead, which the -d test catches.
+          set -eu
           for plugin in plugins/*/; do
+            [ -d "$plugin" ] || continue
             [ -f "${plugin}pyproject.toml" ] || continue
             echo "::group::$(basename "$plugin")"
             uv pip install --system -e "${plugin}[dev]"

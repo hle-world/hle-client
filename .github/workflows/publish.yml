@@ -96,9 +96,11 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          set -euo pipefail
-          shopt -s nullglob
+          # POSIX sh: these steps run under `sh -e`, so no `shopt`. An
+          # unmatched glob stays literal, which the -d test catches.
+          set -eu
           for plugin in plugins/*/; do
+            [ -d "$plugin" ] || continue
             [ -f "${plugin}pyproject.toml" ] || continue
             name=$(basename "$plugin")
             echo "::group::${name}"
