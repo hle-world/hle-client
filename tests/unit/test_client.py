@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import websockets.exceptions
+from websockets.frames import Close
 
 from hle_client.proxy import LocalProxy, ProxyConfig
-from hle_client.tunnel import Tunnel, TunnelConfig
+from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError
 from hle_common.models import (
     ProxiedHttpRequest,
     WsStreamClose,
@@ -1130,3 +1132,107 @@ class TestTunnelReceiveLoopDispatch:
 
         # Should not raise; the bad message is just logged and skipped.
         await tunnel._receive_loop(mock_ws)
+
+
+class TestTunnelReconnectBackoff:
+    """How long the client waits before trying again, and when it stops trying."""
+
+    @staticmethod
+    def _closed(code: int) -> websockets.exceptions.ConnectionClosedError:
+        """A ConnectionClosed carrying a server close code, as websockets reports it."""
+        return websockets.exceptions.ConnectionClosedError(
+            Close(code, "test"),
+            None,
+        )
+
+    async def _delays(self, tunnel: Tunnel, outcomes: list) -> list[float]:
+        """Run connect() over a scripted sequence, returning each sleep it took.
+
+        ``outcomes`` are per-attempt: an exception to raise, or ``"ok"`` for a
+        session that registers before dropping.
+        """
+        slept: list[float] = []
+        attempts = iter(outcomes)
+
+        async def _attempt() -> None:
+            try:
+                outcome = next(attempts)
+            except StopIteration:
+                tunnel._running = False
+                return
+            if outcome == "ok":
+                tunnel._session_registered = True
+                raise ConnectionError("dropped after a working session")
+            raise outcome
+
+        async def _sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        tunnel._proxy.start = AsyncMock()
+        with (
+            patch.object(tunnel, "_connect_once", side_effect=_attempt),
+            patch.object(tunnel, "_cleanup", AsyncMock()),
+            patch("hle_client.tunnel.asyncio.sleep", side_effect=_sleep),
+        ):
+            await tunnel.connect()
+        return slept
+
+    async def test_backoff_grows_while_nothing_works(self):
+        """Unchanged: repeated failures still back off, up to the cap."""
+        tunnel = _tunnel(max_reconnect_delay=8.0)
+        slept = await self._delays(tunnel, [ConnectionError("nope")] * 6)
+        assert slept == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
+
+    async def test_a_working_session_resets_the_backoff(self):
+        """The bug: ``delay`` was initialised once outside the loop and only grew.
+
+        A tunnel that had been up for weeks across a handful of unrelated blips
+        then waited a full minute to come back from a routine relay deploy,
+        because the backoff still carried every earlier failure with it.
+        """
+        tunnel = _tunnel(max_reconnect_delay=60.0)
+        slept = await self._delays(
+            tunnel,
+            [
+                ConnectionError("blip"),
+                ConnectionError("blip"),
+                ConnectionError("blip"),
+                "ok",  # a session that registered — start over
+                ConnectionError("blip"),
+            ],
+        )
+        assert slept == [1.0, 2.0, 4.0, 1.0, 2.0]
+
+    async def test_being_replaced_stops_rather_than_fights_for_the_label(self):
+        """4009 means another connection took this label.
+
+        Reconnecting would take it straight back, and two clients would trade
+        the tunnel between them a second at a time — a reconnect storm that
+        looks like a network fault and is really a duplicate instance.
+        """
+        tunnel = _tunnel(service_label="mimos-ssh")
+        tunnel._proxy.start = AsyncMock()
+
+        with (
+            patch.object(tunnel, "_connect_once", side_effect=self._closed(4009)),
+            patch.object(tunnel, "_cleanup", AsyncMock()),
+            pytest.raises(TunnelFatalError, match="taken over"),
+        ):
+            await tunnel.connect()
+
+    async def test_the_takeover_message_names_the_label_and_the_cause(self):
+        """The operator has to know which duplicate to go and stop."""
+        tunnel = _tunnel(service_label="mimos-ssh")
+        tunnel._proxy.start = AsyncMock()
+
+        with (
+            patch.object(tunnel, "_connect_once", side_effect=self._closed(4009)),
+            patch.object(tunnel, "_cleanup", AsyncMock()),
+            pytest.raises(TunnelFatalError) as excinfo,
+        ):
+            await tunnel.connect()
+
+        message = str(excinfo.value)
+        assert "mimos-ssh" in message
+        assert "agent" in message
+        assert "--label" in message
