@@ -22,7 +22,7 @@ curl -fsSL https://get.hle.world | sh
 Installs via pipx (preferred), uv, or pip-in-venv. Supports `--version`:
 
 ```bash
-curl -fsSL https://get.hle.world | sh -s -- --version 2609.3
+curl -fsSL https://get.hle.world | sh -s -- --version 2609.4
 ```
 
 ### pipx
@@ -93,7 +93,7 @@ and runs the right upgrade.
 ```bash
 hle update            # upgrade to the latest release
 hle update --check    # just report current vs. latest, don't change anything
-hle update --version 2609.3   # pin an exact version
+hle update --version 2609.4   # pin an exact version
 ```
 
 After updating, restart any running tunnels (e.g. `systemctl restart hle-<label>`)
