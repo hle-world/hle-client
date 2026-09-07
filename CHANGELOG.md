@@ -1,5 +1,59 @@
 # Changelog
 
+## v2609.2 — 2026-09-07
+
+### Fixed
+
+- **`hle service install` refused a second, unrelated agent.** The guard added
+  in v2609.1 rejected any install whose unit name already existed in the other
+  systemd scope. That is the right answer for one agent installed twice, and
+  the wrong one for two *different* agents on one machine — one per OS user for
+  logical separation, or a spare picked up while learning how this works. Both
+  are reasonable, and neither is distinguishable from the fault by a filename.
+
+  The enrollment token decides now, and the unit already records where to find
+  it. Two units are refused only when they provably share an identity: the same
+  token, or the same token file read by the same user. Anything else installs,
+  with a note saying the other unit is there and that `--name` keeps the two
+  distinguishable.
+
+  Erring toward allowing is deliberate. A false refusal blocks a working setup
+  outright and leaves you arguing with your own tooling, while a duplicate that
+  slips through is still caught where it can actually be seen — the relay has
+  both connections in front of it. Often certainty isn't available anyway: a
+  per-user install has no business reading root's token file.
+
+### Added
+
+- **Clients now say which process they are.** A registration described what the
+  client wanted but never who was asking, so the relay could not tell one
+  client reconnecting from two clients sharing a credential — both arrive as a
+  request for the same label. `instance_id` (per process, never persisted, so a
+  restart is not mistaken for a duplicate) and `hostname` (shown only back to
+  the account's owner) now travel with tunnel registrations and agent hellos.
+
+  The relay uses them to refuse the second of two agents on one token instead
+  of letting the pair take every tunnel off each other, and to name the machine
+  holding it. Both fields are optional and unknown fields were already ignored,
+  so old clients and old relays keep working in every combination.
+
+- **Close codes are now shared vocabulary**, in `hle_common.close_codes`, with
+  whether a code may be retried defined alongside it. They were literals on
+  both sides, which is how a code meaning "stop" came to be retried: the number
+  said one thing where it was sent and another where it was read.
+
+  Two are new. `4010` is sent to a connection turned away because a healthy
+  instance already holds its identity — the opposite end from `4009`, and fatal
+  for the same reason: if either side retries, the two trade the identity
+  forever. `4029` says a client is registering far faster than any healthy one
+  needs to and is deliberately *not* fatal — the usual cause is a supervisor
+  restarting something, and giving up would turn a restart loop into an outage.
+
+- **The agent stops when the relay says to stop.** A fatal close now ends the
+  agent rather than starting the argument again a second later: endpoints are
+  torn down, the reason is printed with the machine to go and look at, and it
+  exits non-zero — an agent that exits 0 under `Restart=always` just comes back.
+
 ## v2609.1 — 2026-09-07
 
 ### Fixed
