@@ -24,8 +24,10 @@ import websockets.asyncio.client
 import websockets.exceptions
 
 from hle_client import __version__
+from hle_client.identity import hostname, instance_id
 from hle_client.notices import render_notice
 from hle_client.proxy import UPSTREAM_ERROR_HEADER, LocalProxy, ProxyConfig
+from hle_common import close_codes
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
     DiagnosticEvent,
@@ -497,29 +499,23 @@ class Tunnel:
             ) as exc:
                 if isinstance(exc, websockets.exceptions.ConnectionClosed) and exc.rcvd is not None:
                     code = exc.rcvd.code
-                    if code == 4003:
+                    if close_codes.is_fatal(code):
                         raise TunnelFatalError(
-                            "Tunnel limit reached. Your plan does not allow more "
-                            "active tunnels.\n"
-                            "Stop another tunnel or upgrade at https://hle.world/dashboard"
+                            self._fatal_close_message(code, exc.rcvd.reason)
                         ) from exc
-                    if code == 4001:
-                        raise TunnelFatalError(
-                            "Authentication failed. Your API key is invalid or revoked.\n"
-                            "Run 'hle auth login' to save a new key."
-                        ) from exc
-                    if code == 4009:
-                        # Another connection claimed this label. Reconnecting
-                        # would take it straight back and leave two clients
-                        # trading the tunnel between them a second at a time —
-                        # which is the shape of the reconnect storm this code
-                        # exists to end. Stop, and say what to go and look for.
-                        raise TunnelFatalError(
-                            f"Tunnel '{self.config.service_label}' was taken over by another "
-                            "connection using the same account.\n"
-                            "Another copy of hle (or an hle agent) is running this same label — "
-                            "stop the duplicate, or give this one a different --label."
-                        ) from exc
+                    wait = close_codes.retry_after_seconds(code)
+                    if wait is not None:
+                        # The relay asked for a specific pause. Honour it
+                        # instead of the local backoff, which after a working
+                        # session resets to a second — exactly the wrong answer
+                        # to "you are registering too fast".
+                        logger.warning(
+                            "Relay asked this tunnel to slow down (code %s): %s",
+                            code,
+                            exc.rcvd.reason or "no reason given",
+                        )
+                        delay = max(delay, wait)
+                        self._session_registered = False
                 logger.warning("Connection lost: %s", exc)
             except asyncio.CancelledError:
                 logger.info("Tunnel cancelled")
@@ -542,6 +538,51 @@ class Tunnel:
             logger.info("Reconnecting in %.1fs ...", delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, self.config.max_reconnect_delay)
+
+    def _fatal_close_message(self, code: int, reason: str | None) -> str:
+        """What to tell the operator about a close they must not retry.
+
+        The relay's own ``reason`` is limited to 123 bytes by RFC 6455, so it
+        can say what happened but not what to do about it. These add the
+        second half.
+        """
+        label = self.config.service_label or "this tunnel"
+        if code == close_codes.TUNNEL_LIMIT:
+            return (
+                "Tunnel limit reached. Your plan does not allow more active tunnels.\n"
+                "Stop another tunnel or upgrade at https://hle.world/dashboard"
+            )
+        if code == close_codes.INVALID_CREDENTIAL:
+            return (
+                "Authentication failed. Your API key is invalid or revoked.\n"
+                "Run 'hle auth login' to save a new key."
+            )
+        if code == close_codes.REPLACED:
+            return (
+                f"Tunnel '{label}' was taken over by another connection using the same "
+                "account.\n"
+                f"{reason or 'Another connection claimed this label.'}\n"
+                "Another copy of hle (or an hle agent) is running this same label — "
+                "stop the duplicate, or give this one a different --label."
+            )
+        if code == close_codes.DUPLICATE_INSTANCE:
+            return (
+                f"Tunnel '{label}' is already being served by another copy of hle, which is "
+                "still connected and healthy.\n"
+                f"{reason or 'Another instance holds this label.'}\n"
+                "This one has stopped rather than take the label off it. Stop whichever "
+                "copy you did not mean to run — `hle service list` on each machine shows "
+                "what is installed."
+            )
+        if code == close_codes.LABEL_IN_USE:
+            return (
+                f"Label '{label}' is not available on this account.\n"
+                f"{reason or 'It belongs to another account, or your tunnel code changed.'}"
+            )
+        return (
+            f"The relay closed this tunnel and asked it not to reconnect (code {code}).\n"
+            f"{reason or ''}"
+        ).rstrip()
 
     async def disconnect(self) -> None:
         """Gracefully disconnect the tunnel."""
@@ -645,6 +686,8 @@ class Tunnel:
                 zone=self.config.zone,
                 apex=self.config.apex,
                 options=self.config.options,
+                instance_id=instance_id(),
+                hostname=hostname(),
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,

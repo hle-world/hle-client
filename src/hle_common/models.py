@@ -51,6 +51,14 @@ class TunnelRegistration(WireModel):
     managed_by: str | None = None  # e.g. "hle-operator" for K8s operator tunnels
     webhook_path: str | None = None  # e.g. "/webhook/github" — restricts to this path prefix
     apex: bool = False  # serve at the bare zone root (e.g. t00t.us); requires `zone`
+    # Who is connecting, as opposed to what they are asking for. Without these
+    # the relay cannot tell one client reconnecting from two clients fighting:
+    # both look like "a registration for this label arrived", and the second
+    # silently evicts the first. `instance_id` is stable for the life of a
+    # process and unique to it; `hostname` is only ever shown back to the
+    # account's own owner, to say *where* the other copy is running.
+    instance_id: str | None = None
+    hostname: str | None = None
     # Generic, server-interpreted feature parameters. The client transports
     # these verbatim (e.g. from `--option key=value`) without understanding
     # them; the server defines the vocabulary and validates. This lets the
