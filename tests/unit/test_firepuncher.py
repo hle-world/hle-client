@@ -197,7 +197,7 @@ class TestLocalNetworkSentinel:
         assert not ForwardRule(host=LOCAL_NETWORKS).matches("192.168.1.101", 22)
 
     def test_the_refusal_names_the_networks_not_the_sentinel(self, monkeypatch):
-        """"@local" tells the operator nothing about why their address failed."""
+        """ "@local" tells the operator nothing about why their address failed."""
         from hle_client import firepuncher
 
         monkeypatch.setattr(firepuncher, "is_local", lambda host: False)
