@@ -23,13 +23,18 @@ Authorization is enforced twice, deliberately:
 1. The **relay** checks that the API key's owner owns the target agent.
 2. The **agent** checks the target against its allowlist.
 
-The second check is what stops a leaked API key from turning an agent into a
-general-purpose pivot into the private network behind it.
+The second check is what bounds where a forward may go. By default that is the
+agent's own machine and the private networks around it — the homelab the agent
+exists to reach — which is also what ``hle expose`` has always allowed for the
+same agent on the same LAN. What it excludes is the public internet, so an
+agent cannot be turned into a general-purpose outbound proxy. Narrowing it
+further, to specific hosts and ports, is a matter of configuring rules.
 """
 
 from __future__ import annotations
 
 import base64
+import ipaddress
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -130,7 +135,9 @@ class FpWelcome(WireModel):
 class ForwardRule(WireModel):
     """One allowlist entry, e.g. ``localhost:22`` or ``192.168.1.50:*``.
 
-    ``port`` of ``None`` means any port on that host.
+    ``port`` of ``None`` means any port on that host. ``host`` may also be a
+    CIDR block (``192.168.0.0/16``), which is how a whole network is expressed
+    without listing every address on it.
     """
 
     host: str
@@ -139,7 +146,25 @@ class ForwardRule(WireModel):
     def matches(self, host: str, port: int) -> bool:
         if self.port is not None and self.port != port:
             return False
-        return _normalize_host(self.host) == _normalize_host(host)
+        if _normalize_host(self.host) == _normalize_host(host):
+            return True
+        return self._network_contains(host)
+
+    def _network_contains(self, host: str) -> bool:
+        """Whether *host* is an address inside this rule's CIDR block.
+
+        Only literal addresses are matched against a network. A *name* is never
+        resolved to decide this: resolution happens on the agent at connect
+        time, so allowing a name here on the strength of what it resolves to
+        now would be checking one answer and using another.
+        """
+        if "/" not in self.host:
+            return False
+        try:
+            network = ipaddress.ip_network(self.host, strict=False)
+            return ipaddress.ip_address(_normalize_host(host)) in network
+        except ValueError:
+            return False
 
     def __str__(self) -> str:
         return f"{self.host}:{self.port if self.port is not None else '*'}"
@@ -159,14 +184,82 @@ def _normalize_host(host: str) -> str:
     return "localhost" if h in _LOOPBACK_ALIASES else h
 
 
+LOCAL_NETWORKS = "@local"
+"""Rule meaning "every network this agent is directly attached to".
+
+Expanded by the *agent*, against its own interface and route tables, at the
+moment a target is checked. It has to work that way round: only the agent can
+see that it has a Docker bridge, a Kubernetes CNI, a VPN and a LAN, and the
+relay handing out fixed CIDRs would be guessing at all four. Expanding it
+anywhere else — on the relay, in a dashboard — would describe the wrong
+machine's networks, so everything except the agent treats it as matching
+nothing.
+"""
+
+
 def default_rules() -> list[ForwardRule]:
     """Allowlist used when an agent has no explicit rules configured.
 
-    Loopback only: enough for the common "SSH to the box the agent runs on"
-    case with zero setup, while anything else on the LAN stays opt-in.
+    The agent's own networks. An agent exists to reach a homelab, so a default
+    that stopped at loopback answered the wrong question: it allowed only the
+    one box the agent happened to run on, while ``hle expose --service
+    https://192.168.2.200:8006`` — same agent, same LAN, same credential — has
+    never been restricted at all. There is no threat model in which one of
+    those is safe and the other is not; if anything the tunnel is the more
+    exposed, since it publishes a host on the open internet while a forward
+    binds to loopback on the operator's own machine.
+
+    Public addresses are still excluded, and that is the line worth keeping: it
+    stops an agent being used as a general-purpose outbound proxy, which is
+    nobody's homelab use case. Reaching one is a matter of adding a rule.
+
+    The static private ranges accompany the sentinel rather than being replaced
+    by it, because an agent too old to understand ``@local`` would otherwise
+    see one rule it cannot read and refuse everything — a worse regression than
+    the problem being fixed. Old agents get the private ranges, which is
+    already broader than the loopback they have today; new agents get both, and
+    the sentinel is what covers the addresses no fixed list can (Tailscale on
+    CGNAT, a homelab on globally-routable IPv6).
     """
-    return [ForwardRule(host="localhost")]
+    return [
+        ForwardRule(host=LOCAL_NETWORKS),
+        ForwardRule(host="localhost"),
+        # RFC 1918 — where most homelabs live, and the fallback for any agent
+        # that predates the sentinel above.
+        ForwardRule(host="10.0.0.0/8"),
+        ForwardRule(host="172.16.0.0/12"),
+        ForwardRule(host="192.168.0.0/16"),
+        # RFC 3927 / RFC 4193 — link-local IPv4 and unique-local IPv6.
+        ForwardRule(host="169.254.0.0/16"),
+        ForwardRule(host="fc00::/7"),
+        ForwardRule(host="fe80::/10"),
+    ]
 
 
 def is_allowed(rules: list[ForwardRule], host: str, port: int) -> bool:
     return any(rule.matches(host, port) for rule in rules)
+
+
+def parse_rule(text: str) -> ForwardRule | None:
+    """Read back a rule from its ``str()`` form, e.g. ``192.168.0.0/16:*``.
+
+    The welcome frame carries the agent's allowlist as rendered strings, which
+    is enough for the client to check a target *before* offering a forward it
+    already knows will be refused. Anything unparseable returns ``None`` and is
+    dropped by the caller: a rule the client cannot read must not silently
+    become a rule that matches nothing, or a legitimate target would look
+    forbidden.
+    """
+    raw = text.strip()
+    if not raw:
+        return None
+    host, sep, port = raw.rpartition(":")
+    if not sep or not host:
+        return ForwardRule(host=raw)
+    if port == "*":
+        return ForwardRule(host=host)
+    try:
+        return ForwardRule(host=host, port=int(port))
+    except ValueError:
+        # A bare IPv6 literal has colons of its own and no port suffix.
+        return ForwardRule(host=raw)

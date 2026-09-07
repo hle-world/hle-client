@@ -11,6 +11,7 @@ import websockets
 
 from hle_client.firepuncher import FpAgentSide, FpLocalClient
 from hle_common.fp_protocol import (
+    LOCAL_NETWORKS,
     ForwardRule,
     FpData,
     FpErrorCode,
@@ -36,6 +37,188 @@ class Collector:
     def first(self, mtype: str) -> dict | None:
         found = self.of_type(mtype)
         return found[0] if found else None
+
+
+class TestBuildForwards:
+    """Pairing repeated --to with repeated --port."""
+
+    @staticmethod
+    def _build(targets, ports=()):
+        from hle_client.fp_cmd import _build_forwards
+
+        return _build_forwards(tuple(targets), tuple(ports), "127.0.0.1")
+
+    def test_a_single_target_derives_its_port(self):
+        forwards = self._build(["22"])
+        assert len(forwards) == 1
+        assert forwards[0].target_host == "localhost"
+        assert forwards[0].bind_port == 9022
+
+    def test_ports_pair_with_targets_in_order(self):
+        forwards = self._build(["22", "5432"], [9923])
+        assert forwards[0].bind_port == 9923  # given
+        assert forwards[1].bind_port == 14432  # derived
+
+    def test_several_targets_in_one_command(self):
+        forwards = self._build(["192.168.1.101:22", "nas:445"])
+        assert [(f.target_host, f.target_port) for f in forwards] == [
+            ("192.168.1.101", 22),
+            ("nas", 445),
+        ]
+
+    def test_a_port_collision_is_refused_with_the_fix_in_the_message(self):
+        """Two targets deriving the same local port would silently fight."""
+        import click
+
+        with pytest.raises(click.BadParameter) as excinfo:
+            self._build(["nas:22", "rpi:22"])
+        assert "--port" in str(excinfo.value)
+
+    def test_more_ports_than_targets_is_a_mistake_worth_naming(self):
+        import click
+
+        with pytest.raises(click.BadParameter):
+            self._build(["22"], [9922, 9923])
+
+
+class TestResolveCommand:
+    """`hle fp ... -- <command>`: what actually gets run."""
+
+    @staticmethod
+    def _forwards(*ports):
+        from hle_client.fp_cmd import Forward
+
+        return [
+            Forward(target_host="h", target_port=22, bind_host="127.0.0.1", bind_port=p)
+            for p in ports
+        ]
+
+    def test_no_command_means_run_until_interrupted(self):
+        from hle_client.fp_cmd import _resolve_command
+
+        assert _resolve_command((), self._forwards(9922)) is None
+
+    def test_port_placeholder_is_substituted(self):
+        """A derived port cannot be hardcoded by the caller who never chose it."""
+        from hle_client.fp_cmd import _resolve_command
+
+        argv = _resolve_command(("ssh", "-p", "{port}", "me@127.0.0.1"), self._forwards(9922))
+        assert argv == ["ssh", "-p", "9922", "me@127.0.0.1"]
+
+    def test_numbered_placeholders_address_each_forward(self):
+        from hle_client.fp_cmd import _resolve_command
+
+        argv = _resolve_command(("x", "{port1}", "{port2}"), self._forwards(9922, 14432))
+        assert argv == ["x", "9922", "14432"]
+
+    def test_a_leading_separator_is_not_the_command(self):
+        from hle_client.fp_cmd import _resolve_command
+
+        assert _resolve_command(("--", "ls"), self._forwards(9922)) == ["ls"]
+
+    def test_a_separator_with_nothing_after_it_is_an_error(self):
+        import click
+
+        from hle_client.fp_cmd import _resolve_command
+
+        with pytest.raises(click.BadParameter):
+            _resolve_command(("--",), self._forwards(9922))
+
+
+class TestUpfrontAllowlistCheck:
+    """Refusing before offering the forward, not after ssh fails.
+
+    Reported from a real session: the CLI printed the agent's allowlist, then
+    announced `Forwarding ... → 192.168.1.101:22` and `Try: ssh -p 9923 ...`
+    for a target that allowlist already excluded. The refusal only arrived when
+    ssh connected, as `Connection closed by 127.0.0.1 port 9923`.
+    """
+
+    @staticmethod
+    def _check(allowed, host, port):
+        from hle_client.fp_cmd import _explain_if_not_allowed
+
+        return _explain_if_not_allowed(allowed, host, port)
+
+    def test_a_disallowed_target_is_named_before_anything_is_offered(self):
+        message = self._check(["localhost:*"], "192.168.1.101", 22)
+        assert message is not None
+        assert "192.168.1.101:22" in message
+        assert "localhost:*" in message
+        assert "dashboard" in message
+
+    def test_an_allowed_target_says_nothing(self):
+        assert self._check(["192.168.0.0/16:*"], "192.168.1.101", 22) is None
+
+    def test_a_port_specific_rule_is_honoured(self):
+        assert self._check(["192.168.1.101:22"], "192.168.1.101", 22) is None
+        assert self._check(["192.168.1.101:22"], "192.168.1.101", 5432) is not None
+
+    def test_an_unreadable_allowlist_does_not_block_the_forward(self):
+        """The agent is the authority; guessing "refused" here would be worse.
+
+        A rule the client cannot parse — a newer relay, a form this version
+        doesn't know — must not turn into a refusal for a forward that would
+        have worked.
+        """
+        assert self._check(["@local"], "192.168.1.101", 22) is None
+
+    def test_an_empty_allowlist_is_left_to_the_agent(self):
+        assert self._check([], "192.168.1.101", 22) is None
+
+    def test_a_name_is_left_to_the_agent_to_resolve(self):
+        """Only the agent knows what `nas` resolves to on its own network."""
+        assert self._check(["192.168.0.0/16:*"], "nas", 445) is None
+
+
+class TestLocalNetworkSentinel:
+    """`@local` — expanded by the agent, ignored everywhere else."""
+
+    def test_the_agent_expands_it_to_its_own_networks(self, monkeypatch):
+        from hle_client import firepuncher
+
+        monkeypatch.setattr(firepuncher, "is_local", lambda host: host == "192.168.1.101")
+        agent = FpAgentSide(send=Collector(), rules=[ForwardRule(host=LOCAL_NETWORKS)])
+
+        assert agent._target_allowed("192.168.1.101", 22)
+        assert not agent._target_allowed("93.184.216.34", 443)
+
+    def test_a_port_on_the_sentinel_still_narrows_it(self, monkeypatch):
+        from hle_client import firepuncher
+
+        monkeypatch.setattr(firepuncher, "is_local", lambda host: True)
+        agent = FpAgentSide(send=Collector(), rules=[ForwardRule(host=LOCAL_NETWORKS, port=22)])
+
+        assert agent._target_allowed("192.168.1.101", 22)
+        assert not agent._target_allowed("192.168.1.101", 5432)
+
+    def test_it_matches_nothing_without_the_agent_expanding_it(self):
+        """The relay and dashboard must never resolve it — wrong machine."""
+        assert not ForwardRule(host=LOCAL_NETWORKS).matches("192.168.1.101", 22)
+
+    def test_the_refusal_names_the_networks_not_the_sentinel(self, monkeypatch):
+        """ "@local" tells the operator nothing about why their address failed."""
+        from hle_client import firepuncher
+
+        monkeypatch.setattr(firepuncher, "is_local", lambda host: False)
+        monkeypatch.setattr(
+            firepuncher, "describe_local_networks", lambda: ["192.168.2.0/24", "127.0.0.0/8"]
+        )
+        agent = FpAgentSide(send=Collector(), rules=[ForwardRule(host=LOCAL_NETWORKS)])
+
+        assert agent.describe_rules() == ["192.168.2.0/24", "127.0.0.0/8"]
+
+    def test_the_default_carries_static_ranges_for_older_agents(self):
+        """An agent that cannot read the sentinel must not be left with nothing.
+
+        It sees one unreadable rule plus the private ranges — broader than the
+        loopback it has today, rather than a total refusal.
+        """
+        rules = default_rules()
+        assert any(r.host == LOCAL_NETWORKS for r in rules)
+        without_sentinel = [r for r in rules if r.host != LOCAL_NETWORKS]
+        assert is_allowed(without_sentinel, "192.168.1.101", 22)
+        assert not is_allowed(without_sentinel, "93.184.216.34", 443)
 
 
 class TestCloseHandling:
@@ -151,10 +334,12 @@ class TestReconnectPacing:
             await fp_cmd._run(
                 api_key="hle_x",
                 agent="rpi",
-                target_host="localhost",
-                target_port=22,
-                bind_host="127.0.0.1",
-                bind_port=0,
+                forward=fp_cmd.Forward(
+                    target_host="localhost",
+                    target_port=22,
+                    bind_host="127.0.0.1",
+                    bind_port=0,
+                ),
                 relay_host="hle.world",
                 relay_port=443,
             )
@@ -254,10 +439,12 @@ class TestReconnectPacing:
             await fp_cmd._run(
                 api_key="hle_x",
                 agent="rpi",
-                target_host="localhost",
-                target_port=22,
-                bind_host="127.0.0.1",
-                bind_port=0,
+                forward=fp_cmd.Forward(
+                    target_host="localhost",
+                    target_port=22,
+                    bind_host="127.0.0.1",
+                    bind_port=0,
+                ),
                 relay_host="hle.world",
                 relay_port=443,
             )
@@ -291,15 +478,77 @@ class TestForwardRule:
 
 
 class TestIsAllowed:
-    def test_default_is_loopback_only(self):
+    def test_default_covers_the_agent_and_its_private_networks(self):
+        """The homelab, which is the thing an agent exists to reach.
+
+        Loopback-only answered the wrong question: it allowed just the one box
+        the agent happened to run on, while `hle expose --service
+        https://192.168.2.200:8006` — same agent, same LAN, same credential —
+        has never been restricted at all.
+        """
         rules = default_rules()
         assert is_allowed(rules, "localhost", 22)
         assert is_allowed(rules, "127.0.0.1", 5432)
-        assert not is_allowed(rules, "192.168.1.50", 22)
+        assert is_allowed(rules, "192.168.1.50", 22)
+        assert is_allowed(rules, "10.0.0.5", 5432)
+        assert is_allowed(rules, "172.16.4.1", 443)
+
+    def test_the_default_stops_at_the_public_internet(self):
+        """The line worth keeping: an agent is not an outbound proxy.
+
+        Reaching a public host is a legitimate thing to want and a rule away;
+        it is just not something every agent should do out of the box.
+        """
+        rules = default_rules()
+        assert not is_allowed(rules, "93.184.216.34", 443)
+        assert not is_allowed(rules, "8.8.8.8", 53)
+
+    def test_172_16_is_bounded_at_the_right_place(self):
+        """RFC 1918 is 172.16/12 — 172.32 is public and must not slip in."""
+        rules = default_rules()
+        assert is_allowed(rules, "172.31.255.254", 22)
+        assert not is_allowed(rules, "172.32.0.1", 22)
+
+    def test_private_ipv6_is_covered_too(self):
+        rules = default_rules()
+        assert is_allowed(rules, "fd00::1", 22)
+        assert not is_allowed(rules, "2001:4860:4860::8888", 53)
 
     def test_empty_rules_allow_nothing(self):
         # "Not configured" must read as closed, not open.
         assert not is_allowed([], "localhost", 22)
+
+
+class TestCidrRules:
+    """A rule may name a network, so a LAN needn't be listed address by address."""
+
+    def test_a_cidr_rule_matches_addresses_inside_it(self):
+        rule = ForwardRule(host="192.168.1.0/24")
+        assert rule.matches("192.168.1.50", 22)
+        assert not rule.matches("192.168.2.50", 22)
+
+    def test_a_port_still_narrows_a_network(self):
+        rule = ForwardRule(host="192.168.1.0/24", port=22)
+        assert rule.matches("192.168.1.50", 22)
+        assert not rule.matches("192.168.1.50", 5432)
+
+    def test_a_name_is_never_matched_against_a_network(self):
+        """Resolution happens on the agent at connect time.
+
+        Allowing a name here on the strength of what it resolves to *now* would
+        check one answer and then use another.
+        """
+        assert not ForwardRule(host="10.0.0.0/8").matches("nas.local", 22)
+
+    def test_a_malformed_rule_matches_nothing_rather_than_everything(self):
+        """An allowlist entry nobody can parse must fail closed."""
+        assert not ForwardRule(host="192.168.1.0/99").matches("192.168.1.5", 22)
+        assert not ForwardRule(host="not/a/network").matches("192.168.1.5", 22)
+
+    def test_an_exact_host_rule_is_unaffected(self):
+        rule = ForwardRule(host="192.168.1.50")
+        assert rule.matches("192.168.1.50", 22)
+        assert not rule.matches("192.168.1.51", 22)
 
 
 class TestAgentSideAuthorization:
