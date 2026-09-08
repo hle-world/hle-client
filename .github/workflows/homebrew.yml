@@ -23,6 +23,10 @@ jobs:
           echo "Waiting for hle-client==${VERSION} to be installable from PyPI..."
           # pip download actually fetches the artifact — a stronger check than
           # `pip index versions`, whose listing can be cached and lag the file.
+          #
+          # It is still only an indication: the formula is built with uv, and
+          # the two resolvers can see different CDN edges. The install below
+          # retries for that reason rather than trusting this.
           for i in $(seq 1 60); do
             if pip download --no-deps --dest /tmp/pypi-check "hle-client==${VERSION}" >/dev/null 2>&1; then
               echo "hle-client==${VERSION} installable after attempt ${i}."
@@ -51,7 +55,24 @@ jobs:
         run: |
           # Install into a temporary venv to extract metadata without polluting the runner
           uv venv /tmp/formula-venv
-          uv pip install --python /tmp/formula-venv/bin/python "hle-client==${VERSION}"
+
+          # Retried, even though the step above already waited for PyPI. That
+          # check probes with `pip download` and this installs with `uv`: two
+          # resolvers, two CDN edges, and on v2609.5 pip found the release
+          # while uv did not — "no version of hle-client==2609.5", seven
+          # minutes after the tag. Verifying availability with a different
+          # tool than the one that does the work is not verifying it.
+          for i in $(seq 1 40); do
+            if uv pip install --python /tmp/formula-venv/bin/python "hle-client==${VERSION}"; then
+              break
+            fi
+            if [ "$i" -eq 40 ]; then
+              echo "::error::hle-client==${VERSION} still not installable by uv after ~10 minutes"
+              exit 1
+            fi
+            echo "uv cannot see ${VERSION} yet (attempt ${i}/40); waiting 15s..."
+            sleep 15
+          done
 
           /tmp/formula-venv/bin/python << 'PYEOF'
           import json, urllib.request, importlib.metadata, textwrap
