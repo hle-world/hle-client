@@ -1,5 +1,91 @@
 # Changelog
 
+## v2609.5 — 2026-09-08
+
+The CLI has one grammar now: **`hle <noun> <verb>`**. Every old spelling still
+works, so nothing you have written needs changing today.
+
+### Changed
+
+- **One shape, instead of four.** The top level mixed bare verbs (`expose`,
+  `webhook`, `preflight`), an abbreviation (`fp`), noun-verb (`agent list`),
+  and a noun that named the wrong thing — `config` meant *tunnels*, while the
+  client's actual config is what `auth login` writes. There was no rule to
+  learn, so every command had to be looked up.
+
+  ```
+  hle tunnel create ha http://localhost:8123
+  hle tunnel list | get ha | delete ha
+  hle forward rpi 22 --port 9922
+  hle daemon install tunnel|agent|forward
+  hle status
+  ```
+
+  `config` → `tunnel`, `service` → `daemon` (it meant three unrelated things,
+  two of them in `hle service install --service http://…`), `fp` → `forward`.
+  Old names are hidden from `--help` and print one line to stderr naming the
+  replacement — they are in unit files, scripts and years of support answers,
+  and they keep working.
+
+- **Arguments instead of required flags.** `hle tunnel create ha <url>` and
+  `hle forward rpi 22`. A flag you must always pass is an argument wearing a
+  costume; `--service X --label ha` was the longest way to say two words.
+  `--service`, `--label`, `--agent` and `--to` are all still accepted.
+
+- **`daemon install` is three commands.** It carried twenty flags across three
+  mutually exclusive modes, with help text that had to prefix options with
+  "fp mode:". Each mode now shows only what applies to it. The flag form still
+  dispatches.
+
+- **`hle auth login --agent-token`** saves an enrollment token, so there is one
+  place to put a credential whichever kind you were handed. `auth status` now
+  reports both, rather than the first one it finds.
+
+- **rich is optional.** It buys appearance, not function, and the client has to
+  fit on a pfSense or OpenWrt box. `pip install hle-client` no longer pulls it
+  in; output degrades to plain text. `pip install hle-client[pretty]` restores
+  colour and tables, and is what you want anywhere a human reads the output.
+
+### Added
+
+- **`hle status`** — what this machine is set up to do, on one screen:
+  credentials, installed services, published tunnels, agents. The data existed,
+  spread across four commands a new user has no reason to know about.
+- **`hle tunnel delete`** — creating without deleting was the gap people hit
+  first. Requires the tunnel to be disconnected, since deleting its record
+  takes the access rules with it.
+- **`hle daemon logs`** — a service manager reports "active (running)" for an
+  agent that has no token, exits immediately and is restarted forever. Seeing
+  why meant knowing journalctl's flags, or where launchd had been told to write.
+- **`hle completion bash|zsh|fish`** — Click could always generate this; it was
+  never exposed.
+- **`-o json`** on the commands that read a resource, so scripting does not
+  depend on parsing tables. Global flags are declared once at the root and work
+  wherever you type them.
+- **`NO_COLOR`, `--no-color`, and TTY detection**, none of which existed —
+  piping output wrote escape codes into the file.
+- **Plugins.** A `hle_client.plugins` entry point can add commands. The first
+  is **`hle-tui`**: `pip install hle-tui` and `hle tui` appears — an
+  interactive dashboard for tunnels, agents and services. The core never
+  imports textual, so a constrained device carries none of it. A plugin that
+  fails to import is skipped rather than taking the CLI down, and one that
+  tries to shadow a built-in is refused.
+
+### Fixed
+
+- **`hle tunnel create <url>` with no label** failed with "Missing argument
+  URL" — Click fills an optional argument before a required one. Both forms
+  work now.
+- **`hle stop <label>` never existed**, and the Docker docs told people to run
+  it. It has not been added: the relay's close for a user-initiated disconnect
+  is deliberately non-fatal, so the client reconnects a second later — the
+  command would report success and change nothing. Stopping a tunnel means
+  stopping the process serving it.
+- **httpx narrated every HTTP request at INFO**, so `hle status` opened with
+  two lines of log before saying anything you asked for.
+- A machine enrolled before scoped credentials, carrying an `hlea_` token in
+  `HLE_API_KEY`, is read correctly instead of looking like it has none.
+
 ## v2609.4 — 2026-09-07
 
 ### Fixed
