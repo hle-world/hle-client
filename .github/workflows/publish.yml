@@ -99,6 +99,7 @@ jobs:
           # POSIX sh: these steps run under `sh -e`, so no `shopt`. An
           # unmatched glob stays literal, which the -d test catches.
           set -eu
+          failed=""
           for plugin in plugins/*/; do
             [ -d "$plugin" ] || continue
             [ -f "${plugin}pyproject.toml" ] || continue
@@ -108,9 +109,29 @@ jobs:
             # releases more often than a plugin changes, and re-uploading the
             # same version fails the whole job for no reason.
             python -m build --outdir "dist-${name}" "$plugin"
-            twine upload --skip-existing "dist-${name}"/*
+            # A 403 here is almost always the token's scope, not a broken
+            # build: PYPI_API_TOKEN is scoped to hle-client, and a
+            # project-scoped token cannot create a project that does not exist
+            # yet. That is a one-time setup step for a new plugin, and it must
+            # not mark the core release — already published by the job above —
+            # as failed.
+            if ! twine upload --skip-existing "dist-${name}"/*; then
+              echo "::warning::Could not upload ${name}. If it is new to PyPI, the"\
+                   "release token is scoped to hle-client and cannot create it:"\
+                   "reserve the name with an account-scoped token once, or"\
+                   "configure Trusted Publishing for ${name}."
+              failed="${failed} ${name}"
+            fi
             echo "::endgroup::"
           done
+
+          # Reported in the summary rather than as a failed job. The core
+          # release is what this workflow exists to ship, and it is already on
+          # PyPI by the time this runs; failing here would call a good release
+          # bad. The warnings above say which plugin and why.
+          if [ -n "${failed}" ]; then
+            echo "Plugins not published:${failed}" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   notify-operator:
     name: Notify hle-operator
