@@ -12,12 +12,14 @@ years of support answers are written against them.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import click
 import pytest
 from click.testing import CliRunner
 
+from hle_client import __version__
 from hle_client.aliases import hoist_global_options
 from hle_client.cli import main
 
@@ -53,6 +55,27 @@ class TestOneGrammar:
     def test_an_unknown_command_is_still_unknown(self):
         """The alias table must not turn typos into silent successes."""
         assert main.get_command(_ctx(), "explode") is None
+
+
+class TestVersionIsAskable:
+    """`hle version` answered with a usage error, in a CLI whose whole claim is
+    that everything is a word you can guess. `--version` existed; nobody types
+    it first."""
+
+    def test_version_prints_the_version(self):
+        result = CliRunner().invoke(main, ["version"])
+        assert result.exit_code == 0
+        assert __version__ in result.output
+
+    def test_version_answers_json_like_every_other_read(self):
+        result = CliRunner().invoke(main, ["version", "-o", "json"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"version": __version__}
+
+    def test_the_flag_still_works(self):
+        result = CliRunner().invoke(main, ["--version"])
+        assert result.exit_code == 0
+        assert __version__ in result.output
 
 
 class TestDeprecationNotice:

@@ -23,6 +23,7 @@ INSTALL_SERVICE=1
 SERVICE_SCOPE=""   # "", "--user", or "--system"; empty lets the CLI auto-detect
 SYSTEM_LINK=""     # set when hle was linked into a directory already on PATH
 MODIFY_PATH=1      # every published instruction says to run `hle`; make it work
+REINSTALL=0        # force a from-scratch build over an upgrade in place
 
 usage() {
     cat <<'EOF'
@@ -35,6 +36,7 @@ Options:
                     Without it, --agent prompts on the terminal.
   --no-service      With --agent: enroll only, don't install a service
   --no-modify-path  Don't add ~/.local/bin to your shell's PATH
+  --reinstall       Rebuild from scratch instead of upgrading in place
   --user            Install a per-user service (no sudo; needs linger on Linux)
   --system          Install a system-wide service (starts at boot; needs sudo)
   -h, --help        Show this help
@@ -53,6 +55,7 @@ while [ $# -gt 0 ]; do
         --token=*) AGENT_TOKEN="${1#*=}"; AGENT=1; shift ;;
         --no-service) INSTALL_SERVICE=0; shift ;;
         --no-modify-path) MODIFY_PATH=0; shift ;;
+        --reinstall) REINSTALL=1; shift ;;
         --user) SERVICE_SCOPE="--user"; shift ;;
         --system) SERVICE_SCOPE="--system"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -286,6 +289,49 @@ link_into_system_path() {
     return 0
 }
 
+# --- Upgrading an existing install ---
+#
+# Re-running this script used to be the documented way to upgrade, and it was
+# the wrong tool for it. It rebuilds the venv from scratch — `rm -rf` first —
+# which pulls the files out from under an agent that is still running, leaves
+# the service file pointing at the previous install, and never restarts
+# anything. On a firewall that produced an agent serving traffic from deleted
+# files until the next restart, then silently failing to come back.
+#
+# `hle update` was written for exactly this: it upgrades in place, rebuilds the
+# service against the new client and restarts it. Hand off to it when it exists.
+
+have_working_hle() {
+    command -v hle >/dev/null 2>&1 && hle --version >/dev/null 2>&1
+}
+
+hle_can_self_update() {
+    hle update --help >/dev/null 2>&1
+}
+
+upgrade_in_place() {
+    info "Already installed: $(hle --version 2>/dev/null). Upgrading in place."
+    if [ -n "$VERSION" ]; then
+        hle update --yes --version "$VERSION" || return 1
+    else
+        hle update --yes || return 1
+    fi
+    return 0
+}
+
+refresh_existing_services() {
+    # Older clients have no `daemon refresh`; there is nothing sensible to do
+    # for them here, and saying so is better than a confusing error.
+    if ! hle daemon refresh --help >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ -z "$(hle daemon list 2>/dev/null | grep -v '^No hle services')" ]; then
+        return 0
+    fi
+    info "Rebuilding installed services against the new client..."
+    hle daemon refresh --all || warn "Some services did not come back. Check: hle daemon status"
+}
+
 # --- Agent setup ---
 
 # Enroll this machine as an agent. The token is passed to `hle agent enroll`,
@@ -294,6 +340,15 @@ link_into_system_path() {
 agent_enroll() {
     if [ -n "$AGENT_TOKEN" ]; then
         hle agent enroll "$AGENT_TOKEN" || return 1
+        return 0
+    fi
+
+    # Already enrolled: re-running --agent to pick up a new client version is
+    # the common case, and demanding a fresh token for it is both pointless and
+    # unanswerable — the token is shown once, at creation, and re-enrolling
+    # against a new one abandons the agent identity the dashboard knows.
+    if hle agent status >/dev/null 2>&1; then
+        info "This machine is already enrolled — keeping its existing agent token."
         return 0
     fi
 
@@ -369,6 +424,16 @@ main() {
     OS=$(detect_os)
     info "Detected OS: $OS"
 
+    if [ "$REINSTALL" -eq 0 ] && have_working_hle && hle_can_self_update; then
+        if upgrade_in_place; then
+            if [ "$AGENT" -eq 1 ]; then
+                setup_agent
+            fi
+            exit 0
+        fi
+        warn "Upgrading in place failed. Rebuilding from scratch instead."
+    fi
+
     if [ "$OS" = "freebsd" ]; then
         PYTHON=$(find_python) || {
             error "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not found."
@@ -422,6 +487,12 @@ main() {
         fi
         exit 0
     fi
+
+    # A from-scratch build replaces the client underneath any service already
+    # installed here, which keeps starting the old path until something
+    # rewrites it. Nothing did, and the result was an agent that had been
+    # "running" for weeks against a client that no longer existed.
+    refresh_existing_services
 
     if [ "$AGENT" -eq 1 ]; then
         setup_agent

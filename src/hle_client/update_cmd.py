@@ -188,7 +188,7 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
     # nothing about it looks wrong — `hle --version` reports the new one while
     # the process serving traffic is the previous release. Telling people to
     # "restart any running tunnels" left that gap open until they acted on it.
-    from hle_client.service_cmd import installed_services, restart_service
+    from hle_client.service_cmd import installed_services, refresh_service
 
     try:
         services = installed_services()
@@ -213,7 +213,13 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
     needs_root = False
     for svc, user_mode in services:
         scope = "user" if user_mode else "system"
-        if restart_service(svc, user_mode):
+        # Rebuild, not just restart. The service file records the path the
+        # previous client lived at, and an upgrade can move it — a restart
+        # then faithfully re-runs a command that is no longer there.
+        outcome = refresh_service(svc, user_mode)
+        if outcome == "refreshed":
+            console.print(f"  [green]rebuilt and started[/green] {svc} ({scope})")
+        elif outcome == "restarted":
             console.print(f"  [green]restarted[/green] {svc} ({scope})")
         else:
             failed.append((svc, user_mode))
