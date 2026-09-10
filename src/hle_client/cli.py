@@ -26,6 +26,7 @@ from hle_client.config_cmd import config as config_group
 from hle_client.credentials import normalize_credential_env
 from hle_client.fp_cmd import fp as fp_command
 from hle_client.output import OUTPUT_FORMATS, TABLE, Output, api_key_from_ctx
+from hle_client.output import from_ctx as output_from_ctx
 from hle_client.richcompat import Console
 from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import (
@@ -566,6 +567,22 @@ main.add_command(service_group, name="daemon")
 # "firepuncher" from `fp`.
 main.add_command(fp_command, name="forward")
 main.add_command(update_command, name="update")
+
+
+@main.command("version")
+@click.pass_context
+def version_command(ctx: click.Context) -> None:
+    """Print the installed version.
+
+    `--version` already did this, but every other question this CLI answers is
+    a noun and a verb, so `hle version` is what people type first. It printing
+    a usage error was the grammar failing on its own terms.
+    """
+    out = output_from_ctx(ctx)
+    out.data({"version": __version__})
+    out.print(f"hle, version {__version__}")
+
+
 plugins.register(main)
 
 

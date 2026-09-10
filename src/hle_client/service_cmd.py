@@ -17,11 +17,13 @@ Windows is not supported (use Task Scheduler / NSSM manually).
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -33,6 +35,7 @@ from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 
 import click
 
+from hle_client import __version__
 from hle_client.aliases import LegacyModeCommand, ModeGroup
 from hle_client.richcompat import Console
 
@@ -47,6 +50,45 @@ _RCD_DIR = Path("/usr/local/etc/rc.d")
 
 # Label used for the agent's unit/plist when the user doesn't override it.
 AGENT_LABEL = "agent"
+
+# Every generated unit, plist and rc script carries the arguments it was built
+# from, as a comment. Without it an upgrade can restart a service but cannot
+# rebuild one, because the only record of "what was installed here" was the
+# command the user typed months ago. Re-deriving it by parsing the exec line
+# back into flags is guesswork that fails silently; reading it back is not.
+_SPEC_MARKER = "hle-spec:"
+
+
+def spec_comment(spec: dict[str, Any] | None, *, xml: bool = False) -> str | None:
+    """One-line, machine-readable record of how a service was generated."""
+    if spec is None:
+        return None
+    blob = json.dumps(spec, sort_keys=True, separators=(",", ":"))
+    if xml:
+        # "--" cannot appear inside an XML comment; JSON never emits it except
+        # inside a string, where - is the same character to any reader.
+        return f"<!-- {_SPEC_MARKER} {blob.replace('--', r'--')} -->"
+    return f"# {_SPEC_MARKER} {blob}"
+
+
+def parse_service_spec(text: str) -> dict[str, Any] | None:
+    """Read back what ``spec_comment`` wrote, or None for a file without one.
+
+    None means the file predates this — it is not an error, just the case
+    where a refresh has to say so rather than guess.
+    """
+    for line in text.splitlines():
+        index = line.find(_SPEC_MARKER)
+        if index == -1:
+            continue
+        blob = line[index + len(_SPEC_MARKER) :].strip()
+        blob = blob.removesuffix("-->").strip()
+        try:
+            parsed = json.loads(blob)
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -248,10 +290,13 @@ def render_unit(
     agent_config: str | None = None,
     description: str | None = None,
     restart: str = "on-failure",
+    spec: dict[str, Any] | None = None,
 ) -> str:
     """Render the systemd unit file text. Pure function (unit-testable)."""
     exec_start = f"{hle_path} {_quote_exec_args(run_args)}"
+    stamp = spec_comment(spec)
     lines = [
+        *([stamp] if stamp else []),
         "[Unit]",
         f"Description={description or f'HLE tunnel: {label}'}",
         "After=network-online.target",
@@ -390,6 +435,7 @@ def _systemd_install(
     description: str | None = None,
     restart: str = "on-failure",
     agent_config: str | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> None:
     run_as_user = run_as or (None if user_mode else getpass.getuser())
     unit = render_unit(
@@ -401,6 +447,7 @@ def _systemd_install(
         run_as_user=run_as_user,
         description=description,
         restart=restart,
+        spec=spec,
     )
     uname = unit_name(label, name)
 
@@ -551,6 +598,7 @@ def render_launchd_plist(
     run_as_user: str | None,
     log_dir: str,
     agent_config: str | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> str:
     """Render a launchd plist. Pure function (unit-testable).
 
@@ -566,6 +614,7 @@ def render_launchd_plist(
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
         '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
         '<plist version="1.0">',
+        *([line] if (line := spec_comment(spec, xml=True)) else []),
         "<dict>",
         "    <key>Label</key>",
         f"    <string>{_xml_escape(plist_label)}</string>",
@@ -632,6 +681,7 @@ def _launchd_install(
     run_as: str | None,
     start: bool,
     agent_config: str | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> None:
     # Per-user agents run as the invoking user already; only system daemons
     # need an explicit UserName so the tunnel reads that user's config.
@@ -645,6 +695,7 @@ def _launchd_install(
         run_as_user=run_as_user,
         log_dir=_launchd_log_dir(user_mode),
         agent_config=agent_config,
+        spec=spec,
     )
     path = _launchd_dir(user_mode) / f"{plabel}.plist"
     try:
@@ -737,6 +788,7 @@ def render_rc_script(
     name: str | None = None,
     description: str | None = None,
     restart: bool = True,
+    spec: dict[str, Any] | None = None,
 ) -> str:
     """Render the rc.d script text. Pure function (unit-testable).
 
@@ -760,6 +812,7 @@ def render_rc_script(
         f"# {description or f'HLE tunnel: {label}'}",
         "# Generated by `hle daemon install` — edits are lost on reinstall.",
         "#",
+        *([line] if (line := spec_comment(spec)) else []),
         f"# PROVIDE: {svc}",
         "# REQUIRE: NETWORKING DAEMON",
         "# KEYWORD: shutdown",
@@ -823,6 +876,65 @@ def _sysrc(assignment: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(["sysrc", assignment], check=False)  # noqa: S603 — argv built internally
 
 
+def _rcd_running(svc: str) -> bool:
+    """Whether rc.d reports the service as running, quietly."""
+    return (
+        subprocess.run(  # noqa: S603 — argv built internally
+            ["service", svc, "status"], check=False, capture_output=True
+        ).returncode
+        == 0
+    )
+
+
+def _rcd_settles(svc: str, *, timeout: float = 8.0) -> bool:
+    """Whether the service is still running a moment after being told to start.
+
+    ``service ... start`` exits 0 as soon as ``daemon(8)`` has forked, which it
+    does whether or not the thing it supervises can run at all. That is how an
+    agent with a broken venv or an unreadable token reported a successful
+    install and a healthy pid while never connecting — the install was reading
+    the supervisor's fork, not the agent's fate. Wait, then look again.
+    """
+    deadline = time.monotonic() + timeout
+    settled = False
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        if not _rcd_running(svc):
+            return False
+        settled = True
+    return settled
+
+
+def service_log_tail(svc: str, lines: int = 15) -> str:
+    """Last few lines of a service's log file, or "" if there is nothing to read.
+
+    Printed on a failed start. The alternative — telling the user which file to
+    go and read — is the step that turned a one-command install into an
+    afternoon, because the interesting line is always already in the file.
+    """
+    path = Path("/var/log") / f"{svc}.log"
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def _report_failed_start(svc: str) -> None:
+    """Say a service did not come up, and show the evidence."""
+    console.print(f"[red]{svc} is not running.[/red]")
+    tail = service_log_tail(svc)
+    if tail:
+        console.print(f"[dim]Last lines of /var/log/{svc}.log:[/dim]")
+        console.print(f"[dim]{tail}[/dim]")
+    else:
+        console.print(
+            f"[dim]/var/log/{svc}.log is empty or missing, so it failed before it could "
+            f"log. Run it in the foreground to see why:[/dim]"
+        )
+        console.print("[dim]  hle agent run[/dim]")
+
+
 def _rcd_install(
     *,
     label: str,
@@ -833,6 +945,7 @@ def _rcd_install(
     description: str | None = None,
     restart: bool = True,
     agent_config: str | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> None:
     svc = rc_service_name(label, name)
     script = render_rc_script(
@@ -844,6 +957,7 @@ def _rcd_install(
         name=name,
         description=description,
         restart=restart,
+        spec=spec,
     )
     path = _rcd_path(svc)
     try:
@@ -861,12 +975,12 @@ def _rcd_install(
     _sysrc(f"{svc}_enable=YES")
     if start:
         result = _service_cmd(svc, "start")
-        if result.returncode == 0:
+        if result.returncode == 0 and _rcd_settles(svc):
             console.print(f"[green]Started[/green] {svc}")
         else:
-            console.print(
-                f"[yellow]Installed but failed to start {svc}.[/yellow] Check /var/log/{svc}.log"
-            )
+            console.print(f"[yellow]Installed, but {svc} did not stay up.[/yellow]")
+            _report_failed_start(svc)
+            raise SystemExit(1)
     else:
         console.print(f"Run: service {svc} start")
 
@@ -975,7 +1089,18 @@ def restart_service(name: str, user_mode: bool | None = None) -> bool:
     """
     plat = current_platform()
     if plat == "freebsd":
-        return _service_cmd(name, "restart").returncode == 0
+        # Detached on purpose. On a firewall the agent usually carries the
+        # tunnel the operator is reaching the box through, so stopping it
+        # drops their session — and a restart running in that session dies
+        # with it, between the stop and the start. The agent stays down and
+        # the machine is now unreachable, which is the one failure this
+        # command must not be able to cause. daemon(8) outlives the session.
+        launched = subprocess.run(  # noqa: S603 — argv built internally
+            ["/usr/sbin/daemon", "-f", "service", name, "restart"], check=False
+        )
+        if launched.returncode != 0:
+            return _service_cmd(name, "restart").returncode == 0
+        return _rcd_settles(name)
     if plat == "darwin":
         domain = "system" if os.geteuid() == 0 else f"gui/{os.getuid()}"
         return _launchctl("kickstart", "-k", f"{domain}/{name}").returncode == 0
@@ -994,6 +1119,104 @@ def restart_service(name: str, user_mode: bool | None = None) -> bool:
             f"          sudo systemctl restart {name}[/dim]"
         )
     return False
+
+
+def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
+    """Write and start one service from its spec, on whichever manager runs here.
+
+    The single place a service gets generated, so ``hle daemon install`` and a
+    later ``hle daemon refresh`` cannot drift apart — a refresh that rebuilt
+    something subtly different from what install writes would be worse than no
+    refresh at all.
+    """
+    label = str(spec["label"])
+    run_args = [str(a) for a in spec["run_args"]]
+    name = spec.get("name")
+    user_mode = bool(spec.get("user_mode"))
+    stamped = {**spec, "version": __version__}
+    if plat == "freebsd":
+        _rcd_reject_user_mode(user_mode)
+        _rcd_install(
+            label=label,
+            run_args=run_args,
+            name=name,
+            run_as=spec.get("run_as"),
+            start=start,
+            description=spec.get("description"),
+            restart=spec.get("restart", "on-failure") != "no",
+            agent_config=spec.get("agent_config"),
+            spec=stamped,
+        )
+    elif plat == "darwin":
+        _launchd_install(
+            label=label,
+            run_args=run_args,
+            name=name,
+            user_mode=user_mode,
+            run_as=spec.get("run_as"),
+            start=start,
+            agent_config=spec.get("agent_config"),
+            spec=stamped,
+        )
+    else:
+        _systemd_install(
+            label=label,
+            run_args=run_args,
+            name=name,
+            user_mode=user_mode,
+            run_as=spec.get("run_as"),
+            start=start,
+            description=spec.get("description"),
+            restart=str(spec.get("restart", "on-failure")),
+            agent_config=spec.get("agent_config"),
+            spec=stamped,
+        )
+
+
+def service_file(name: str, user_mode: bool) -> Path | None:
+    """Where the service manager keeps the file for an installed service."""
+    plat = current_platform()
+    if plat == "freebsd":
+        return _rcd_path(name)
+    if plat == "darwin":
+        return _launchd_dir(user_mode) / (name if name.endswith(".plist") else f"{name}.plist")
+    return _unit_dir(user_mode) / name
+
+
+def service_spec(name: str, user_mode: bool) -> dict[str, Any] | None:
+    """The spec a service was generated from, or None if it predates stamping."""
+    path = service_file(name, user_mode)
+    if path is None:
+        return None
+    try:
+        return parse_service_spec(path.read_text(errors="replace"))
+    except OSError:
+        return None
+
+
+def refresh_service(name: str, user_mode: bool) -> str:
+    """Rebuild one service against the installed client, then start it.
+
+    Returns one of ``"refreshed"``, ``"restarted"`` or ``"failed"``.
+
+    An upgrade replaces the client underneath a service whose file still
+    encodes where the previous one lived and what environment it needed. The
+    service manager will happily keep starting the old command: on a firewall
+    that showed up as an agent that had been "running" for weeks while the
+    dashboard reported it offline on a version no longer installed. Restarting
+    could not fix that, because the thing being restarted was wrong.
+
+    Without a spec there is nothing to rebuild from, so this falls back to a
+    plain restart rather than inventing arguments.
+    """
+    spec = service_spec(name, user_mode)
+    if spec is None:
+        return "restarted" if restart_service(name, user_mode) else "failed"
+    try:
+        _install_from_spec(spec, plat=current_platform(), start=True)
+    except SystemExit:
+        return "failed"
+    return "refreshed"
 
 
 def _resolve_label(label: str | None, agent_mode: bool, *, extra_hint: str = "") -> str:
@@ -1202,40 +1425,18 @@ def install(
             "[cyan]hle agent enroll <token>[/cyan]."
         )
 
-    if plat == "freebsd":
-        _rcd_reject_user_mode(user_mode)
-        _rcd_install(
-            label=label,
-            run_args=run_args,
-            name=name,
-            run_as=run_as,
-            start=start,
-            description=description,
-            restart=restart != "no",
-            agent_config=agent_config,
-        )
-    elif plat == "darwin":
-        _launchd_install(
-            label=label,
-            run_args=run_args,
-            name=name,
-            user_mode=user_mode,
-            run_as=run_as,
-            start=start,
-            agent_config=agent_config,
-        )
-    else:
-        _systemd_install(
-            label=label,
-            run_args=run_args,
-            name=name,
-            user_mode=user_mode,
-            run_as=run_as,
-            start=start,
-            description=description,
-            restart=restart,
-            agent_config=agent_config,
-        )
+    spec = {
+        "version": __version__,
+        "label": label,
+        "run_args": run_args,
+        "name": name,
+        "run_as": run_as,
+        "description": description,
+        "restart": restart,
+        "agent_config": agent_config,
+        "user_mode": user_mode,
+    }
+    _install_from_spec(spec, plat=plat, start=start)
 
     if agent_mode:
         console.print(
@@ -1495,6 +1696,72 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
         console.print(f"[green]Restarted[/green] {svc}")
     else:
         console.print(f"[red]Could not restart[/red] {svc}")
+        raise SystemExit(1)
+
+
+@service.command("refresh")
+@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
+@click.option("--label", default=None, help="Service label")
+@click.option("--name", default=None, help="Explicit unit/plist name")
+@click.option("--all", "refresh_all", is_flag=True, default=False, help="Refresh every hle service")
+def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: bool) -> None:
+    """Rebuild a service file against the installed client, then start it.
+
+    For after an upgrade, or after anything that moved the client on disk. A
+    restart re-runs whatever the service file says; this rewrites the file
+    first, from the arguments recorded in it when it was installed.
+
+    `hle update` does this for you. Reach for it directly when a client was
+    upgraded some other way — a package manager, a rebuilt venv, a restored
+    backup — and the service is still pointing at the old one.
+    """
+    _require_supported()
+    if refresh_all:
+        services = installed_services()
+        if not services:
+            console.print("No hle services installed.")
+            return
+        failed: list[str] = []
+        for svc, user_mode in services:
+            scope = "user" if user_mode else "system"
+            outcome = refresh_service(svc, user_mode)
+            if outcome == "refreshed":
+                console.print(f"{svc} ({scope}): [green]rebuilt and started[/green]")
+            elif outcome == "restarted":
+                # No recorded spec, so there was nothing to rebuild from. Say
+                # so: the user may be looking at exactly the stale file this
+                # command exists to replace, and a plain restart will not fix
+                # it. Reinstalling is then the honest next step.
+                console.print(
+                    f"{svc} ({scope}): [yellow]restarted only[/yellow] "
+                    "— installed before this client recorded how, so it cannot be rebuilt"
+                )
+            else:
+                console.print(f"{svc} ({scope}): [red]failed[/red]")
+                failed.append(svc)
+        if failed:
+            raise SystemExit(1)
+        return
+
+    plat = current_platform()
+    label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
+    if plat == "freebsd":
+        svc = rc_service_name(label, name)
+    elif plat == "darwin":
+        svc = launchd_label(label, name)
+    else:
+        svc = unit_name(label, name)
+    outcome = refresh_service(svc, False)
+    if outcome == "refreshed":
+        console.print(f"[green]Rebuilt and started[/green] {svc}")
+    elif outcome == "restarted":
+        console.print(
+            f"[yellow]Restarted {svc} without rebuilding it.[/yellow] It was installed "
+            "before this client recorded how, so there is nothing to rebuild from.\n"
+            "Reinstall it to fix that: [cyan]hle daemon install agent[/cyan]"
+        )
+    else:
+        console.print(f"[red]Could not refresh[/red] {svc}")
         raise SystemExit(1)
 
 
