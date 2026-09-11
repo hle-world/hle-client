@@ -1,5 +1,56 @@
 # Changelog
 
+## v2609.6 — 2026-09-11
+
+Upgrading an installed agent is now a supported operation. It was not, and on
+a firewall that was expensive.
+
+### Fixed
+
+- **Upgrading no longer breaks the thing it upgrades.** The documented way to
+  update was to re-run the install script. That script builds from scratch: it
+  deletes the virtual environment and recreates it, which pulls the files out
+  from under a running agent, and it leaves the service file describing the
+  install it replaced. The agent kept serving traffic from deleted files until
+  the next restart, then failed to come back and wrote nothing to its log. The
+  only visible sign was a dashboard reporting it offline on a version that was
+  no longer installed.
+
+  The installer now hands off to `hle update`, which upgrades in place,
+  rebuilds the service and restarts it. `--reinstall` forces the old
+  from-scratch build for the cases that want it.
+
+- **`--agent` no longer asks an enrolled machine for a token.** Re-running the
+  installer to pick up a new version prompted for an enrollment token, which
+  is shown exactly once at creation and cannot be produced again. Answering it
+  with a fresh token abandons the agent identity the dashboard knows.
+
+- **A failed start is reported as one.** On FreeBSD, `service … start` exits 0
+  as soon as `daemon(8)` has forked, whether or not the process it supervises
+  can run at all. An install that could never work reported success and a
+  healthy pid. Installs now check the service is still up a moment later and
+  print the tail of its log when it is not.
+
+- **Restarting an agent cannot lock you out of the machine.** On a firewall the
+  agent usually carries the tunnel the operator is connected through, so
+  stopping it drops their session — and a restart running in that session dies
+  between the stop and the start, leaving the agent down and the box
+  unreachable. rc.d restarts now run detached.
+
+### Added
+
+- **`hle daemon refresh`** rebuilds a service file against the installed client
+  and starts it. Restarting only re-runs whatever the file already says; when
+  an upgrade has moved the client, that is the problem rather than the fix.
+
+  To make this exact, generated units, plists and rc scripts now record the
+  arguments they were built from in a one-line comment. Services installed by
+  an earlier version have no such record, so they fall back to a plain restart
+  and say so — reinstall them once to get the rest.
+
+- **`hle version`**, which was a usage error in a CLI whose whole claim is that
+  every command is a word you can guess. `--version` still works.
+
 ## v2609.5 — 2026-09-08
 
 The CLI has one grammar now: **`hle <noun> <verb>`**. Every old spelling still
