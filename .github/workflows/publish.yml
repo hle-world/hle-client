@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     container:
       image: python:3.13-slim
     steps:
@@ -31,7 +31,7 @@ jobs:
 
   publish:
     needs: test
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     container:
       image: python:3.13-slim
     environment: pypi
@@ -136,7 +136,7 @@ jobs:
   notify-operator:
     name: Notify hle-operator
     needs: publish
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     container:
       image: python:3.13-slim
     env:
@@ -158,7 +158,7 @@ jobs:
   sync-hle-webapp:
     name: Trigger hle-webapp release
     needs: publish
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     container:
       image: python:3.13-slim
     env:

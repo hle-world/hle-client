@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     # The suite takes about two minutes. This is not a limit on the tests, it is
     # a limit on a dead runner: when an ARC pod dies mid-job the job stays
     # "in_progress" forever, holds its slot, and starves the queue behind it in

@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   update-formula:
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     container:
       image: python:3.13-slim
 

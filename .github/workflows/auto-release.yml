@@ -17,7 +17,7 @@ jobs:
     if: >
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'chore/release-')
-    runs-on: arc-runner-hle-client
+    runs-on: [self-hosted, homelab]
     # A release that never finishes is worse than one that fails: the tag is
     # absent, the checks are green, and only the verify job below says so.
     timeout-minutes: 15
