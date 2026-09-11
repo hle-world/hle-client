@@ -1,5 +1,9 @@
 # Changelog
 
+## v2609.6 — 2026-09-11
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2609.5 — 2026-09-08
 
 The CLI has one grammar now: **`hle <noun> <verb>`**. Every old spelling still
