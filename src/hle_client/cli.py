@@ -13,7 +13,7 @@ from typing import Any
 
 import click
 
-from hle_client import __version__, plugins
+from hle_client import __version__, plugins, shutdown
 from hle_client.agent import (
     AGENT_TOKEN_PREFIX,
     AgentClient,
@@ -333,7 +333,7 @@ def expose(
     console.print()
 
     try:
-        asyncio.run(tunnel.connect())
+        shutdown.run(tunnel.connect())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
@@ -405,7 +405,7 @@ def webhook(
     console.print()
 
     try:
-        asyncio.run(tunnel.connect())
+        shutdown.run(tunnel.connect())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
@@ -698,7 +698,7 @@ def run(token: str | None, relay_host: str, relay_port: int) -> None:
     console.print(f"[green]Agent running[/green] — control: {client.control_uri}")
     console.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
     try:
-        asyncio.run(client.run())
+        shutdown.run(client.run())
     except KeyboardInterrupt:
         console.print("\n[yellow]Agent stopped.[/yellow]")
         return
