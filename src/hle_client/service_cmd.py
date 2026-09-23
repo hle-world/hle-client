@@ -37,7 +37,7 @@ import click
 
 from hle_client import __version__
 from hle_client.aliases import LegacyModeCommand, ModeGroup
-from hle_client.richcompat import Console
+from hle_client.richcompat import Console, Table
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -743,17 +743,65 @@ def _launchd_status(*, label: str, name: str | None, user_mode: bool) -> None:
         console.print(f"[yellow]{plabel} is not loaded.[/yellow]")
 
 
-def _launchd_list(*, user_mode: bool) -> None:
-    # launchctl list has no glob; filter its output for our label prefix.
+def _launchd_plist_dirs() -> list[tuple[Path, bool]]:
+    """The two places a plist can live, as ``(dir, user_mode)``. No mkdir."""
+    return [
+        (Path.home() / "Library" / "LaunchAgents", True),
+        (Path("/Library/LaunchDaemons"), False),
+    ]
+
+
+def _launchd_installed(scope: bool | None = None) -> list[tuple[str, bool]]:
+    """Every hle plist on disk, as ``(label, user_mode)``.
+
+    ``launchctl list`` only answers for the domain it is asked from: a per-user
+    session sees LaunchAgents, root sees LaunchDaemons, and neither sees the
+    other. Listing from it showed one scope and called it the whole picture,
+    which hid exactly the duplicate `hle daemon install` refuses to create.
+    The plists on disk are the installed set; loaded state is a detail on top.
+    """
+    found: list[tuple[str, bool]] = []
+    for directory, is_user in _launchd_plist_dirs():
+        if scope is not None and is_user != scope:
+            continue
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob(f"{_LAUNCHD_LABEL_PREFIX}*.plist")):
+            found.append((path.name.removesuffix(".plist"), is_user))
+    return found
+
+
+def _launchctl_loaded_labels() -> set[str]:
+    """Labels loaded in the domain launchctl answers for from here."""
     result = subprocess.run(  # noqa: S603 — argv built internally
         ["launchctl", "list"], check=False, capture_output=True, text=True
     )
-    matched = [
-        ln
+    return {
+        ln.split()[-1]
         for ln in result.stdout.splitlines()
-        if _LAUNCHD_LABEL_PREFIX in ln or ln.startswith("PID")
-    ]
-    console.print("\n".join(matched) if matched else "No hle launchd services loaded.")
+        if _LAUNCHD_LABEL_PREFIX in ln and ln.split()
+    }
+
+
+def _launchd_list(*, user_mode: bool | None) -> None:
+    """List hle launchd services. ``user_mode`` of ``None`` means both scopes."""
+    installed = _launchd_installed(user_mode)
+    if not installed:
+        which = "" if user_mode is None else ("per-user " if user_mode else "system ")
+        console.print(f"No {which}hle launchd services installed.")
+        return
+    loaded = _launchctl_loaded_labels()
+    table = Table(title="hle launchd services")
+    table.add_column("Label", style="cyan")
+    table.add_column("Scope")
+    table.add_column("Loaded")
+    for label, is_user in installed:
+        table.add_row(
+            label,
+            "per-user" if is_user else "system",
+            "[green]yes[/green]" if label in loaded else "[dim]not in this session[/dim]",
+        )
+    console.print(table)
 
 
 # --------------------------------------------------------------------------- #
@@ -1036,14 +1084,11 @@ def installed_services() -> list[tuple[str, bool]]:
             return []
         return sorted((p.name, False) for p in _RCD_DIR.glob("hle_*"))
     if plat == "darwin":
-        result = subprocess.run(  # noqa: S603 — argv built internally
-            ["launchctl", "list"], check=False, capture_output=True, text=True
-        )
-        return sorted(
-            (ln.split()[-1], False)
-            for ln in result.stdout.splitlines()
-            if _LAUNCHD_LABEL_PREFIX in ln
-        )
+        # From the plists, not `launchctl list`: that only answers for the
+        # calling session's domain, and reported everything as system scope,
+        # so a per-user agent's spec was then looked for in /Library and a
+        # refresh fell back to "restarted only".
+        return sorted(_launchd_installed())
     result = subprocess.run(  # noqa: S603 — argv built internally
         ["systemctl", "list-units", "--type=service", "--all", "--plain", "--no-legend", "hle-*"],
         check=False,
@@ -1102,7 +1147,9 @@ def restart_service(name: str, user_mode: bool | None = None) -> bool:
             return _service_cmd(name, "restart").returncode == 0
         return _rcd_settles(name)
     if plat == "darwin":
-        domain = "system" if os.geteuid() == 0 else f"gui/{os.getuid()}"
+        if user_mode is None:
+            user_mode = os.geteuid() != 0
+        domain = f"gui/{os.getuid()}" if user_mode else "system"
         return _launchctl("kickstart", "-k", f"{domain}/{name}").returncode == 0
     if user_mode is None:
         if _systemctl(False, "restart", name).returncode == 0:
@@ -1183,6 +1230,32 @@ def service_file(name: str, user_mode: bool) -> Path | None:
     return _unit_dir(user_mode) / name
 
 
+def installed_scope(name: str) -> bool | None:
+    """Which scope a service is installed in: ``True`` per-user, ``False`` system.
+
+    ``None`` when no file is found in either. A service is rebuilt where it
+    lives; `hle daemon refresh --label X` used to assume the system scope, so a
+    per-user unit was looked for in /etc, not found, and "restarted only" — or
+    worse, a new system-scope copy was written next to the per-user one.
+
+    When both scopes carry the file, the one the caller can act on wins: system
+    for root, per-user otherwise.
+    """
+    if current_platform() == "freebsd":  # rc.d has one scope
+        path = service_file(name, False)
+        return False if path is not None and path.exists() else None
+    on_disk = [
+        is_user
+        for is_user in (False, True)
+        if (path := service_file(name, is_user)) is not None and path.exists()
+    ]
+    if not on_disk:
+        return None
+    if len(on_disk) == 1:
+        return on_disk[0]
+    return os.geteuid() != 0
+
+
 def service_spec(name: str, user_mode: bool) -> dict[str, Any] | None:
     """The spec a service was generated from, or None if it predates stamping."""
     path = service_file(name, user_mode)
@@ -1245,7 +1318,7 @@ def service() -> None:
       hle daemon install tunnel ha http://localhost:8123
       hle daemon install agent
       hle daemon list
-      hle daemon logs hle-agent
+      hle daemon logs --agent
     """
 
 
@@ -1751,7 +1824,12 @@ def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: 
         svc = launchd_label(label, name)
     else:
         svc = unit_name(label, name)
-    outcome = refresh_service(svc, False)
+    unit_scope = installed_scope(svc)
+    if unit_scope is None:
+        console.print(f"[red]{svc} is not installed[/red] in either scope.")
+        console.print("[dim]hle daemon list[/dim] shows what is installed.")
+        raise SystemExit(1)
+    outcome = refresh_service(svc, unit_scope)
     if outcome == "refreshed":
         console.print(f"[green]Rebuilt and started[/green] {svc}")
     elif outcome == "restarted":
@@ -1776,7 +1854,7 @@ def list_services(user_only: bool, system_only: bool) -> None:
         raise SystemExit(1)
     scope: bool | None = True if user_only else (False if system_only else None)
     if plat == "darwin":
-        _launchd_list(user_mode=bool(user_only))
+        _launchd_list(user_mode=scope)
     elif plat == "freebsd":
         _rcd_list()
     else:

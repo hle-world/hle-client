@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -13,7 +14,7 @@ from typing import Any
 
 import click
 
-from hle_client import __version__, plugins
+from hle_client import __version__, plugins, shutdown
 from hle_client.agent import (
     AGENT_TOKEN_PREFIX,
     AgentClient,
@@ -333,7 +334,7 @@ def expose(
     console.print()
 
     try:
-        asyncio.run(tunnel.connect())
+        shutdown.run(tunnel.connect())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
@@ -366,7 +367,7 @@ def webhook(
 
     Example:
 
-        hle webhook --path /hook/github --forward-to http://localhost:3000/webhook --label gh
+        hle tunnel webhook --path /hook/github --forward-to http://localhost:3000 --label gh
     """
     import posixpath
 
@@ -405,7 +406,7 @@ def webhook(
     console.print()
 
     try:
-        asyncio.run(tunnel.connect())
+        shutdown.run(tunnel.connect())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
@@ -698,7 +699,7 @@ def run(token: str | None, relay_host: str, relay_port: int) -> None:
     console.print(f"[green]Agent running[/green] — control: {client.control_uri}")
     console.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
     try:
-        asyncio.run(client.run())
+        shutdown.run(client.run())
     except KeyboardInterrupt:
         console.print("\n[yellow]Agent stopped.[/yellow]")
         return
@@ -745,7 +746,7 @@ def agent_list(api_key: str | None, as_json: bool) -> None:
     """List the agents on your account, and whether they're online.
 
     Unlike 'hle agent status', which only inspects this machine, this asks the
-    relay. The Name column is what 'hle fp --agent' expects.
+    relay. The Name column is what 'hle forward' expects.
     """
     import json as _json
 
@@ -921,8 +922,22 @@ def agent_logout() -> None:
 # The verbs that act on a tunnel live under the tunnel, including the two that
 # used to be top-level verbs of their own. A webhook forwarder is a kind of
 # tunnel, and preflight asks a question about one.
-config_group.add_command(webhook, name="webhook")
-config_group.add_command(preflight_cmd, name="preflight")
+#
+# The root registrations above are hidden, and `hidden` is a property of the
+# command object, so wiring the same objects here left `hle tunnel --help`
+# without them. Under the noun they are the advertised spelling, so a visible
+# copy goes here and the hidden original stays at the root as the old alias.
+
+
+def _visible(cmd: click.Command, name: str) -> click.Command:
+    shown = copy.copy(cmd)
+    shown.hidden = False
+    shown.name = name
+    return shown
+
+
+config_group.add_command(_visible(webhook, "webhook"))
+config_group.add_command(_visible(preflight_cmd, "preflight"))
 
 
 @main.command("status")

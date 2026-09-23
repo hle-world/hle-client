@@ -45,7 +45,7 @@ class TestConfigShow:
     def test_show_passthrough_for_full_subdomain(self) -> None:
         runner = CliRunner()
         mock_client = AsyncMock()
-        mock_client.get_me = AsyncMock()  # should NOT be called
+        mock_client.get_me = AsyncMock(return_value={"user_code": "x7k"})
         mock_client.get_tunnel_status = AsyncMock(
             return_value={
                 "subdomain": "ha-x7k",
@@ -61,8 +61,53 @@ class TestConfigShow:
         with _patch_client(mock_client):
             result = runner.invoke(main, ["config", "show", "ha-x7k", "--api-key", _KEY])
         assert result.exit_code == 0, result.output
-        mock_client.get_me.assert_not_called()
         mock_client.get_tunnel_status.assert_awaited_once_with("ha-x7k")
+
+    def test_show_resolves_hyphenated_label(self) -> None:
+        """``home-assistant`` is a label, not a resolved subdomain. Any hyphen
+        used to short-circuit resolution, so it was sent as-is and 404'd."""
+        runner = CliRunner()
+        mock_client = AsyncMock()
+        mock_client.get_me = AsyncMock(return_value={"user_code": "x7k"})
+        mock_client.get_tunnel_status = AsyncMock(
+            return_value={
+                "subdomain": "home-assistant-x7k",
+                "public_url": "https://home-assistant-x7k.hle.world",
+                "is_active": False,
+                "auth_mode": "sso",
+                "access_rules": [],
+                "pin": {"has_pin": False},
+                "basic_auth": {"enabled": False},
+                "is_protected": True,
+            }
+        )
+        with _patch_client(mock_client):
+            result = runner.invoke(main, ["config", "show", "home-assistant", "--api-key", _KEY])
+        assert result.exit_code == 0, result.output
+        mock_client.get_tunnel_status.assert_awaited_once_with("home-assistant-x7k")
+
+    def test_show_does_not_double_suffix_resolved_hyphenated_label(self) -> None:
+        runner = CliRunner()
+        mock_client = AsyncMock()
+        mock_client.get_me = AsyncMock(return_value={"user_code": "x7k"})
+        mock_client.get_tunnel_status = AsyncMock(
+            return_value={
+                "subdomain": "home-assistant-x7k",
+                "public_url": "https://home-assistant-x7k.hle.world",
+                "is_active": False,
+                "auth_mode": "sso",
+                "access_rules": [],
+                "pin": {"has_pin": False},
+                "basic_auth": {"enabled": False},
+                "is_protected": True,
+            }
+        )
+        with _patch_client(mock_client):
+            result = runner.invoke(
+                main, ["config", "show", "home-assistant-x7k", "--api-key", _KEY]
+            )
+        assert result.exit_code == 0, result.output
+        mock_client.get_tunnel_status.assert_awaited_once_with("home-assistant-x7k")
 
 
 class TestConfigAuthMode:

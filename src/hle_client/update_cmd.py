@@ -27,25 +27,56 @@ PIPX = "pipx"
 UV = "uv"
 VENV = "venv"
 PIP = "pip"
+BREW = "brew"
+# PEP 668: the interpreter's site-packages belong to the OS package manager.
+EXTERNALLY_MANAGED = "externally-managed"
 
 
-def detect_install_method(prefix: str, executable: str) -> str:
+def is_externally_managed(stdlib: str | None = None) -> bool:
+    """True when the interpreter carries a PEP 668 ``EXTERNALLY-MANAGED`` marker."""
+    if stdlib is None:
+        import sysconfig
+
+        stdlib = sysconfig.get_path("stdlib")
+    if not stdlib:
+        return False
+    return (Path(stdlib) / "EXTERNALLY-MANAGED").is_file()
+
+
+def detect_install_method(
+    prefix: str,
+    executable: str,
+    *,
+    base_prefix: str | None = None,
+    stdlib: str | None = None,
+) -> str:
     """Classify the environment the running client lives in.
 
     ``prefix`` is ``sys.prefix`` (the venv/environment root); ``executable``
-    is ``sys.executable``. Pure function so it is unit-testable.
+    is ``sys.executable``. ``base_prefix`` and ``stdlib`` default to the
+    running interpreter's and exist so tests can describe another one.
     """
+    if base_prefix is None:
+        base_prefix = sys.base_prefix
     p = prefix.replace("\\", "/")
     if "/pipx/venvs/" in p or "/pipx/venvs" in p:
         return PIPX
     if "/uv/tools/" in p or "/uv/tools" in p:
         return UV
+    # A Homebrew keg: `<prefix>/Cellar/hle-client/<version>/libexec` is a venv,
+    # but one brew owns. `pip install --upgrade` inside it leaves the formula's
+    # receipt and the linked bin/ pointing at the old version, so the keg ends
+    # up half one release and half another.
+    if "/Cellar/hle-client/" in p:
+        return BREW
     # The website installer's plain-venv location.
     if p.rstrip("/").endswith(".local/share/hle/venv"):
         return VENV
     # Any other virtualenv: upgrade in place with its own interpreter.
-    if executable and (Path(prefix) / "pyvenv.cfg").as_posix() and prefix != sys.base_prefix:
+    if executable and (Path(prefix) / "pyvenv.cfg").is_file() and prefix != base_prefix:
         return VENV
+    if is_externally_managed(stdlib):
+        return EXTERNALLY_MANAGED
     return PIP
 
 
@@ -122,6 +153,24 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
     if not target_version and latest and latest == __version__:
         console.print("[green]Already up to date.[/green]")
         return
+
+    if method == BREW:
+        console.print(
+            "[yellow]This client was installed by Homebrew.[/yellow] "
+            "Upgrading inside the keg would corrupt it. Run:\n"
+            "  brew upgrade hle-client"
+        )
+        raise SystemExit(1)
+
+    if method == EXTERNALLY_MANAGED:
+        console.print(
+            "[yellow]This Python is managed by the OS package manager (PEP 668).[/yellow] "
+            "pip will refuse to install into it. Upgrade with the tool that installed "
+            "the client, or:\n"
+            f"  pipx upgrade {_PACKAGE}\n"
+            f"  uv tool upgrade {_PACKAGE}"
+        )
+        raise SystemExit(1)
 
     target_desc = target_version or latest or "latest"
     if not yes:

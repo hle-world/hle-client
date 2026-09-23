@@ -18,7 +18,14 @@ _KEY = "hle_" + "a" * 32
 
 
 def _patch_client(mock_client: AsyncMock):
-    """Patch the ApiClient used inside config_cmd (where the runtime import resolves)."""
+    """Patch the ApiClient used inside config_cmd (where the runtime import resolves).
+
+    Subdomain resolution always asks ``get_me`` for the user code (a label can
+    contain hyphens, so the suffix is the only way to tell it is resolved).
+    Tests here pass ``*-x7k`` subdomains, so answer with that code by default.
+    """
+    if not isinstance(mock_client.get_me.return_value, dict):
+        mock_client.get_me = AsyncMock(return_value={"user_code": "x7k"})
     return patch("hle_client.config_cmd.ApiClient", return_value=mock_client)
 
 

@@ -37,3 +37,6 @@ htmlcov/
 .envrc
 .direnv/
 uv.lock
+
+# Claude Code session logs
+.claude/logs/
