@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -921,8 +922,22 @@ def agent_logout() -> None:
 # The verbs that act on a tunnel live under the tunnel, including the two that
 # used to be top-level verbs of their own. A webhook forwarder is a kind of
 # tunnel, and preflight asks a question about one.
-config_group.add_command(webhook, name="webhook")
-config_group.add_command(preflight_cmd, name="preflight")
+#
+# The root registrations above are hidden, and `hidden` is a property of the
+# command object, so wiring the same objects here left `hle tunnel --help`
+# without them. Under the noun they are the advertised spelling, so a visible
+# copy goes here and the hidden original stays at the root as the old alias.
+
+
+def _visible(cmd: click.Command, name: str) -> click.Command:
+    shown = copy.copy(cmd)
+    shown.hidden = False
+    shown.name = name
+    return shown
+
+
+config_group.add_command(_visible(webhook, "webhook"))
+config_group.add_command(_visible(preflight_cmd, "preflight"))
 
 
 @main.command("status")
