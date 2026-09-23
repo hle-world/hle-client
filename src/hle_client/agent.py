@@ -195,9 +195,10 @@ class AgentClient:
             try:
                 await self._connect_once()
             except asyncio.CancelledError:
-                # Explicit shutdown: the `finally` tears the endpoints down.
+                # Explicit shutdown: the `finally` tears the endpoints down,
+                # then the cancel propagates so the caller sees it.
                 self._running = False
-                break
+                raise
             except websockets.exceptions.ConnectionClosed as exc:
                 code = exc.rcvd.code if exc.rcvd is not None else None
                 if close_codes.is_fatal(code):

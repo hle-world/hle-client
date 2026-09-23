@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 import websockets.exceptions
 from websockets.frames import Close
 
@@ -457,7 +458,10 @@ class TestFatalCloses:
             raise asyncio.CancelledError
 
         monkeypatch.setattr(client, "_connect_once", fake_connect_once)
-        await client.run()
+        # The cancel propagates: a caller that cancelled us must see it, or
+        # Ctrl+C looks like it did nothing.
+        with pytest.raises(asyncio.CancelledError):
+            await client.run()
         assert client._endpoints == {}
         assert created[0].connected is False
 

@@ -129,6 +129,79 @@ class TestInstallSignalHandlers:
             loop.close()
 
 
+class TestRealRunnersSurfaceTheSignal:
+    """The long-running loops must let the cancel out after cleaning up.
+
+    Both `AgentClient.run()` and `Tunnel.connect()` used to catch
+    CancelledError and `break`, so the task completed normally, the runner
+    never raised KeyboardInterrupt, and Ctrl+C printed nothing.
+    """
+
+    def test_agent_run_on_sigint_raises_keyboard_interrupt(self, monkeypatch) -> None:
+        from hle_client.agent import AgentClient
+
+        client = AgentClient("hlea_x")
+
+        async def blocking_connect_once() -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(client, "_connect_once", blocking_connect_once)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            loop.call_later(0.01, os.kill, os.getpid(), signal.SIGINT)
+            await shutdown.run_cancellable(client.run())
+
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(scenario())
+        assert client._running is False
+
+    def test_agent_run_on_sigterm_returns_none(self, monkeypatch) -> None:
+        from hle_client.agent import AgentClient
+
+        client = AgentClient("hlea_x")
+
+        async def blocking_connect_once() -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(client, "_connect_once", blocking_connect_once)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            loop.call_later(0.01, os.kill, os.getpid(), signal.SIGTERM)
+            return await shutdown.run_cancellable(client.run())
+
+        assert asyncio.run(scenario()) is None
+
+    def test_tunnel_connect_on_sigint_raises_keyboard_interrupt(self, monkeypatch) -> None:
+        from hle_client.tunnel import Tunnel, TunnelConfig
+
+        tunnel = Tunnel(
+            config=TunnelConfig(
+                service_url="http://localhost:1", service_label="x", api_key="hle_" + "a" * 32
+            )
+        )
+
+        async def blocking_connect_once() -> None:
+            await asyncio.Event().wait()
+
+        async def no_proxy() -> None:
+            return None
+
+        monkeypatch.setattr(tunnel, "_connect_once", blocking_connect_once)
+        monkeypatch.setattr(tunnel._proxy, "start", no_proxy)
+        monkeypatch.setattr(tunnel._proxy, "stop", no_proxy)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            loop.call_later(0.01, os.kill, os.getpid(), signal.SIGINT)
+            await shutdown.run_cancellable(tunnel.connect())
+
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(scenario())
+        assert tunnel.is_connected is False
+
+
 class TestWiring:
     """Every long-running command goes through the runner."""
 
