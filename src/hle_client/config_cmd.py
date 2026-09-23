@@ -3,7 +3,7 @@
 All tunnel-scoped operations live here under a single declarative namespace.
 Subdomain resolution: callers supply a label (e.g. ``ha``) and the client
 resolves it to ``<label>-<user_code>`` via ``GET /api/auth/me``. Pre-resolved
-subdomains (containing ``-``) are passed through unchanged.
+subdomains (already ending in ``-<user_code>``) are passed through unchanged.
 """
 
 from __future__ import annotations
@@ -42,14 +42,20 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
 
 
 async def _resolve_subdomain(client: ApiClient, label: str) -> str:
-    """Resolve ``label`` → ``<label>-<user_code>``. Pass through if already resolved."""
-    if "-" in label:
-        return label
+    """Resolve ``label`` → ``<label>-<user_code>``.
+
+    Labels may themselves contain hyphens (``home-assistant``), so "contains a
+    hyphen" is not the same as "already resolved". A value is passed through
+    only when it already ends with ``-<user_code>``.
+    """
     me = await client.get_me()
     user_code = me.get("user_code")
     if not user_code:
         raise click.ClickException("Could not resolve user_code from server")
-    return f"{label}-{user_code}"
+    suffix = f"-{user_code}"
+    if label.endswith(suffix) and len(label) > len(suffix):
+        return label
+    return f"{label}{suffix}"
 
 
 def _require_key(api_key: str | None) -> str:
