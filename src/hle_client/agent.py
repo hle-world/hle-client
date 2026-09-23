@@ -195,6 +195,8 @@ class AgentClient:
             try:
                 await self._connect_once()
             except asyncio.CancelledError:
+                # Explicit shutdown: the `finally` tears the endpoints down.
+                self._running = False
                 break
             except websockets.exceptions.ConnectionClosed as exc:
                 code = exc.rcvd.code if exc.rcvd is not None else None
@@ -225,7 +227,17 @@ class AgentClient:
                 # a week would then wait 30s to recover from a routine deploy.
                 if self._registered:
                     delay = self._reconnect_delay
-                await self._stop_all()
+                # A control blip is not a data-plane outage. The endpoint
+                # tunnels hold their own connections to the relay and reconnect
+                # on their own, so they keep serving while the control channel
+                # comes back. Tearing them down here turned every relay deploy
+                # and every dropped control socket into every tunnel going
+                # down and re-registering. They stop only when the agent does:
+                # a fatal close code, or an explicit shutdown. The welcome on
+                # the next session reconciles against the current endpoint
+                # list, so anything removed meanwhile is stopped then.
+                if not self._running:
+                    await self._stop_all()
             if not self._running:
                 break
             logger.info("Reconnecting agent control in %.1fs ...", delay)
