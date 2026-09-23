@@ -527,8 +527,13 @@ class Tunnel:
                         self._session_registered = False
                 logger.warning("Connection lost: %s", exc)
             except asyncio.CancelledError:
+                # Re-raised after cleanup, not swallowed: the caller that
+                # cancelled us (Ctrl+C, SIGTERM) needs to see the cancel to
+                # report it. Swallowing it made the task complete normally,
+                # so Ctrl+C printed nothing.
                 logger.info("Tunnel cancelled")
-                break
+                self._running = False
+                raise
             finally:
                 await self._cleanup()
 
