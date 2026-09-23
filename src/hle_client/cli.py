@@ -367,7 +367,7 @@ def webhook(
 
     Example:
 
-        hle webhook --path /hook/github --forward-to http://localhost:3000/webhook --label gh
+        hle tunnel webhook --path /hook/github --forward-to http://localhost:3000 --label gh
     """
     import posixpath
 
@@ -746,7 +746,7 @@ def agent_list(api_key: str | None, as_json: bool) -> None:
     """List the agents on your account, and whether they're online.
 
     Unlike 'hle agent status', which only inspects this machine, this asks the
-    relay. The Name column is what 'hle fp --agent' expects.
+    relay. The Name column is what 'hle forward' expects.
     """
     import json as _json
 
