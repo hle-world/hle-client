@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 import websockets.exceptions
 from websockets.frames import Close
 
@@ -380,6 +381,87 @@ class TestFatalCloses:
         monkeypatch.setattr(asyncio, "sleep", fake_sleep)
         await client.run()
 
+        assert client._endpoints == {}
+        assert created[0].connected is False
+
+    async def test_an_ordinary_drop_keeps_the_endpoints_running(self, monkeypatch):
+        """A control blip must not be a data-plane outage.
+
+        The endpoint tunnels hold their own relay connections. Stopping them
+        whenever the control socket dropped turned every relay deploy into
+        every tunnel going down and re-registering.
+        """
+        client, created = _make_client()
+        await client.reconcile([_spec("tv")])
+        await asyncio.sleep(0)
+        assert created[0].connected is True
+
+        attempts = 0
+        still_running_at_reconnect: list[bool] = []
+
+        async def fake_connect_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise self._closed(1006, "relay restarted")
+            # Reconnected: what did the drop do to the data plane?
+            still_running_at_reconnect.append(created[0].connected)
+            client._registered = True
+            client._running = False
+
+        async def fake_sleep(seconds: float) -> None:
+            pass
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await client.run()
+
+        assert still_running_at_reconnect == [True]
+        assert created[0].disconnect_calls == 1  # only the final shutdown
+        assert len(created) == 1  # not re-created either
+
+    async def test_endpoints_removed_while_disconnected_stop_on_reconnect(self, monkeypatch):
+        client, created = _make_client()
+        await client.reconcile([_spec("tv"), _spec("nas")])
+        await asyncio.sleep(0)
+
+        attempts = 0
+
+        async def fake_connect_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise self._closed(1006, "relay restarted")
+            # The welcome on reconnect carries the current endpoint list.
+            await client.reconcile([_spec("tv")])
+            client._registered = True
+            assert created[0].connected is True
+            assert created[1].connected is False
+            client._running = False
+
+        async def fake_sleep(seconds: float) -> None:
+            pass
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        await client.run()
+        assert attempts == 2
+        assert client._endpoints == {}
+
+    async def test_cancellation_still_tears_everything_down(self, monkeypatch):
+        """Explicit shutdown is not a blip: `hle agent run` exiting stops the tunnels."""
+        client, created = _make_client()
+        await client.reconcile([_spec("tv")])
+        await asyncio.sleep(0)
+
+        async def fake_connect_once() -> None:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        # The cancel propagates: a caller that cancelled us must see it, or
+        # Ctrl+C looks like it did nothing.
+        with pytest.raises(asyncio.CancelledError):
+            await client.run()
         assert client._endpoints == {}
         assert created[0].connected is False
 

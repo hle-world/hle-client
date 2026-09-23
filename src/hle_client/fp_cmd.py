@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import click
 import websockets
 
-from hle_client import __version__
+from hle_client import __version__, shutdown
 from hle_client.firepuncher import FpLocalClient
 from hle_client.richcompat import Console
 from hle_client.tunnel import _load_api_key
@@ -633,7 +633,7 @@ def fp(
     argv = _resolve_command(command, forwards)
 
     try:
-        exit_code = asyncio.run(
+        exit_code = shutdown.run(
             _run_all(
                 api_key=key,
                 agent=agent,

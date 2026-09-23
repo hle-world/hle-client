@@ -140,5 +140,5 @@ def render_status(ctx: click.Context) -> None:
     if agents:
         out.print("[bold]Agents[/bold]")
         for a in agents:
-            online = "[green]online[/green]" if a.get("is_online") else "[dim]offline[/dim]"
+            online = "[green]online[/green]" if a.get("online") else "[dim]offline[/dim]"
             out.print(f"  {a.get('name', '?')}  {online}")

@@ -134,6 +134,21 @@ class TestTunnelIsANoun:
     def test_the_verbs_live_under_the_noun(self, verb):
         assert verb in main.commands["tunnel"].commands
 
+    @pytest.mark.parametrize("verb", ["webhook", "preflight"])
+    def test_the_moved_verbs_are_advertised_under_the_noun(self, verb):
+        """Hidden at the root, where they are the old spelling; listed under
+        `tunnel`, where they are the new one. The same command object was wired
+        in both places, so its `hidden=True` hid it from `hle tunnel --help` too."""
+        result = CliRunner().invoke(main, ["tunnel", "--help"])
+        assert result.exit_code == 0
+        assert f"  {verb} " in result.output
+
+    @pytest.mark.parametrize("verb", ["webhook", "preflight"])
+    def test_the_moved_verbs_still_run_under_the_noun(self, verb):
+        result = CliRunner().invoke(main, ["tunnel", verb, "--help"])
+        assert result.exit_code == 0
+        assert f"tunnel {verb} [OPTIONS]" in result.output
+
     def test_show_still_works_as_get(self):
         tunnel = main.commands["tunnel"]
         ctx = click.Context(tunnel)
