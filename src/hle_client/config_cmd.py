@@ -59,9 +59,9 @@ async def _resolve_subdomain(client: ApiClient, label: str) -> str:
 
 
 def _require_key(api_key: str | None) -> str:
-    from hle_client.tunnel import _load_api_key
+    from hle_client import config as hle_config
 
-    resolved = api_key or _load_api_key()
+    resolved = api_key or hle_config.load_api_key()
     if not resolved:
         raise click.ClickException(
             "No API key found. Run 'hle auth login', set HLE_API_KEY, or pass --api-key."

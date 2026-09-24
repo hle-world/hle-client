@@ -105,7 +105,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[_RecordingApiClie
     monkeypatch.delenv("HLE_API_KEY", raising=False)
     # Simulates "no key saved locally" — a command that falls back to it
     # instead of the root key is instantly visible: the fallback is _LOCAL_KEY.
-    monkeypatch.setattr("hle_client.tunnel._load_api_key", lambda: _LOCAL_KEY)
+    monkeypatch.setattr("hle_client.config.load_api_key", lambda: _LOCAL_KEY)
     with (
         patch("hle_client.config_cmd.ApiClient", _RecordingApiClient),
         patch("hle_client.api.ApiClient", _RecordingApiClient),

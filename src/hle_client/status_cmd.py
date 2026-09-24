@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from hle_client import __version__
+from hle_client import __version__, config
 from hle_client.output import api_key_from_ctx, from_ctx
 
 if TYPE_CHECKING:
@@ -24,25 +24,13 @@ if TYPE_CHECKING:
 
 
 def _credentials() -> dict[str, Any]:
-    import os
-
-    from hle_client.agent import load_agent_token
-    from hle_client.tunnel import _load_api_key
-
-    env_key = os.environ.get("HLE_API_KEY")
-    saved = _load_api_key()
-    source = None
-    if env_key:
-        source = "HLE_API_KEY"
-    elif saved:
-        source = "~/.config/hle/config.toml"
-
-    key = env_key or saved
+    creds = config.load_credentials()
+    key = creds.api_key
     return {
         "api_key": bool(key),
-        "api_key_source": source,
+        "api_key_source": creds.api_key_source,
         "api_key_prefix": (key[:8] + "…") if key else None,
-        "agent_token": load_agent_token() is not None,
+        "agent_token": creds.agent_token is not None,
     }
 
 
@@ -80,9 +68,8 @@ async def _remote(api_key: str | None) -> dict[str, Any]:
 def collect(api_key: str | None) -> dict[str, Any]:
     """Assemble the whole picture. Pure data, so ``-o json`` is the same call."""
     creds = _credentials()
-    from hle_client.tunnel import _load_api_key
 
-    resolved = api_key or _load_api_key()
+    resolved = api_key or config.load_api_key()
     remote = asyncio.run(_remote(resolved)) if resolved else {}
     return {
         "version": __version__,

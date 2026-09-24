@@ -35,7 +35,7 @@ from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 
 import click
 
-from hle_client import __version__
+from hle_client import __version__, config
 from hle_client.aliases import LegacyModeCommand, ModeGroup
 from hle_client.richcompat import Console, Table
 
@@ -1488,9 +1488,8 @@ def install(
     # and hand the service an absolute path. Deriving it later from whatever
     # environment the service manager supplies is what left agents restarting
     # forever next to a token file they could not see.
-    from hle_client.agent import agent_config_path
 
-    agent_config = str(agent_config_path()) if agent_mode else None
+    agent_config = str(config.agent_config_path()) if agent_mode else None
     if agent_mode and not Path(str(agent_config)).exists():
         console.print(
             f"[yellow]No agent token at {agent_config}.[/yellow] "
@@ -1714,15 +1713,12 @@ def status(
     # A service manager reports on a process, not on whether it works. An agent
     # with no token exits immediately and is restarted forever, so "running as
     # pid 87998" is true, reassuring, and useless. Say the part it cannot know.
-    if agent_mode:
-        from hle_client.agent import load_agent_token
-
-        if not os.environ.get("HLE_AGENT_TOKEN") and load_agent_token() is None:
-            console.print(
-                "\n[yellow]No agent token is configured[/yellow] — if the service is "
-                "running it is restarting in a loop."
-            )
-            console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
+    if agent_mode and config.load_credentials().agent_token is None:
+        console.print(
+            "\n[yellow]No agent token is configured[/yellow] — if the service is "
+            "running it is restarting in a loop."
+        )
+        console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
 
 
 @service.command("restart")

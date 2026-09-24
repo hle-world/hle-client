@@ -21,10 +21,9 @@ from dataclasses import dataclass
 import click
 import websockets
 
-from hle_client import __version__, shutdown
+from hle_client import __version__, config, shutdown
 from hle_client.firepuncher import FpLocalClient
 from hle_client.richcompat import Console
-from hle_client.tunnel import _load_api_key
 from hle_common.fp_protocol import (
     LOCAL_NETWORKS,
     FpHello,
@@ -625,7 +624,7 @@ def fp(
 
     forwards = _build_forwards(targets, bind_ports, bind_host)
 
-    key = api_key or _load_api_key()
+    key = api_key or config.load_api_key()
     if not key:
         console.print("[red]Error:[/red] No API key. Run [cyan]hle auth login[/cyan] first.")
         raise SystemExit(1)

@@ -14,14 +14,8 @@ from typing import Any
 
 import click
 
-from hle_client import __version__, plugins, shutdown
-from hle_client.agent import (
-    AGENT_TOKEN_PREFIX,
-    AgentClient,
-    load_agent_token,
-    remove_agent_token,
-    save_agent_token,
-)
+from hle_client import __version__, config, plugins, shutdown
+from hle_client.agent import AgentClient
 from hle_client.aliases import RootGroup
 from hle_client.config_cmd import config as config_group
 from hle_client.credentials import normalize_credential_env
@@ -30,14 +24,7 @@ from hle_client.output import OUTPUT_FORMATS, TABLE, Output, api_key_from_ctx
 from hle_client.output import from_ctx as output_from_ctx
 from hle_client.richcompat import Console
 from hle_client.service_cmd import service as service_group
-from hle_client.tunnel import (
-    Tunnel,
-    TunnelConfig,
-    TunnelFatalError,
-    _load_api_key,
-    _remove_api_key,
-    _save_api_key,
-)
+from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError
 from hle_client.update_cmd import update as update_command
 
 console = Console()
@@ -275,7 +262,7 @@ def expose(
         u, _, p = upstream_basic_auth.partition(":")
         upstream_auth_tuple = (u, p)
 
-    config = TunnelConfig(
+    tunnel_config = TunnelConfig(
         service_url=service,
         auth_mode=auth,
         service_label=service_label,
@@ -298,7 +285,7 @@ def expose(
 
             from hle_client.api import ApiClient, ApiClientConfig
 
-            resolved_key = api_key or _load_api_key()
+            resolved_key = api_key or config.load_api_key()
             if not resolved_key:
                 console.print("[yellow]Warning:[/yellow] No API key — skipping auth rules")
                 return
@@ -318,7 +305,7 @@ def expose(
 
         on_registered_cb = _add_auth_callback
 
-    tunnel = Tunnel(config=config, on_registered=on_registered_cb)
+    tunnel = Tunnel(config=tunnel_config, on_registered=on_registered_cb)
 
     if api_key and not os.environ.get("HLE_API_KEY"):
         console.print(
@@ -381,7 +368,7 @@ def webhook(
         console.print("[red]Error:[/red] --path must not contain '..' segments")
         raise SystemExit(1)
 
-    config = TunnelConfig(
+    tunnel_config = TunnelConfig(
         service_url=forward_to,
         auth_mode="none",
         service_label=service_label,
@@ -391,7 +378,7 @@ def webhook(
         webhook_path=path,
     )
 
-    tunnel = Tunnel(config=config)
+    tunnel = Tunnel(config=tunnel_config)
 
     if api_key and not os.environ.get("HLE_API_KEY"):
         console.print(
@@ -447,7 +434,7 @@ def login(api_key: str | None, agent_token: str | None = None) -> None:
       hle auth login --agent-token hlea_... Enrol this machine as an agent
     """
     if agent_token is not None:
-        save_agent_token(agent_token)
+        config.save_agent_token(agent_token)
         console.print("[green]Agent token saved[/green] to ~/.config/hle/agent.toml")
         console.print("[dim]Start it with: hle agent run  (or: hle daemon install agent)[/dim]")
         return
@@ -465,7 +452,7 @@ def login(api_key: str | None, agent_token: str | None = None) -> None:
         )
         raise SystemExit(1)
 
-    _save_api_key(api_key)
+    config.save_api_key(api_key)
     console.print("[green]Saved[/green] to ~/.config/hle/config.toml")
 
 
@@ -482,7 +469,7 @@ def auth_status() -> None:
         return f"{value[:8]}...{value[-4:]}" if len(value) > 12 else value
 
     env_key = os.environ.get("HLE_API_KEY")
-    config_key = _load_api_key()
+    config_key = config.load_api_key()
     if env_key:
         console.print("API key: [cyan]HLE_API_KEY environment variable[/cyan]")
         console.print(f"         [dim]{_mask(env_key)}[/dim]")
@@ -493,7 +480,7 @@ def auth_status() -> None:
         console.print("API key: [dim]none[/dim] — run [cyan]hle auth login[/cyan]")
 
     env_token = os.environ.get("HLE_AGENT_TOKEN")
-    saved_token = load_agent_token()
+    saved_token = config.load_agent_token()
     if env_token:
         console.print("Agent:   [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
         console.print(f"         [dim]{_mask(env_token)}[/dim]")
@@ -505,7 +492,7 @@ def auth_status() -> None:
 @auth.command()
 def logout() -> None:
     """Remove the saved API key from ~/.config/hle/config.toml."""
-    if _remove_api_key():
+    if config.remove_api_key():
         console.print("[green]API key removed[/green] from ~/.config/hle/config.toml")
     else:
         console.print("[dim]No API key saved in config file.[/dim]")
@@ -670,14 +657,14 @@ def enroll(token: str | None) -> None:
         )
         token = click.prompt("Agent token", hide_input=True)
 
-    if not token.startswith(AGENT_TOKEN_PREFIX):
+    if not token.startswith(config.AGENT_TOKEN_PREFIX):
         console.print(
             f"[red]Error:[/red] Invalid agent token. Expected one starting with "
-            f"'{AGENT_TOKEN_PREFIX}'."
+            f"'{config.AGENT_TOKEN_PREFIX}'."
         )
         raise SystemExit(1)
 
-    save_agent_token(token)
+    config.save_agent_token(token)
     console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
     console.print("Start the agent with: [cyan]hle agent run[/cyan]")
 
@@ -690,7 +677,7 @@ def enroll(token: str | None) -> None:
 @click.option("--relay-port", default=443, type=int, help="Relay port")
 def run(token: str | None, relay_host: str, relay_port: int) -> None:
     """Run the agent: connect, fetch endpoints from the dashboard, and reconcile."""
-    token = token or load_agent_token()
+    token = token or config.load_agent_token()
     if not token:
         console.print("[red]Error:[/red] No agent token. Run [cyan]hle agent enroll[/cyan] first.")
         raise SystemExit(1)
@@ -720,7 +707,7 @@ def agent_status() -> None:
     if env_token:
         console.print("Agent token source: [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
         return
-    token = load_agent_token()
+    token = config.load_agent_token()
     if token:
         masked = f"{token[:9]}...{token[-4:]}" if len(token) > 13 else token
         console.print("Agent token source: [cyan]~/.config/hle/agent.toml[/cyan]")
@@ -755,14 +742,14 @@ def agent_list(api_key: str | None, as_json: bool) -> None:
     from hle_client.api import ApiClient, ApiClientConfig
     from hle_client.richcompat import Table
 
-    key = api_key or _load_api_key()
+    key = api_key or config.load_api_key()
     if not key:
         console.print("[red]Error:[/red] No API key. Run [cyan]hle auth login[/cyan] first.")
         # "No API key" on a machine that plainly *is* set up reads as a broken
         # install. It has a credential — just not one that may read account
         # data. An agent token authenticates carrying traffic; letting it list
         # an account's agents would make a data-plane secret an account secret.
-        if load_agent_token():
+        if config.load_agent_token():
             console.print(
                 "[dim]This machine is enrolled as an agent, but an agent token cannot "
                 "read your account — it only authorises the tunnels it carries.\n"
@@ -913,7 +900,7 @@ def agent_services(provider: str | None, as_json: bool) -> None:
 @agent.command("logout")
 def agent_logout() -> None:
     """Remove the saved agent token."""
-    if remove_agent_token():
+    if config.remove_agent_token():
         console.print("[green]Agent token removed[/green] from ~/.config/hle/agent.toml")
     else:
         console.print("[dim]No agent token saved.[/dim]")

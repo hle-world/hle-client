@@ -360,7 +360,7 @@ class TestErrorHandling:
 
     def test_no_api_key(self) -> None:
         runner = CliRunner()
-        with patch("hle_client.tunnel._load_api_key", return_value=None):
+        with patch("hle_client.config.load_api_key", return_value=None):
             result = runner.invoke(main, ["config", "list"], env={"HLE_API_KEY": ""})
         assert result.exit_code != 0
         assert "No API key found" in result.output
@@ -372,8 +372,8 @@ class TestAuthLogin:
         runner = CliRunner()
         config_file = tmp_path / "config.toml"
         with (
-            patch("hle_client.tunnel._CONFIG_FILE", config_file),
-            patch("hle_client.tunnel._CONFIG_DIR", tmp_path),
+            patch("hle_client.config.CONFIG_FILE", config_file),
+            patch("hle_client.config.CONFIG_DIR", tmp_path),
         ):
             result = runner.invoke(main, ["auth", "login", "--api-key", "hle_" + "a" * 32])
         assert result.exit_code == 0
@@ -386,8 +386,8 @@ class TestAuthLogin:
         config_file = tmp_path / "config.toml"
         valid_key = "hle_" + "b" * 32
         with (
-            patch("hle_client.tunnel._CONFIG_FILE", config_file),
-            patch("hle_client.tunnel._CONFIG_DIR", tmp_path),
+            patch("hle_client.config.CONFIG_FILE", config_file),
+            patch("hle_client.config.CONFIG_DIR", tmp_path),
             patch("hle_client.cli.webbrowser.open"),
         ):
             result = runner.invoke(main, ["auth", "login"], input=valid_key + "\n")
@@ -412,7 +412,7 @@ class TestAuthStatus:
     def test_from_config(self, tmp_path: Path) -> None:
         runner = CliRunner()
         valid_key = "hle_" + "c" * 32
-        with patch("hle_client.cli._load_api_key", return_value=valid_key):
+        with patch("hle_client.config.load_api_key", return_value=valid_key):
             result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
         assert result.exit_code == 0
         assert "config.toml" in result.output
@@ -428,7 +428,7 @@ class TestAuthStatus:
 
     def test_no_key(self) -> None:
         runner = CliRunner()
-        with patch("hle_client.cli._load_api_key", return_value=None):
+        with patch("hle_client.config.load_api_key", return_value=None):
             result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
         assert result.exit_code == 0
         assert "none" in result.output
@@ -442,8 +442,8 @@ class TestAuthStatus:
         """
         runner = CliRunner()
         with (
-            patch("hle_client.cli._load_api_key", return_value="hle_" + "c" * 32),
-            patch("hle_client.cli.load_agent_token", return_value="hlea_" + "d" * 40),
+            patch("hle_client.config.load_api_key", return_value="hle_" + "c" * 32),
+            patch("hle_client.config.load_agent_token", return_value="hlea_" + "d" * 40),
         ):
             result = runner.invoke(main, ["auth", "status"], env={"HLE_API_KEY": ""})
         assert result.exit_code == 0
@@ -458,8 +458,8 @@ class TestAuthLogout:
         config_file = tmp_path / "config.toml"
         config_file.write_text('api_key = "hle_' + "e" * 32 + '"\nother = "keep"\n')
         with (
-            patch("hle_client.tunnel._CONFIG_FILE", config_file),
-            patch("hle_client.tunnel._CONFIG_DIR", tmp_path),
+            patch("hle_client.config.CONFIG_FILE", config_file),
+            patch("hle_client.config.CONFIG_DIR", tmp_path),
         ):
             result = runner.invoke(main, ["auth", "logout"])
         assert result.exit_code == 0
@@ -471,7 +471,7 @@ class TestAuthLogout:
     def test_logout_no_key(self, tmp_path: Path) -> None:
         runner = CliRunner()
         config_file = tmp_path / "nonexistent.toml"
-        with patch("hle_client.tunnel._CONFIG_FILE", config_file):
+        with patch("hle_client.config.CONFIG_FILE", config_file):
             result = runner.invoke(main, ["auth", "logout"])
         assert result.exit_code == 0
         assert "No API key saved" in result.output
@@ -481,7 +481,7 @@ class TestAgentCli:
     def test_enroll_saves_token(self, tmp_path: Path) -> None:
         runner = CliRunner()
         cfg = tmp_path / "agent.toml"
-        with patch("hle_client.agent.AGENT_CONFIG_PATH", cfg):
+        with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
             result = runner.invoke(main, ["agent", "enroll", "hlea_" + "a" * 40])
         assert result.exit_code == 0
         assert "Enrolled" in result.output
@@ -502,7 +502,7 @@ class TestAgentCli:
         """
         runner = CliRunner()
         cfg = tmp_path / "missing.toml"
-        with patch("hle_client.agent.AGENT_CONFIG_PATH", cfg):
+        with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
             result = runner.invoke(main, ["agent", "status"])
         assert result.exit_code == 1
         assert "No agent token" in result.output
@@ -510,7 +510,7 @@ class TestAgentCli:
     def test_run_requires_token(self, tmp_path: Path) -> None:
         runner = CliRunner()
         cfg = tmp_path / "missing.toml"
-        with patch("hle_client.agent.AGENT_CONFIG_PATH", cfg):
+        with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
             result = runner.invoke(main, ["agent", "run"])
         assert result.exit_code == 1
         assert "No agent token" in result.output
@@ -591,8 +591,8 @@ class TestAgentList:
         """
         runner = CliRunner()
         with (
-            patch("hle_client.cli._load_api_key", return_value=None),
-            patch("hle_client.cli.load_agent_token", return_value="hlea_something"),
+            patch("hle_client.config.load_api_key", return_value=None),
+            patch("hle_client.config.load_agent_token", return_value="hlea_something"),
         ):
             result = runner.invoke(main, ["agent", "list"])
 
@@ -607,8 +607,8 @@ class TestAgentList:
         """No agent on this machine means there is nothing extra to explain."""
         runner = CliRunner()
         with (
-            patch("hle_client.cli._load_api_key", return_value=None),
-            patch("hle_client.cli.load_agent_token", return_value=None),
+            patch("hle_client.config.load_api_key", return_value=None),
+            patch("hle_client.config.load_agent_token", return_value=None),
         ):
             result = runner.invoke(main, ["agent", "list"])
 
@@ -627,7 +627,7 @@ class TestAgentList:
         mock_client = AsyncMock()
         mock_client.list_agents.return_value = []
         with (
-            patch("hle_client.cli._load_api_key", return_value=None),
+            patch("hle_client.config.load_api_key", return_value=None),
             patch("hle_client.api.ApiClient", return_value=mock_client),
         ):
             result = runner.invoke(main, ["agent", "list"])
@@ -691,7 +691,7 @@ class TestAgentList:
 
     def test_missing_key_is_a_clear_error(self) -> None:
         runner = CliRunner()
-        with patch("hle_client.cli._load_api_key", return_value=None):
+        with patch("hle_client.config.load_api_key", return_value=None):
             result = runner.invoke(main, ["agent", "list"])
         assert result.exit_code == 1
         assert "No API key" in result.output
