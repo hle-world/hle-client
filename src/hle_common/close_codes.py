@@ -49,6 +49,19 @@ Sent to the connection arriving second, which is the opposite end from
 Fatal for the same reason: two copies on one credential cannot both win.
 """
 
+HANDOVER: Final = 4011
+"""A successor process took this agent identity over, as arranged.
+
+Sent to the *incumbent* during a remote update (agent protocol 1.2): the new
+version connected with ``successor_of`` + the nonce the server issued, the
+server admitted it, and this connection is now surplus. Unlike
+:data:`REPLACED` nothing went wrong, so it is not fatal — but the old process
+must not reconnect either, or it would fight the successor for the endpoints
+it just handed over. The right response is to exit 0 without retrying: the
+successor is already running, and a service manager does not restart a clean
+exit. See :func:`should_reconnect`.
+"""
+
 # -- Rate limiting ---------------------------------------------------------- #
 TOO_MANY_REGISTRATIONS: Final = 4029
 """This identity is registering far faster than any healthy client needs to.
@@ -79,6 +92,16 @@ into a reconnect storm the moment both ends keep trying.
 """
 
 
+NO_RECONNECT_CODES: Final[frozenset[int]] = frozenset({HANDOVER})
+"""Codes after which a client stops without treating the close as a failure.
+
+The fatal set says "stop, and tell the operator something is wrong". These say
+"stop, and that is fine": the relay ended the session on purpose and another
+process of ours is carrying on. Disjoint from :data:`FATAL_CODES` so a caller
+can tell the two apart.
+"""
+
+
 #: How long to wait before retrying, for codes that are worth retrying at all.
 _RETRY_AFTER: Final[dict[int, float]] = {
     TOO_MANY_REGISTRATIONS: 60.0,
@@ -88,6 +111,16 @@ _RETRY_AFTER: Final[dict[int, float]] = {
 def is_fatal(code: int | None) -> bool:
     """Whether *code* means "stop", rather than "try again"."""
     return code in FATAL_CODES
+
+
+def should_reconnect(code: int | None) -> bool:
+    """Whether a client should open a new connection after closing with *code*.
+
+    False for fatal codes (reconnecting would make things worse) and for
+    :data:`HANDOVER` (reconnecting would undo an intended takeover). True for
+    everything else, including ``None`` (no close frame at all).
+    """
+    return code not in FATAL_CODES and code not in NO_RECONNECT_CODES
 
 
 def retry_after_seconds(code: int | None) -> float | None:
