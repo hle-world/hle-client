@@ -128,7 +128,7 @@ class HleApp(App[None]):
             # Not the same as "no tunnels", and must not look like it.
             self.say("Could not reach the relay.")
         else:
-            live = sum(1 for t in self.snapshot.tunnels if t.get("is_active"))
+            live = sum(1 for t in self.snapshot.tunnels if t.online)
             self.say(f"{live} live of {len(self.snapshot.tunnels)} tunnels.")
 
     def _fill(self, selector: str, rows: list[tuple[str, ...]]) -> None:
@@ -159,7 +159,7 @@ class HleApp(App[None]):
         if row is None:
             self.say("Nothing selected.")
             return
-        url = f"https://{row[0]}.hle.world"
+        url = data.public_url(self.snapshot, str(row[0]))
         webbrowser.open(url)
         self.say(f"Opened {url}")
 
