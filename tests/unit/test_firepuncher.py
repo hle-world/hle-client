@@ -9,6 +9,7 @@ import json
 import pytest
 import websockets
 
+from hle_client.errors import HleError
 from hle_client.firepuncher import FpAgentSide, FpLocalClient
 from hle_common.fp_protocol import (
     LOCAL_NETWORKS,
@@ -435,7 +436,7 @@ class TestReconnectPacing:
         monkeypatch.setattr(fp_cmd.websockets, "connect", lambda uri, **kw: session)
         monkeypatch.setattr(fp_cmd.asyncio, "sleep", lambda s: asyncio.sleep(0))
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(HleError):
             await fp_cmd._run(
                 api_key="hle_x",
                 agent="rpi",

@@ -4,21 +4,36 @@ All tunnel-scoped operations live here under a single declarative namespace.
 Subdomain resolution: callers supply a label (e.g. ``ha``) and the client
 resolves it to ``<label>-<user_code>`` via ``GET /api/auth/me``. Pre-resolved
 subdomains (already ending in ``-<user_code>``) are passed through unchanged.
+
+Every command takes its credential, output and prompting policy from the
+invocation context (``hle_client.context``) and fails by raising an
+``HleError`` for the root group to render. Nothing here prints an error or
+exits.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
 
 import click
 import httpx
 
 from hle_client.aliases import AliasedGroup
-from hle_client.api import ApiClient, ApiClientConfig
-from hle_client.output import api_key_from_ctx, from_ctx
+from hle_client.context import api, confirm, confirm_or_abort, out, prompt
+from hle_client.errors import (
+    AbortedError,
+    ApiError,
+    ConflictError,
+    HleError,
+    NotFoundError,
+    UsageError,
+)
 from hle_client.richcompat import Console, Table
+
+if TYPE_CHECKING:
+    from hle_client.api import ApiClient
 
 console = Console()
 
@@ -41,6 +56,11 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     return "any", spec
 
 
+def _fail(exc: Exception, subdomain: str | None = None) -> NoReturn:
+    """Re-raise anything the relay call threw as the typed error it means."""
+    raise ApiError.from_exception(exc, subdomain) from None
+
+
 async def _resolve_subdomain(client: ApiClient, label: str) -> str:
     """Resolve ``label`` → ``<label>-<user_code>``.
 
@@ -48,59 +68,23 @@ async def _resolve_subdomain(client: ApiClient, label: str) -> str:
     hyphen" is not the same as "already resolved". A value is passed through
     only when it already ends with ``-<user_code>``.
     """
-    me = await client.get_me()
+    try:
+        me = await client.get_me()
+    except Exception as exc:
+        _fail(exc)
     user_code = me.get("user_code")
     if not user_code:
-        raise click.ClickException("Could not resolve user_code from server")
+        raise HleError("Could not resolve user_code from server")
     suffix = f"-{user_code}"
     if label.endswith(suffix) and len(label) > len(suffix):
         return label
     return f"{label}{suffix}"
 
 
-def _require_key(api_key: str | None) -> str:
-    from hle_client.tunnel import _load_api_key
-
-    resolved = api_key or _load_api_key()
-    if not resolved:
-        raise click.ClickException(
-            "No API key found. Run 'hle auth login', set HLE_API_KEY, or pass --api-key."
-        )
-    return resolved
-
-
-def _client(api_key: str | None) -> ApiClient:
-    return ApiClient(ApiClientConfig(api_key=_require_key(api_key)))
-
-
-def _die_http(exc: httpx.HTTPStatusError, subdomain: str | None = None) -> None:
-    code = exc.response.status_code
-    if code == 401:
-        raise click.ClickException("Invalid or missing API key.") from None
-    if code == 403:
-        raise click.ClickException(
-            f"You do not own {subdomain!r}." if subdomain else "Forbidden."
-        ) from None
-    if code == 404:
-        raise click.ClickException(
-            f"Tunnel {subdomain!r} not found." if subdomain else "Resource not found."
-        ) from None
-    if code == 409:
-        raise click.ClickException("Email already in access list.") from None
-    if code == 429:
-        raise click.ClickException("Rate limited — try again shortly.") from None
-    raise click.ClickException(f"Server returned {code}: {exc.response.text[:200]}") from None
-
-
-def _handle_exc(exc: Exception, subdomain: str | None = None) -> None:
-    if isinstance(exc, httpx.HTTPStatusError):
-        _die_http(exc, subdomain)
-    if isinstance(exc, httpx.ConnectError):
-        raise click.ClickException("Could not connect to relay server.") from None
-    raise click.ClickException(str(exc)) from None
-
-
 def _api_key_option(f: F) -> F:
+    # Kept on every leaf because the option is part of the published grammar
+    # (the tree snapshot pins it, envvar and all). The value feeds the same
+    # resolver as the root's, so the two can no longer disagree.
     return click.option(
         "--api-key",
         default=None,
@@ -114,7 +98,7 @@ def _api_key_option(f: F) -> F:
 # ---------------------------------------------------------------------------
 
 
-async def _warn_if_basic_auth_active(client: ApiClient, subdomain: str) -> None:
+async def _warn_if_basic_auth_active(ctx: click.Context, client: ApiClient, subdomain: str) -> None:
     try:
         data = await client.get_tunnel_basic_auth_status(subdomain)
     except Exception:
@@ -128,11 +112,13 @@ async def _warn_if_basic_auth_active(client: ApiClient, subdomain: str) -> None:
         "  Remove Basic Auth first ([dim]hle tunnel basic-auth remove "
         f"{subdomain}[/dim]) to re-enable SSO/PIN access control."
     )
-    if not click.confirm("  Continue anyway?", default=False):
-        raise SystemExit(0)
+    if not confirm(ctx, "  Continue anyway?", default=False):
+        raise AbortedError()
 
 
-async def _warn_if_pin_or_rules_exist(client: ApiClient, subdomain: str) -> None:
+async def _warn_if_pin_or_rules_exist(
+    ctx: click.Context, client: ApiClient, subdomain: str
+) -> None:
     conflicts: list[str] = []
     try:
         pin = await client.get_tunnel_pin_status(subdomain)
@@ -157,8 +143,8 @@ async def _warn_if_pin_or_rules_exist(client: ApiClient, subdomain: str) -> None
         f"{'them' if len(conflicts) > 1 else 'it'} — visitors will only be "
         "able to authenticate with the Basic Auth username/password."
     )
-    if not click.confirm("  Continue?", default=False):
-        raise SystemExit(0)
+    if not confirm(ctx, "  Continue?", default=False):
+        raise AbortedError()
 
 
 # ---------------------------------------------------------------------------
@@ -238,18 +224,17 @@ def show_cmd(ctx: click.Context, label: str, api_key: str | None) -> None:
       hle tunnel get ha
       hle tunnel get ha -o json
     """
-    out = from_ctx(ctx)
-    key = api_key_from_ctx(ctx, api_key)
+    o = out(ctx)
 
     async def _run() -> None:
-        api = _client(key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            status = await api.get_tunnel_status(subdomain)
+            status = await client.get_tunnel_status(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
-        if out.json_mode:
-            out.data(status)
+            _fail(exc, subdomain)
+        if o.json_mode:
+            o.data(status)
             return
         _print_status(status)
 
@@ -267,18 +252,17 @@ def list_cmd(ctx: click.Context, api_key: str | None) -> None:
       hle tunnel list
       hle tunnel list -o json | jq '.[].subdomain'
     """
-    out = from_ctx(ctx)
-    key = api_key_from_ctx(ctx, api_key)
+    o = out(ctx)
 
     async def _run() -> None:
-        api = _client(key)
+        client = api(ctx, api_key)
         try:
-            tunnel_list = await api.list_tunnels()
+            tunnel_list = await client.list_tunnels()
         except Exception as exc:
-            _handle_exc(exc)
+            _fail(exc)
 
-        if out.json_mode:
-            out.data(tunnel_list)
+        if o.json_mode:
+            o.data(tunnel_list)
             return
 
         if not tunnel_list:
@@ -324,52 +308,49 @@ def delete_cmd(ctx: click.Context, label: str, yes: bool, api_key: str | None) -
     Example:
       hle tunnel delete ha
     """
-    out = from_ctx(ctx)
-    key = api_key_from_ctx(ctx, api_key)
-    no_input = bool((ctx.obj or {}).get("no_input")) if isinstance(ctx.obj, dict) else False
+    o = out(ctx)
 
     async def _run() -> None:
-        api = _client(key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            tunnels = await api.list_tunnels()
+            tunnels = await client.list_tunnels()
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
 
         match = next((t for t in tunnels if t.get("subdomain") == subdomain), None)
         if match is None:
-            raise click.ClickException(
-                f"No tunnel named {subdomain!r}. Run 'hle tunnel list' to see what exists."
+            raise NotFoundError(
+                f"No tunnel named {subdomain!r}.",
+                hint="Run 'hle tunnel list' to see what exists.",
             )
         tunnel_id = match.get("tunnel_id")
         if not tunnel_id:
-            raise click.ClickException(f"The relay returned no id for {subdomain!r}.")
+            raise HleError(f"The relay returned no id for {subdomain!r}.")
 
-        if not yes and not no_input:
+        if not yes:
             # Deleting takes the access rules with it, which is the part that
             # is not obvious and not recoverable.
-            click.confirm(
-                f"Delete {subdomain} and its access rules?",
-                default=False,
-                abort=True,
-            )
+            confirm_or_abort(ctx, f"Delete {subdomain} and its access rules?", default=False)
 
         if match.get("is_active"):
-            raise click.ClickException(
-                f"{subdomain} is connected — stop it before deleting its record.\n"
-                "  Foreground:  Ctrl-C the 'hle tunnel create' that is running it.\n"
-                "  As a service: hle daemon list, then hle daemon uninstall --label <label>."
+            raise ConflictError(
+                f"{subdomain} is connected — stop it before deleting its record.",
+                hint=(
+                    "Foreground:  Ctrl-C the 'hle tunnel create' that is running it.\n"
+                    "As a service: hle daemon list, then hle daemon uninstall --label <label>."
+                ),
             )
 
         try:
-            await api.delete_tunnel_record(str(tunnel_id))
+            await client.delete_tunnel_record(str(tunnel_id))
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
 
-        if out.json_mode:
-            out.data({"subdomain": subdomain, "deleted": True})
+        if o.json_mode:
+            o.data({"subdomain": subdomain, "deleted": True})
             return
-        out.print(f"[green]Deleted[/green] {subdomain}")
+        o.print(f"[green]Deleted[/green] {subdomain}")
 
     asyncio.run(_run())
 
@@ -387,25 +368,30 @@ def delete_cmd(ctx: click.Context, label: str, yes: bool, api_key: str | None) -
     help="Auth mode to apply",
 )
 @_api_key_option
-def auth_mode_cmd(label: str, mode: str, api_key: str | None) -> None:
+@click.pass_context
+def auth_mode_cmd(ctx: click.Context, label: str, mode: str, api_key: str | None) -> None:
     """Set the SSO gate mode for a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            await api.set_tunnel_auth_mode(subdomain, mode)
+            await client.set_tunnel_auth_mode(subdomain, mode)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
-                raise click.ClickException(
-                    f"Tunnel {subdomain!r} has never been registered. "
-                    "Run 'hle expose' once to create it, then re-run this command."
+                raise NotFoundError(
+                    f"Tunnel {subdomain!r} has never been registered.",
+                    hint="Run 'hle tunnel create' once to create it, then re-run this command.",
+                    status=404,
                 ) from None
             if exc.response.status_code == 400 and b"Webhook" in exc.response.content:
-                raise click.ClickException(
-                    "Webhook tunnels are always public — auth_mode cannot be changed."
+                raise ConflictError(
+                    "Webhook tunnels are always public — auth_mode cannot be changed.",
+                    status=400,
                 ) from None
-            _die_http(exc, subdomain)
+            _fail(exc, subdomain)
+        except Exception as exc:
+            _fail(exc, subdomain)
         console.print(f"[green]✓[/green] {subdomain} auth_mode = {mode}")
 
     asyncio.run(_run())
@@ -424,16 +410,17 @@ def access_grp() -> None:
 @access_grp.command("list")
 @click.argument("label")
 @_api_key_option
-def access_list(label: str, api_key: str | None) -> None:
+@click.pass_context
+def access_list(ctx: click.Context, label: str, api_key: str | None) -> None:
     """List access rules for a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            rules = await api.list_access_rules(subdomain)
+            rules = await client.list_access_rules(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
 
         if not rules:
             console.print(f"[dim]No access rules for {subdomain}.[/dim]")
@@ -467,17 +454,20 @@ def access_list(label: str, api_key: str | None) -> None:
     help="Required auth provider",
 )
 @_api_key_option
-def access_add(label: str, email: str, provider: str, api_key: str | None) -> None:
+@click.pass_context
+def access_add(
+    ctx: click.Context, label: str, email: str, provider: str, api_key: str | None
+) -> None:
     """Add an email to a tunnel's access allow-list."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
-        await _warn_if_basic_auth_active(api, subdomain)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
+        await _warn_if_basic_auth_active(ctx, client, subdomain)
         try:
-            rule = await api.add_access_rule(subdomain, email, provider)
+            rule = await client.add_access_rule(subdomain, email, provider)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         console.print(
             f"[green]Added[/green] {rule.get('allowed_email', email)} "
             f"(provider={rule.get('provider', provider)}) to {subdomain}"
@@ -490,16 +480,17 @@ def access_add(label: str, email: str, provider: str, api_key: str | None) -> No
 @click.argument("label")
 @click.argument("rule_id", type=int)
 @_api_key_option
-def access_remove(label: str, rule_id: int, api_key: str | None) -> None:
+@click.pass_context
+def access_remove(ctx: click.Context, label: str, rule_id: int, api_key: str | None) -> None:
     """Remove an access rule by ID."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            await api.delete_access_rule(subdomain, rule_id)
+            await client.delete_access_rule(subdomain, rule_id)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         console.print(f"[green]Removed[/green] rule {rule_id} from {subdomain}")
 
     asyncio.run(_run())
@@ -510,7 +501,9 @@ def access_remove(label: str, rule_id: int, api_key: str | None) -> None:
 @click.argument("specs", nargs=-1)
 @click.option("--clear", "do_clear", is_flag=True, help="Remove all rules (no specs allowed)")
 @_api_key_option
+@click.pass_context
 def access_replace(
+    ctx: click.Context,
     label: str,
     specs: tuple[str, ...],
     do_clear: bool,
@@ -525,15 +518,13 @@ def access_replace(
         hle tunnel access replace ha google:alice@x.com github:bob@y.com
     """
     if do_clear and specs:
-        raise click.ClickException("Pass either SPECS or --clear, not both.")
+        raise UsageError("Pass either SPECS or --clear, not both.")
     if not specs and not do_clear:
-        raise click.ClickException(
-            "At least one spec is required, or pass --clear to remove all rules."
-        )
+        raise UsageError("At least one spec is required, or pass --clear to remove all rules.")
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
 
         desired: set[tuple[str, str]] = set()
         for spec in specs:
@@ -543,9 +534,9 @@ def access_replace(
             desired.add((email.lower(), provider))
 
         try:
-            existing = await api.list_access_rules(subdomain)
+            existing = await client.list_access_rules(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
 
         existing_by_key = {(r["allowed_email"].lower(), r["provider"]): r["id"] for r in existing}
         existing_keys = set(existing_by_key.keys())
@@ -555,7 +546,7 @@ def access_replace(
 
         for email, provider in sorted(to_add):
             try:
-                await api.add_access_rule(subdomain, email, provider)
+                await client.add_access_rule(subdomain, email, provider)
                 console.print(f"  [green]+[/green] {email} ({provider})")
             except httpx.HTTPStatusError as exc:
                 console.print(f"  [yellow]! {email} failed: {exc.response.status_code}[/yellow]")
@@ -563,7 +554,7 @@ def access_replace(
         for key in sorted(to_remove):
             rule_id = existing_by_key[key]
             try:
-                await api.delete_access_rule(subdomain, rule_id)
+                await client.delete_access_rule(subdomain, rule_id)
                 console.print(f"  [red]-[/red] {key[0]} ({key[1]})")
             except httpx.HTTPStatusError as exc:
                 console.print(
@@ -591,23 +582,24 @@ def pin_grp() -> None:
 @pin_grp.command("set")
 @click.argument("label")
 @_api_key_option
-def pin_set(label: str, api_key: str | None) -> None:
+@click.pass_context
+def pin_set(ctx: click.Context, label: str, api_key: str | None) -> None:
     """Set a PIN for a tunnel (prompts for 4-8 digit PIN)."""
-    pin_value = click.prompt("Enter PIN (4-8 digits)", hide_input=True)
+    pin_value = str(prompt(ctx, "Enter PIN (4-8 digits)", hide_input=True))
     if not pin_value.isdigit() or not (4 <= len(pin_value) <= 8):
-        raise click.ClickException("PIN must be 4-8 digits.")
-    pin_confirm = click.prompt("Confirm PIN", hide_input=True)
+        raise HleError("PIN must be 4-8 digits.")
+    pin_confirm = str(prompt(ctx, "Confirm PIN", hide_input=True))
     if pin_value != pin_confirm:
-        raise click.ClickException("PINs do not match.")
+        raise HleError("PINs do not match.")
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
-        await _warn_if_basic_auth_active(api, subdomain)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
+        await _warn_if_basic_auth_active(ctx, client, subdomain)
         try:
-            await api.set_tunnel_pin(subdomain, pin_value)
+            await client.set_tunnel_pin(subdomain, pin_value)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         console.print(f"[green]PIN set[/green] for {subdomain}")
 
     asyncio.run(_run())
@@ -616,16 +608,17 @@ def pin_set(label: str, api_key: str | None) -> None:
 @pin_grp.command("remove")
 @click.argument("label")
 @_api_key_option
-def pin_remove(label: str, api_key: str | None) -> None:
+@click.pass_context
+def pin_remove(ctx: click.Context, label: str, api_key: str | None) -> None:
     """Remove the PIN for a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            await api.remove_tunnel_pin(subdomain)
+            await client.remove_tunnel_pin(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         console.print(f"[green]PIN removed[/green] from {subdomain}")
 
     asyncio.run(_run())
@@ -634,16 +627,17 @@ def pin_remove(label: str, api_key: str | None) -> None:
 @pin_grp.command("status")
 @click.argument("label")
 @_api_key_option
-def pin_status(label: str, api_key: str | None) -> None:
+@click.pass_context
+def pin_status(ctx: click.Context, label: str, api_key: str | None) -> None:
     """Show PIN status for a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            data = await api.get_tunnel_pin_status(subdomain)
+            data = await client.get_tunnel_pin_status(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         if data.get("has_pin"):
             updated = data.get("updated_at", "")
             console.print(f"[cyan]{subdomain}[/cyan]: PIN is [green]active[/green]")
@@ -668,29 +662,30 @@ def basic_auth_grp() -> None:
 @basic_auth_grp.command("set")
 @click.argument("label")
 @_api_key_option
-def basic_auth_set(label: str, api_key: str | None) -> None:
+@click.pass_context
+def basic_auth_set(ctx: click.Context, label: str, api_key: str | None) -> None:
     """Set HTTP Basic Auth credentials for a tunnel."""
-    username = click.prompt("Username")
+    username = str(prompt(ctx, "Username"))
     if not username.strip():
-        raise click.ClickException("Username cannot be empty.")
+        raise HleError("Username cannot be empty.")
     if ":" in username:
-        raise click.ClickException("Username must not contain ':'.")
+        raise HleError("Username must not contain ':'.")
 
-    password = click.prompt("Password (min 8 chars)", hide_input=True)
+    password = str(prompt(ctx, "Password (min 8 chars)", hide_input=True))
     if len(password) < 8:
-        raise click.ClickException("Password must be at least 8 characters.")
-    password_confirm = click.prompt("Confirm password", hide_input=True)
+        raise HleError("Password must be at least 8 characters.")
+    password_confirm = str(prompt(ctx, "Confirm password", hide_input=True))
     if password != password_confirm:
-        raise click.ClickException("Passwords do not match.")
+        raise HleError("Passwords do not match.")
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
-        await _warn_if_pin_or_rules_exist(api, subdomain)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
+        await _warn_if_pin_or_rules_exist(ctx, client, subdomain)
         try:
-            await api.set_tunnel_basic_auth(subdomain, username.strip(), password)
+            await client.set_tunnel_basic_auth(subdomain, username.strip(), password)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         console.print(f"[green]Basic Auth set[/green] for {subdomain} (user: {username.strip()})")
 
     asyncio.run(_run())
@@ -699,16 +694,17 @@ def basic_auth_set(label: str, api_key: str | None) -> None:
 @basic_auth_grp.command("remove")
 @click.argument("label")
 @_api_key_option
-def basic_auth_remove(label: str, api_key: str | None) -> None:
+@click.pass_context
+def basic_auth_remove(ctx: click.Context, label: str, api_key: str | None) -> None:
     """Remove HTTP Basic Auth from a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            await api.remove_tunnel_basic_auth(subdomain)
+            await client.remove_tunnel_basic_auth(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         console.print(f"[green]Basic Auth removed[/green] from {subdomain}")
 
     asyncio.run(_run())
@@ -717,16 +713,17 @@ def basic_auth_remove(label: str, api_key: str | None) -> None:
 @basic_auth_grp.command("status")
 @click.argument("label")
 @_api_key_option
-def basic_auth_status(label: str, api_key: str | None) -> None:
+@click.pass_context
+def basic_auth_status(ctx: click.Context, label: str, api_key: str | None) -> None:
     """Show HTTP Basic Auth status for a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            data = await api.get_tunnel_basic_auth_status(subdomain)
+            data = await client.get_tunnel_basic_auth_status(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         if data.get("enabled"):
             updated = data.get("updated_at", "")
             console.print(
@@ -763,7 +760,9 @@ def share_grp() -> None:
 @click.option("--label", "link_label", default="", help="Optional label for the link")
 @click.option("--max-uses", default=None, type=int, help="Maximum number of uses")
 @_api_key_option
+@click.pass_context
 def share_create(
+    ctx: click.Context,
     label: str,
     duration: str,
     link_label: str,
@@ -773,12 +772,12 @@ def share_create(
     """Create a temporary share link for a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            result = await api.create_share_link(subdomain, duration, link_label, max_uses)
+            result = await client.create_share_link(subdomain, duration, link_label, max_uses)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
 
         console.print()
         console.print("[green bold]Share link created![/green bold]")
@@ -799,16 +798,17 @@ def share_create(
 @share_grp.command("list")
 @click.argument("label")
 @_api_key_option
-def share_list(label: str, api_key: str | None) -> None:
+@click.pass_context
+def share_list(ctx: click.Context, label: str, api_key: str | None) -> None:
     """List share links for a tunnel."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            links = await api.list_share_links(subdomain)
+            links = await client.list_share_links(subdomain)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
 
         if not links:
             console.print(f"[dim]No share links for {subdomain}.[/dim]")
@@ -843,16 +843,17 @@ def share_list(label: str, api_key: str | None) -> None:
 @click.argument("label")
 @click.argument("link_id", type=int)
 @_api_key_option
-def share_revoke(label: str, link_id: int, api_key: str | None) -> None:
+@click.pass_context
+def share_revoke(ctx: click.Context, label: str, link_id: int, api_key: str | None) -> None:
     """Revoke a share link by ID."""
 
     async def _run() -> None:
-        api = _client(api_key)
-        subdomain = await _resolve_subdomain(api, label)
+        client = api(ctx, api_key)
+        subdomain = await _resolve_subdomain(client, label)
         try:
-            await api.delete_share_link(subdomain, link_id)
+            await client.delete_share_link(subdomain, link_id)
         except Exception as exc:
-            _handle_exc(exc, subdomain)
+            _fail(exc, subdomain)
         console.print(f"[green]Revoked[/green] share link {link_id} from {subdomain}")
 
     asyncio.run(_run())

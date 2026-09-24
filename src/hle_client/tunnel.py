@@ -11,7 +11,6 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -24,6 +23,7 @@ import websockets.asyncio.client
 import websockets.exceptions
 
 from hle_client import __version__
+from hle_client import config as hle_config
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import render_notice
 from hle_client.proxy import UPSTREAM_ERROR_HEADER, LocalProxy, ProxyConfig
@@ -62,96 +62,16 @@ logger = logging.getLogger(__name__)
 
 _ClientConn = websockets.asyncio.client.ClientConnection
 
-# Default config directory for persisting settings.
-_CONFIG_DIR = Path.home() / ".config" / "hle"
-_CONFIG_FILE = _CONFIG_DIR / "config.toml"
-
-# An API key is "hle_" plus 32 hex characters. The relay checks this exact
-# length before it will even hash a key, so a value with a stray quote or a
-# trailing newline is refused there while still working elsewhere.
+# The credential file I/O lives in hle_client.config. These names stay
+# because hle-operator and hle-tui import them from here; nothing inside
+# hle_client uses them any more.
+_load_api_key = hle_config.load_api_key
+_save_api_key = hle_config.save_api_key
+_remove_api_key = hle_config.remove_api_key
+_CONFIG_DIR = hle_config.CONFIG_DIR
+_CONFIG_FILE = hle_config.CONFIG_FILE
 _API_KEY_LENGTH = 36
-
-# Agent enrollment tokens share the "hle" stem, which is precisely why they get
-# put in variables named for API keys.
-AGENT_TOKEN_PREFIX = "hlea_"
-
-
-def _load_api_key() -> str | None:
-    """Load api_key from the config file, if it exists."""
-    if not _CONFIG_FILE.exists():
-        return None
-    try:
-        import tomllib
-
-        with open(_CONFIG_FILE, "rb") as f:
-            data = tomllib.load(f)
-        return data.get("api_key")
-    except Exception:
-        # nosemgrep: python-logger-credential-disclosure
-        logger.debug("Failed to load API key from %s", _CONFIG_FILE)
-        return None
-
-
-def _save_api_key(api_key: str) -> None:
-    """Persist api_key to the config file with restrictive permissions."""
-    try:
-        _CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-        existing_lines: list[str] = []
-        found = False
-        if _CONFIG_FILE.exists():
-            with open(_CONFIG_FILE) as f:
-                for line in f:
-                    if line.startswith("api_key ") or line.startswith("api_key="):
-                        existing_lines.append(f'api_key = "{api_key}"\n')
-                        found = True
-                    else:
-                        existing_lines.append(line)
-
-        if not found:
-            existing_lines.append(f'api_key = "{api_key}"\n')
-
-        # Write with 0o600 (owner-only read/write) to protect the API key.
-        fd = os.open(_CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.writelines(existing_lines)
-
-        # nosemgrep: python-logger-credential-disclosure
-        logger.info("API key saved to %s", _CONFIG_FILE)
-    except Exception:
-        # nosemgrep: python-logger-credential-disclosure
-        logger.warning("Failed to save API key to %s", _CONFIG_FILE, exc_info=True)
-
-
-def _remove_api_key() -> bool:
-    """Remove api_key from the config file. Returns True if a key was removed."""
-    if not _CONFIG_FILE.exists():
-        return False
-    try:
-        with open(_CONFIG_FILE) as f:
-            lines = f.readlines()
-
-        new_lines = [
-            line
-            for line in lines
-            if not (line.startswith("api_key ") or line.startswith("api_key="))
-        ]
-        if len(new_lines) == len(lines):
-            return False  # No api_key line found
-
-        fd = os.open(_CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.writelines(new_lines)
-
-        # Both of these log the config path, never the key itself. The rule
-        # fires on the words "API key" appearing in the message.
-        logger.info("API key removed from %s", _CONFIG_FILE)  # nosemgrep
-        return True
-    except Exception:
-        logger.warning(  # nosemgrep
-            "Failed to remove API key from %s", _CONFIG_FILE, exc_info=True
-        )
-        return False
+AGENT_TOKEN_PREFIX = hle_config.AGENT_TOKEN_PREFIX
 
 
 @dataclass
@@ -665,7 +585,7 @@ class Tunnel:
     async def _connect_once(self) -> None:
         """Single connection attempt: discover relay, register, then enter the receive loop."""
         # Resolve API key early — needed for both discovery and registration
-        api_key = self.config.api_key or _load_api_key()
+        api_key = self.config.api_key or hle_config.load_api_key()
         if not api_key:
             raise ConnectionError(
                 "No API key found. Run 'hle auth login', set HLE_API_KEY, or pass --api-key."
