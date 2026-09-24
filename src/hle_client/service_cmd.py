@@ -35,8 +35,9 @@ from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 
 import click
 
-from hle_client import __version__
+from hle_client import __version__, config
 from hle_client.aliases import LegacyModeCommand, ModeGroup
+from hle_client.errors import HleError, UsageError
 from hle_client.richcompat import Console, Table
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -218,8 +219,7 @@ def resolve_user_mode(*, user_flag: bool, system_flag: bool) -> bool:
     (no sudo needed).
     """
     if user_flag and system_flag:
-        console.print("[red]Pass either --user or --system, not both.[/red]")
-        raise SystemExit(1)
+        raise UsageError("Pass either --user or --system, not both.")
     if user_flag:
         return True
     if system_flag:
@@ -243,30 +243,28 @@ def _require_supported() -> str:
     """Ensure the running platform has a supported service backend.
 
     Returns the platform key (``"linux"`` / ``"darwin"`` / ``"freebsd"``) or
-    exits with a clear message on Windows / anything else.
+    raises with a clear message on Windows / anything else.
     """
     plat = current_platform()
     if plat == "linux":
         if shutil.which("systemctl") is None:
-            console.print("[red]`hle service` needs systemd (systemctl not found).[/red]")
-            raise SystemExit(1)
+            raise HleError("`hle daemon` needs systemd (systemctl not found).")
         return plat
     if plat == "darwin":
         if shutil.which("launchctl") is None:
-            console.print("[red]`hle service` needs launchd (launchctl not found).[/red]")
-            raise SystemExit(1)
+            raise HleError("`hle daemon` needs launchd (launchctl not found).")
         return plat
     if plat == "freebsd":
         if shutil.which("service") is None:
-            console.print("[red]`hle service` needs rc.d (service(8) not found).[/red]")
-            raise SystemExit(1)
+            raise HleError("`hle daemon` needs rc.d (service(8) not found).")
         return plat
-    console.print(
-        f"[red]`hle service` is not supported on this platform ({plat}).[/red]\n"
-        "Supported: Linux (systemd), macOS (launchd), FreeBSD/pfSense (rc.d). "
-        "On Windows, use Task Scheduler or NSSM to run `hle tunnel create ...`."
+    raise HleError(
+        f"`hle daemon` is not supported on this platform ({plat}).",
+        hint=(
+            "Supported: Linux (systemd), macOS (launchd), FreeBSD/pfSense (rc.d). "
+            "On Windows, use Task Scheduler or NSSM to run `hle tunnel create ...`."
+        ),
     )
-    raise SystemExit(1)
 
 
 # --------------------------------------------------------------------------- #
@@ -469,16 +467,17 @@ def _systemd_install(
         verdict = _same_agent(existing_text, unit) if existing_text else None
 
         if verdict is True:
-            console.print(
-                f"[red]This same agent is already installed {scope_there}[/red] at {clash}.\n"
-                f"Both units use the same enrollment token, so installing it {scope_here} "
-                "as well would run two copies on one credential — they take every tunnel "
-                "off each other about once a second.\n"
-                "Remove the existing one first:\n"
-                f"  hle daemon uninstall{'' if user_mode else ' --user'} --label {label}\n"
-                "or keep it and skip this install."
+            raise HleError(
+                f"This same agent is already installed {scope_there} at {clash}.",
+                hint=(
+                    f"Both units use the same enrollment token, so installing it {scope_here} "
+                    "as well would run two copies on one credential — they take every tunnel "
+                    "off each other about once a second.\n"
+                    "Remove the existing one first:\n"
+                    f"  hle daemon uninstall{'' if user_mode else ' --user'} --label {label}\n"
+                    "or keep it and skip this install."
+                ),
             )
-            raise SystemExit(1)
 
         console.print(
             f"[yellow]Note:[/yellow] {uname} also exists {scope_there} at {clash}.\n"
@@ -494,11 +493,10 @@ def _systemd_install(
     try:
         path.write_text(unit)
     except PermissionError:
-        console.print(
-            f"[red]Permission denied writing {path}.[/red] "
-            "Re-run with sudo, or use --user for a per-user service."
-        )
-        raise SystemExit(1) from None
+        raise HleError(
+            f"Permission denied writing {path}.",
+            hint="Re-run with sudo, or use --user for a per-user service.",
+        ) from None
 
     console.print(f"[green]Wrote[/green] {path}")
     _systemctl(user_mode, "daemon-reload")
@@ -528,8 +526,7 @@ def _systemd_uninstall(*, label: str, name: str | None, user_mode: bool) -> None
             path.unlink()
             console.print(f"[green]Removed[/green] {path}")
         except PermissionError:
-            console.print(f"[red]Permission denied removing {path}[/red] (try sudo).")
-            raise SystemExit(1) from None
+            raise HleError(f"Permission denied removing {path}", hint="Try sudo.") from None
     _systemctl(user_mode, "daemon-reload")
 
 
@@ -701,11 +698,10 @@ def _launchd_install(
     try:
         path.write_text(plist)
     except PermissionError:
-        console.print(
-            f"[red]Permission denied writing {path}.[/red] "
-            "Re-run with sudo, or use --user for a per-user agent."
-        )
-        raise SystemExit(1) from None
+        raise HleError(
+            f"Permission denied writing {path}.",
+            hint="Re-run with sudo, or use --user for a per-user agent.",
+        ) from None
 
     console.print(f"[green]Wrote[/green] {path}")
     if start:
@@ -729,8 +725,7 @@ def _launchd_uninstall(*, label: str, name: str | None, user_mode: bool) -> None
             path.unlink()
             console.print(f"[green]Removed[/green] {path}")
         except PermissionError:
-            console.print(f"[red]Permission denied removing {path}[/red] (try sudo).")
-            raise SystemExit(1) from None
+            raise HleError(f"Permission denied removing {path}", hint="Try sudo.") from None
     else:
         _launchctl("remove", plabel)
         console.print(f"[yellow]No plist at {path}[/yellow] (attempted launchctl remove).")
@@ -905,11 +900,10 @@ def render_rc_script(
 def _rcd_reject_user_mode(user_mode: bool) -> None:
     """rc.d has no per-user services — say so instead of failing on a write."""
     if user_mode:
-        console.print(
-            "[red]rc.d has no per-user services.[/red] "
-            "Run as root (or pass --system) to manage an hle service on FreeBSD."
+        raise UsageError(
+            "rc.d has no per-user services.",
+            hint="Run as root (or pass --system) to manage an hle service on FreeBSD.",
         )
-        raise SystemExit(1)
 
 
 def _rcd_path(svc: str) -> Path:
@@ -1013,11 +1007,10 @@ def _rcd_install(
         path.write_text(script)
         path.chmod(0o755)
     except PermissionError:
-        console.print(
-            f"[red]Permission denied writing {path}.[/red] Re-run as root "
-            "(rc.d has no per-user services)."
-        )
-        raise SystemExit(1) from None
+        raise HleError(
+            f"Permission denied writing {path}.",
+            hint="Re-run as root (rc.d has no per-user services).",
+        ) from None
 
     console.print(f"[green]Wrote[/green] {path}")
     _sysrc(f"{svc}_enable=YES")
@@ -1026,9 +1019,8 @@ def _rcd_install(
         if result.returncode == 0 and _rcd_settles(svc):
             console.print(f"[green]Started[/green] {svc}")
         else:
-            console.print(f"[yellow]Installed, but {svc} did not stay up.[/yellow]")
             _report_failed_start(svc)
-            raise SystemExit(1)
+            raise HleError(f"Installed, but {svc} did not stay up.")
     else:
         console.print(f"Run: service {svc} start")
 
@@ -1041,8 +1033,7 @@ def _rcd_uninstall(*, label: str, name: str | None) -> None:
     try:
         path.unlink(missing_ok=True)
     except PermissionError:
-        console.print(f"[red]Permission denied removing {path}.[/red] Re-run as root.")
-        raise SystemExit(1) from None
+        raise HleError(f"Permission denied removing {path}.", hint="Re-run as root.") from None
     console.print(f"[green]Removed[/green] {path}")
 
 
@@ -1287,7 +1278,9 @@ def refresh_service(name: str, user_mode: bool) -> str:
         return "restarted" if restart_service(name, user_mode) else "failed"
     try:
         _install_from_spec(spec, plat=current_platform(), start=True)
-    except SystemExit:
+    except HleError:
+        # The backend says why on its way out; here it is one of N services
+        # being refreshed, and the caller reports per service.
         return "failed"
     return "refreshed"
 
@@ -1302,11 +1295,10 @@ def _resolve_label(label: str | None, agent_mode: bool, *, extra_hint: str = "")
         return label
     if agent_mode:
         return AGENT_LABEL
-    console.print(
-        f"[red]--label is required[/red] (or pass --agent for the agent service{extra_hint})."
+    raise UsageError(
+        f"--label is required (or pass --agent for the agent service{extra_hint}).",
+        hint="hle daemon list shows what is installed.",
     )
-    console.print("[dim]hle daemon list[/dim] shows what is installed.")
-    raise SystemExit(1)
 
 
 @click.group()
@@ -1427,16 +1419,14 @@ def install(
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
 
     if agent_mode and fp_mode:
-        console.print("[red]Pass either --agent or --fp, not both.[/red]")
-        raise SystemExit(1)
+        raise UsageError("Pass either --agent or --fp, not both.")
 
     if fp_mode:
         if not agent_name or not fp_target:
-            console.print(
-                "[red]--agent-name and --to are required with --fp.[/red]\n"
-                "Example: hle daemon install forward rpi 22 --port 9922"
+            raise UsageError(
+                "--agent-name and --to are required with --fp.",
+                hint="Example: hle daemon install forward rpi 22 --port 9922",
             )
-            raise SystemExit(1)
         label = label or fp_label(agent_name, fp_target)
         run_args = build_fp_args(
             agent=agent_name,
@@ -1452,9 +1442,13 @@ def install(
         restart = "always"
     elif agent_mode:
         if service_url:
-            console.print("[red]--service is not used with --agent.[/red] Endpoints come from")
-            console.print("the dashboard. Drop --service, or drop --agent for a single tunnel.")
-            raise SystemExit(1)
+            raise UsageError(
+                "--service is not used with --agent.",
+                hint=(
+                    "Endpoints come from the dashboard. Drop --service, or drop --agent "
+                    "for a single tunnel."
+                ),
+            )
         label = label or AGENT_LABEL
         run_args = build_agent_args(relay_host=relay_host, relay_port=relay_port)
         description = "HLE agent (dashboard-managed tunnels)"
@@ -1464,11 +1458,10 @@ def install(
         restart = "always"
     else:
         if not service_url or not label:
-            console.print(
-                "[red]--service and --label are required[/red] (or pass --agent to install "
+            raise UsageError(
+                "--service and --label are required (or pass --agent to install "
                 "the dashboard-managed agent)."
             )
-            raise SystemExit(1)
         run_args = build_expose_args(
             service=service_url,
             label=label,
@@ -1488,9 +1481,8 @@ def install(
     # and hand the service an absolute path. Deriving it later from whatever
     # environment the service manager supplies is what left agents restarting
     # forever next to a token file they could not see.
-    from hle_client.agent import agent_config_path
 
-    agent_config = str(agent_config_path()) if agent_mode else None
+    agent_config = str(config.agent_config_path()) if agent_mode else None
     if agent_mode and not Path(str(agent_config)).exists():
         console.print(
             f"[yellow]No agent token at {agent_config}.[/yellow] "
@@ -1674,9 +1666,10 @@ def logs(
         else:
             path = Path("/var/log") / f"{rc_service_name(label, name)}.log"
         if not path.exists():
-            console.print(f"[yellow]No log file at[/yellow] {path}")
-            console.print("[dim]The service may never have started. Try: hle daemon status[/dim]")
-            raise SystemExit(1)
+            raise HleError(
+                f"No log file at {path}",
+                hint="The service may never have started. Try: hle daemon status",
+            )
         cmd = ["tail", "-n", str(lines), *(["-f"] if follow else []), str(path)]
 
     try:
@@ -1684,8 +1677,7 @@ def logs(
     except KeyboardInterrupt:  # `-f` is meant to be interrupted
         pass
     except FileNotFoundError:
-        console.print(f"[red]{cmd[0]} not found.[/red]")
-        raise SystemExit(1) from None
+        raise HleError(f"{cmd[0]} not found.") from None
 
 
 @service.command("status")
@@ -1714,15 +1706,12 @@ def status(
     # A service manager reports on a process, not on whether it works. An agent
     # with no token exits immediately and is restarted forever, so "running as
     # pid 87998" is true, reassuring, and useless. Say the part it cannot know.
-    if agent_mode:
-        from hle_client.agent import load_agent_token
-
-        if not os.environ.get("HLE_AGENT_TOKEN") and load_agent_token() is None:
-            console.print(
-                "\n[yellow]No agent token is configured[/yellow] — if the service is "
-                "running it is restarting in a loop."
-            )
-            console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
+    if agent_mode and config.load_credentials().agent_token is None:
+        console.print(
+            "\n[yellow]No agent token is configured[/yellow] — if the service is "
+            "running it is restarting in a loop."
+        )
+        console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
 
 
 @service.command("restart")
@@ -1754,7 +1743,7 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
                 console.print(f"{svc} ({scope}): [red]failed[/red]")
                 failed.append(f"{svc} ({scope})")
         if failed:
-            raise SystemExit(1)
+            raise HleError(f"Could not restart {', '.join(failed)}.")
         return
 
     plat = current_platform()
@@ -1768,8 +1757,7 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
     if restart_service(svc):
         console.print(f"[green]Restarted[/green] {svc}")
     else:
-        console.print(f"[red]Could not restart[/red] {svc}")
-        raise SystemExit(1)
+        raise HleError(f"Could not restart {svc}")
 
 
 @service.command("refresh")
@@ -1813,7 +1801,7 @@ def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: 
                 console.print(f"{svc} ({scope}): [red]failed[/red]")
                 failed.append(svc)
         if failed:
-            raise SystemExit(1)
+            raise HleError(f"Could not refresh {', '.join(failed)}.")
         return
 
     plat = current_platform()
@@ -1826,9 +1814,10 @@ def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: 
         svc = unit_name(label, name)
     unit_scope = installed_scope(svc)
     if unit_scope is None:
-        console.print(f"[red]{svc} is not installed[/red] in either scope.")
-        console.print("[dim]hle daemon list[/dim] shows what is installed.")
-        raise SystemExit(1)
+        raise HleError(
+            f"{svc} is not installed in either scope.",
+            hint="hle daemon list shows what is installed.",
+        )
     outcome = refresh_service(svc, unit_scope)
     if outcome == "refreshed":
         console.print(f"[green]Rebuilt and started[/green] {svc}")
@@ -1839,8 +1828,7 @@ def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: 
             "Reinstall it to fix that: [cyan]hle daemon install agent[/cyan]"
         )
     else:
-        console.print(f"[red]Could not refresh[/red] {svc}")
-        raise SystemExit(1)
+        raise HleError(f"Could not refresh {svc}")
 
 
 @service.command("list")
@@ -1850,8 +1838,7 @@ def list_services(user_only: bool, system_only: bool) -> None:
     """List installed hle services, in both scopes by default."""
     plat = _require_supported()
     if user_only and system_only:
-        console.print("[red]Pass either --user or --system, not both.[/red]")
-        raise SystemExit(1)
+        raise UsageError("Pass either --user or --system, not both.")
     scope: bool | None = True if user_only else (False if system_only else None)
     if plat == "darwin":
         _launchd_list(user_mode=scope)

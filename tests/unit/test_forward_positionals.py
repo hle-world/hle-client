@@ -101,7 +101,7 @@ class TestTheDocumentedExamplesParse:
         # No credential anywhere, so the command stops at the auth check —
         # which is exactly far enough to prove the arguments were understood,
         # and not so far that the test needs a relay.
-        with patch("hle_client.fp_cmd._load_api_key", return_value=None):
+        with patch("hle_client.config.load_api_key", return_value=None):
             result = CliRunner().invoke(main, ["forward", *argv], env={"HLE_API_KEY": ""})
         assert "No agent given" not in result.output
         assert "No target given" not in result.output

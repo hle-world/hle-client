@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from hle_client import service_cmd
+from hle_client.errors import HleError, UsageError
 from hle_client.service_cmd import (
     AGENT_LABEL,
     build_agent_args,
@@ -104,7 +105,7 @@ class TestResolveUserMode:
         assert resolve_user_mode(user_flag=False, system_flag=False) is True
 
     def test_both_flags_rejected(self):
-        with pytest.raises(SystemExit):
+        with pytest.raises(UsageError):
             resolve_user_mode(user_flag=True, system_flag=True)
 
 
@@ -341,7 +342,7 @@ class TestRestartWithoutATarget:
 
     def test_mentions_all_and_how_to_look(self):
         result = self._run("restart")
-        assert result.exit_code == 1
+        assert result.exit_code == 2  # UsageError: a required flag is missing
         out = " ".join(_ANSI.sub("", result.output).split())
         assert "--label is required" in out
         assert "--all" in out
@@ -553,19 +554,21 @@ class TestDuplicateScopeInstall:
     # -- the genuine duplicate ------------------------------------------------
 
     def test_the_same_token_in_the_other_scope_is_refused(self, tmp_path, monkeypatch, capsys):
-        with pytest.raises(SystemExit) as excinfo:
+        # The backend raises; the root group is what renders and exits. Here
+        # the message and hint are read off the error itself.
+        with pytest.raises(HleError) as excinfo:
             self._install(tmp_path, monkeypatch, user_mode=True, existing="system")
-        assert excinfo.value.code == 1
+        assert excinfo.value.exit_code == 1
 
-        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        out = " ".join(f"{excinfo.value.message} {excinfo.value.hint}".split())
         assert "same agent is already installed system-wide" in out
         assert "same enrollment token" in out
         assert "hle daemon uninstall --label agent" in out
 
-    def test_it_works_in_the_other_direction_too(self, tmp_path, monkeypatch, capsys):
-        with pytest.raises(SystemExit):
+    def test_it_works_in_the_other_direction_too(self, tmp_path, monkeypatch):
+        with pytest.raises(HleError) as excinfo:
             self._install(tmp_path, monkeypatch, user_mode=False, existing="user")
-        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        out = " ".join(f"{excinfo.value.message} {excinfo.value.hint}".split())
         assert "hle daemon uninstall --user --label agent" in out
 
     def test_the_same_token_file_read_as_the_same_user_counts(self, tmp_path, monkeypatch):
@@ -585,7 +588,7 @@ class TestDuplicateScopeInstall:
             f"[Service]\nEnvironment=HLE_AGENT_CONFIG={shared}\nUser=mimos\n"
         )
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(HleError):
             service_cmd._systemd_install(
                 label=AGENT_LABEL,
                 run_args=["agent", "run"],
