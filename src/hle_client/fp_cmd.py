@@ -21,7 +21,9 @@ from dataclasses import dataclass
 import click
 import websockets
 
-from hle_client import __version__, config, shutdown
+from hle_client import __version__, shutdown
+from hle_client.context import require_api_key
+from hle_client.errors import HleError
 from hle_client.firepuncher import FpLocalClient
 from hle_client.richcompat import Console
 from hle_common.fp_protocol import (
@@ -102,7 +104,7 @@ def _explain_if_not_allowed(allowed: list[str], host: str, port: int) -> str | N
     if is_allowed(rules, host, port):
         return None
     return (
-        f"[red]Refused:[/red] the agent does not allow {host}:{port}.\n"
+        f"the agent does not allow {host}:{port}.\n"
         f"[dim]It allows: {', '.join(allowed)}[/dim]\n"
         "[dim]Add a rule for this target on the agent's Firepuncher settings "
         "in the dashboard.[/dim]"
@@ -338,8 +340,7 @@ async def _run(
                             # healthy, so don't carry a stale connection backoff.
                             delay = RECONNECT_DELAY
                             continue
-                        console.print(f"[red]Error:[/red] {detail}")
-                        raise SystemExit(1)
+                        raise HleError(str(detail))
 
                     welcome = FpWelcome.model_validate(first)
                     client.send = ws.send
@@ -354,8 +355,7 @@ async def _run(
                         # failure arrive as a closed connection minutes later.
                         refusal = _explain_if_not_allowed(welcome.allowed, target_host, target_port)
                         if refusal is not None:
-                            console.print(f"{tag}{refusal}")
-                            raise SystemExit(1)
+                            raise HleError(f"{tag}{refusal}")
 
                         console.print(
                             f"[green]Forwarding[/green] {bind_host}:{bind_port} "
@@ -379,14 +379,13 @@ async def _run(
                 # A clean close still means the session ended; reconnect.
                 notice("Connection closed by the relay")
 
-            except SystemExit:
+            except HleError:
                 raise
             except asyncio.CancelledError:
                 raise
             except websockets.exceptions.ConnectionClosed as exc:
                 if exc.rcvd is not None and exc.rcvd.code in _FATAL_CLOSE_CODES:
-                    console.print(f"[red]Error:[/red] {exc.rcvd.reason or 'rejected by relay'}")
-                    raise SystemExit(1) from None
+                    raise HleError(exc.rcvd.reason or "rejected by relay") from None
                 notice(f"Connection lost ({_close_reason(exc)})")
             except OSError as exc:
                 # DNS failure, no route, refused — typical when the laptop's
@@ -462,8 +461,7 @@ async def _run_all(
                 for task in tasks:
                     if task.done() and not task.cancelled() and task.exception():
                         raise task.exception()  # type: ignore[misc]
-                console.print("[red]Error:[/red] a forward stopped before it was ready.")
-                return 1
+                raise HleError("a forward stopped before it was ready.")
             done, pending = await asyncio.wait(
                 [*waiters, *tasks], return_when=asyncio.FIRST_COMPLETED
             )
@@ -487,11 +485,11 @@ async def _run_command(command: list[str], forwards: list[Forward]) -> int:
     try:
         proc = await asyncio.create_subprocess_exec(*command, env=env)
     except FileNotFoundError:
-        console.print(f"[red]Error:[/red] command not found: {command[0]}")
-        return 127
+        # 127 and 126 are what a shell would say, so a wrapper script sees
+        # the exit code it already knows how to read.
+        raise HleError(f"command not found: {command[0]}", exit_code=127) from None
     except OSError as exc:
-        console.print(f"[red]Error:[/red] could not run {command[0]}: {exc}")
-        return 126
+        raise HleError(f"could not run {command[0]}: {exc}", exit_code=126) from None
 
     try:
         return await proc.wait()
@@ -573,7 +571,9 @@ async def _read_loop(ws: websockets.ClientConnection, client: FpLocalClient) -> 
 @click.option("--relay-host", default="hle.world", help="Relay host")
 @click.option("--relay-port", default=443, type=int, help="Relay port")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
+@click.pass_context
 def fp(
+    ctx: click.Context,
     agent: str | None,
     targets: tuple[str, ...],
     bind_ports: tuple[int, ...],
@@ -624,10 +624,7 @@ def fp(
 
     forwards = _build_forwards(targets, bind_ports, bind_host)
 
-    key = api_key or config.load_api_key()
-    if not key:
-        console.print("[red]Error:[/red] No API key. Run [cyan]hle auth login[/cyan] first.")
-        raise SystemExit(1)
+    key = require_api_key(ctx, api_key)
 
     argv = _resolve_command(command, forwards)
 
@@ -646,7 +643,7 @@ def fp(
         console.print("\n[yellow]Stopped.[/yellow]")
         return
     except OSError as exc:
-        console.print(f"[red]Error:[/red] could not bind — {exc}")
-        raise SystemExit(1) from None
+        raise HleError(f"could not bind — {exc}") from None
     if exit_code:
+        # The command's own status, passed through untouched.
         raise SystemExit(exit_code)

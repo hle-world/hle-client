@@ -10,16 +10,14 @@ over every leaf command in the tree and check three things:
       never produces a usage error — the parser always accepts the flag, even
       on leaves that go on to ignore it.
   (b) root `--api-key` actually *reaches* the commands that call the API —
-      not just "is accepted", but is the credential used. The signal is
-      exactly the one the source uses: `hle_client.output.api_key_from_ctx`.
-      Commands that call it fall back to the root key when they have no flag
-      of their own; commands that read their own `--api-key` (or its envvar)
-      directly do not. That second group is this file's xfail list — the
-      debt item is tracked as plan §2.1 recommendation 3 ("One context for
-      credentials, output, prompts").
+      not just "is accepted", but is the credential used. Every leaf resolves
+      through `hle_client.context.resolve_api_key`, so the root key is the
+      fallback when a leaf was given no flag of its own, and the leaf's own
+      flag still wins when it was. (Fifteen of these were `xfail` until plan
+      §2.2 gave them one resolver.)
   (c) `--no-input` hoisted to the root is likewise always *accepted* — no
-      usage error — on every leaf, independent of whether that leaf's own
-      prompts (§2.1 recommendation 3 again) pay attention to it.
+      usage error — on every leaf. What each prompt does under it is
+      `tests/unit/test_context.py`'s business.
 
 None of this hits the network: (a) and (c) never get past `--help`, and (b)
 patches `ApiClient` with a small recorder instead of a mock tied to any one
@@ -106,31 +104,23 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[_RecordingApiClie
     # Simulates "no key saved locally" — a command that falls back to it
     # instead of the root key is instantly visible: the fallback is _LOCAL_KEY.
     monkeypatch.setattr("hle_client.config.load_api_key", lambda: _LOCAL_KEY)
-    with (
-        patch("hle_client.config_cmd.ApiClient", _RecordingApiClient),
-        patch("hle_client.api.ApiClient", _RecordingApiClient),
-    ):
+    # One patch point: every command builds its client through
+    # `hle_client.context.api`, which looks the class up on the module at
+    # call time.
+    with patch("hle_client.api.ApiClient", _RecordingApiClient):
         yield _RecordingApiClient
 
 
-# Commands that resolve their credential through `api_key_from_ctx`, so the
-# root `--api-key` reaches them when they have no flag of their own. Verified
-# against the source: this is the complete set — `grep -rn api_key_from_ctx
-# src/hle_client/*.py` names exactly these four call sites plus `status_cmd`.
+# Every leaf that builds an `ApiClient`. Each resolves its credential through
+# `hle_client.context.api`, so the root `--api-key` reaches it when it has no
+# flag of its own. This list was split in two — four that honoured the root
+# key and fifteen `xfail`s that read their own option directly — until plan
+# §2.2 gave them one resolver. Each entry is `path -> (argv, stdin)`.
 _HONOURS_ROOT_API_KEY: dict[str, tuple[list[str], str | None]] = {
     "hle tunnel get": (["tunnel", "get", "ha-x7k"], None),
     "hle tunnel list": (["tunnel", "list"], None),
     "hle tunnel delete": (["tunnel", "delete", "ha-x7k", "--yes"], None),
     "hle status": (["status"], None),
-}
-
-# The rest of the API-calling leaves: each reads its own `--api-key` option
-# (falling back to its own envvar / the config file) and never asks the
-# context for the root's. This is the debt the audit calls out by name
-# (§1 "Root flags honoured unevenly") and plan §2.1 recommendation 3 is meant
-# to retire by replacing every one of these with `api_key_from_ctx`. Each
-# entry is `path -> (argv, stdin)`.
-_IGNORES_ROOT_API_KEY: dict[str, tuple[list[str], str | None]] = {
     "hle agent list": (["agent", "list"], None),
     "hle tunnel access list": (["tunnel", "access", "list", "ha-x7k"], None),
     "hle tunnel access add": (["tunnel", "access", "add", "ha-x7k", "friend@example.com"], None),
@@ -154,25 +144,22 @@ _IGNORES_ROOT_API_KEY: dict[str, tuple[list[str], str | None]] = {
     "hle tunnel share revoke": (["tunnel", "share", "revoke", "ha-x7k", "1"], None),
 }
 
-# Not exercised here at all: `expose`, `webhook` (root and `tunnel webhook`),
-# and `forward` resolve their credential inside `Tunnel`/`fp` at *connection*
-# time, not through `_client()`/`ApiClient` — the recorder above can't see it
-# without also faking the relay connection. Per the same audit line they also
-# ignore the root key (`forward` and `webhook` are named explicitly; `expose`
-# reads its own `--api-key`/envvar the same way). Tracked as the same debt,
-# just not asserted by this test.
-#
-# `tunnel create` is accounted for separately, by
-# `test_tunnel_create_forwards_root_api_key_into_the_tunnel_config` below — it
-# does honour the root key (it's the fourth `api_key_from_ctx` call site), but
-# via `Tunnel`, not `ApiClient`, so it needs its own fake.
+# `expose` / `tunnel create`, `webhook` (root and `tunnel webhook`) and
+# `forward` resolve the same way but hand the key to `Tunnel` / the forward
+# loop rather than to `ApiClient`, so the recorder above cannot see it. Each
+# gets its own fake below, capturing at the point the key is handed over.
 #
 # `auth login`'s `--api-key` names a *different* thing entirely — the key to
 # save, not one to authenticate with (see `hoist_global_options`'s docstring)
 # — so "does the root key reach it" does not apply; it is excluded from the
 # accounting rather than filed as either honouring or ignoring.
-_NOT_EXERCISED_TUNNEL_BASED = ("hle expose", "hle webhook", "hle tunnel webhook", "hle forward")
-_HONOURS_VIA_OWN_MECHANISM = ("hle tunnel create",)
+_HONOURS_VIA_OWN_MECHANISM = (
+    "hle tunnel create",
+    "hle expose",
+    "hle webhook",
+    "hle tunnel webhook",
+    "hle forward",
+)
 _NOT_APPLICABLE = ("hle auth login",)
 
 
@@ -184,31 +171,50 @@ def test_root_api_key_reaches_command(path: str, recorder: type[_RecordingApiCli
     assert recorder.captured[0] == _ROOT_KEY
 
 
-@pytest.mark.parametrize("path", sorted(_IGNORES_ROOT_API_KEY), ids=sorted(_IGNORES_ROOT_API_KEY))
-@pytest.mark.xfail(
-    reason=(
-        "audit §1 'Root flags honoured unevenly': this command reads its own "
-        "--api-key/envvar directly instead of hle_client.output.api_key_from_ctx, "
-        "so the root --api-key is silently ignored. Fixed by plan §2.1 rec. 3."
-    ),
-    strict=True,
-)
-def test_root_api_key_should_reach_command_but_does_not_yet(
-    path: str, recorder: type[_RecordingApiClient]
-) -> None:
-    argv, stdin = _IGNORES_ROOT_API_KEY[path]
-    result = CliRunner().invoke(main, ["--api-key", _ROOT_KEY, *argv], input=stdin)
+@pytest.mark.parametrize("path", sorted(_HONOURS_ROOT_API_KEY), ids=sorted(_HONOURS_ROOT_API_KEY))
+def test_leaf_api_key_still_wins_over_root(path: str, recorder: type[_RecordingApiClient]) -> None:
+    """The leaf's own --api-key is the most specific thing said, so it wins."""
+    if path == "hle status":
+        pytest.skip("status has no --api-key of its own")
+    argv, stdin = _HONOURS_ROOT_API_KEY[path]
+    leaf_key = "hle_" + "c" * 32
+    result = CliRunner().invoke(
+        main, ["--api-key", _ROOT_KEY, *argv, "--api-key", leaf_key], input=stdin
+    )
     assert recorder.captured, f"{path} never constructed an ApiClient ({result.output})"
-    assert recorder.captured[0] == _ROOT_KEY
+    assert recorder.captured[0] == leaf_key
 
 
-def test_tunnel_create_forwards_root_api_key_into_the_tunnel_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`tunnel create` is the one command that resolves its key through
-    `api_key_from_ctx` (`cli.py:554`) but never touches `ApiClient` directly —
-    it hands the key to `TunnelConfig` and connects. Captured at `Tunnel(...)`
-    construction instead, with the actual connection short-circuited.
+_TUNNEL_BASED: dict[str, list[str]] = {
+    "hle tunnel create": ["tunnel", "create", "ha", "http://localhost:8080"],
+    "hle expose": ["expose", "--service", "http://localhost:8080", "--label", "ha"],
+    "hle webhook": [
+        "webhook",
+        "--path",
+        "/hook",
+        "--forward-to",
+        "http://localhost:1",
+        "--label",
+        "gh",
+    ],
+    "hle tunnel webhook": [
+        "tunnel",
+        "webhook",
+        "--path",
+        "/hook",
+        "--forward-to",
+        "http://localhost:1",
+        "--label",
+        "gh",
+    ],
+}
+
+
+@pytest.mark.parametrize("path", sorted(_TUNNEL_BASED), ids=sorted(_TUNNEL_BASED))
+def test_root_api_key_reaches_the_tunnel_config(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """These never touch `ApiClient` — they hand the key to `TunnelConfig`
+    and connect. Captured at `Tunnel(...)` construction instead, with the
+    actual connection short-circuited.
     """
     captured: list[str | None] = []
 
@@ -224,28 +230,37 @@ def test_tunnel_create_forwards_root_api_key_into_the_tunnel_config(
         patch("hle_client.cli.Tunnel", _FakeTunnel),
         patch("hle_client.cli.shutdown.run", lambda coro: coro.close()),
     ):
-        result = CliRunner().invoke(
-            main,
-            ["--api-key", _ROOT_KEY, "tunnel", "create", "ha", "http://localhost:8080"],
-        )
+        result = CliRunner().invoke(main, ["--api-key", _ROOT_KEY, *_TUNNEL_BASED[path]])
+    assert captured, result.output
+    assert captured[0] == _ROOT_KEY
+
+
+def test_root_api_key_reaches_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`forward` hands the key to its relay loop; capture it there."""
+    captured: list[str] = []
+
+    async def _fake_run_all(*, api_key: str, **_kw: Any) -> int:
+        captured.append(api_key)
+        return 0
+
+    monkeypatch.delenv("HLE_API_KEY", raising=False)
+    with (
+        patch("hle_client.fp_cmd._run_all", _fake_run_all),
+        patch("hle_client.fp_cmd.shutdown.run", lambda coro: __import__("asyncio").run(coro)),
+    ):
+        result = CliRunner().invoke(main, ["--api-key", _ROOT_KEY, "forward", "rpi", "22"])
     assert captured, result.output
     assert captured[0] == _ROOT_KEY
 
 
 def test_every_api_key_leaf_is_accounted_for() -> None:
-    """The three lists above must add up to every leaf with an --api-key story.
+    """The lists above must add up to every leaf with an --api-key story.
 
-    Guards the debt register itself: a new command added with its own
-    --api-key option, and neither honoured nor recorded as ignoring the root
-    key, would otherwise fall through unnoticed.
+    Guards the register itself: a new command added with its own --api-key
+    option and not recorded as honouring the root key would otherwise fall
+    through unnoticed.
     """
-    accounted = (
-        set(_HONOURS_ROOT_API_KEY)
-        | set(_IGNORES_ROOT_API_KEY)
-        | set(_NOT_EXERCISED_TUNNEL_BASED)
-        | set(_HONOURS_VIA_OWN_MECHANISM)
-        | set(_NOT_APPLICABLE)
-    )
+    accounted = set(_HONOURS_ROOT_API_KEY) | set(_HONOURS_VIA_OWN_MECHANISM) | set(_NOT_APPLICABLE)
     from ._cli_introspect import walk
 
     api_key_leaves = {

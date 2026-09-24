@@ -18,7 +18,7 @@ _KEY = "hle_" + "a" * 32
 
 
 def _patch_client(mock_client: AsyncMock):
-    """Patch the ApiClient used inside config_cmd (where the runtime import resolves).
+    """Patch ApiClient where hle_client.context looks it up at call time.
 
     Subdomain resolution always asks ``get_me`` for the user code (a label can
     contain hyphens, so the suffix is the only way to tell it is resolved).
@@ -26,11 +26,11 @@ def _patch_client(mock_client: AsyncMock):
     """
     if not isinstance(mock_client.get_me.return_value, dict):
         mock_client.get_me = AsyncMock(return_value={"user_code": "x7k"})
-    return patch("hle_client.config_cmd.ApiClient", return_value=mock_client)
+    return patch("hle_client.api.ApiClient", return_value=mock_client)
 
 
 def _patch_key():
-    return patch("hle_client.config_cmd._require_key", return_value=_KEY)
+    return patch("hle_client.config.load_api_key", return_value=_KEY)
 
 
 class TestConfigList:
@@ -494,25 +494,34 @@ class TestAgentCli:
         assert "Invalid agent token" in result.output
 
     def test_status_no_token(self, tmp_path: Path) -> None:
-        """Exits non-zero, so a script can tell enrolled from not.
+        """ "No token" is the answer, not a failure — exit 0, like `auth status`.
 
-        This used to exit 0, which is how the installer could confirm
-        enrollment "worked", install a service, and leave it restarting
-        forever on a token that was never saved.
+        A script that wants to branch on it reads `-o json` rather than the
+        exit code (audit §4: the two status commands disagreed on this).
         """
         runner = CliRunner()
         cfg = tmp_path / "missing.toml"
         with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
             result = runner.invoke(main, ["agent", "status"])
-        assert result.exit_code == 1
+        assert result.exit_code == 0
         assert "No agent token" in result.output
+
+    def test_status_no_token_as_json(self, tmp_path: Path, monkeypatch) -> None:
+        import json
+
+        monkeypatch.delenv("HLE_AGENT_TOKEN", raising=False)
+        cfg = tmp_path / "missing.toml"
+        with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
+            result = CliRunner().invoke(main, ["-o", "json", "agent", "status"])
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == {"agent_token": False, "source": None}
 
     def test_run_requires_token(self, tmp_path: Path) -> None:
         runner = CliRunner()
         cfg = tmp_path / "missing.toml"
         with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
             result = runner.invoke(main, ["agent", "run"])
-        assert result.exit_code == 1
+        assert result.exit_code == 3  # AuthError: no credential
         assert "No agent token" in result.output
 
     def test_run_invokes_client(self, tmp_path: Path) -> None:
@@ -596,7 +605,7 @@ class TestAgentList:
         ):
             result = runner.invoke(main, ["agent", "list"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 3  # AuthError: no credential
         out = " ".join(result.output.split())
         assert "enrolled as an agent" in out
         assert "cannot read your account" in out
@@ -612,7 +621,7 @@ class TestAgentList:
         ):
             result = runner.invoke(main, ["agent", "list"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 3  # AuthError: no credential
         assert "enrolled as an agent" not in result.output
 
     def test_it_reads_the_env_var_its_help_promises(self, monkeypatch) -> None:
@@ -661,7 +670,7 @@ class TestAgentList:
             result = runner.invoke(main, ["agent", "list", "--api-key", _KEY])
 
         out = " ".join(result.output.split())
-        assert result.exit_code == 1
+        assert result.exit_code == 3  # AuthError: the relay refused the credential
         assert "agent enrollment token, not an API key" in out
 
     def test_a_401_without_a_detail_still_says_something(self, monkeypatch) -> None:
@@ -678,8 +687,9 @@ class TestAgentList:
         with patch("hle_client.api.ApiClient", return_value=mock_client):
             result = runner.invoke(main, ["agent", "list", "--api-key", _KEY])
 
-        assert result.exit_code == 1
-        assert "API key rejected" in result.output
+        assert result.exit_code == 3  # AuthError: the relay refused the credential
+        # The one 401 fallback every command shares now.
+        assert "Invalid or missing API key" in result.output
 
     def test_json_output_is_machine_readable(self) -> None:
         import json
@@ -693,7 +703,7 @@ class TestAgentList:
         runner = CliRunner()
         with patch("hle_client.config.load_api_key", return_value=None):
             result = runner.invoke(main, ["agent", "list"])
-        assert result.exit_code == 1
+        assert result.exit_code == 3  # AuthError: no credential
         assert "No API key" in result.output
 
     def test_disabled_feature_is_explained_not_a_traceback(self) -> None:

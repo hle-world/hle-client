@@ -6,7 +6,6 @@ import asyncio
 import copy
 import logging
 import os
-import re
 import sys
 import webbrowser
 from datetime import UTC
@@ -18,10 +17,17 @@ from hle_client import __version__, config, plugins, shutdown
 from hle_client.agent import AgentClient
 from hle_client.aliases import RootGroup
 from hle_client.config_cmd import config as config_group
+from hle_client.context import api, out, prompt, resolve_api_key
 from hle_client.credentials import normalize_credential_env
+from hle_client.errors import (
+    NO_AGENT_TOKEN,
+    ApiError,
+    AuthError,
+    HleError,
+    UsageError,
+)
 from hle_client.fp_cmd import fp as fp_command
-from hle_client.output import OUTPUT_FORMATS, TABLE, Output, api_key_from_ctx
-from hle_client.output import from_ctx as output_from_ctx
+from hle_client.output import OUTPUT_FORMATS, TABLE, Output
 from hle_client.richcompat import Console
 from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError
@@ -124,21 +130,6 @@ def main(
 _VALID_AUTH_PROVIDERS = {"any", "google", "github", "hle"}
 
 
-def _server_detail(exc: Any) -> str | None:
-    """The relay's own explanation for a failed request, if it gave one.
-
-    Preferring it to a message composed here keeps the reasoning on the side
-    that can be updated: the relay knows which credential arrived and why it
-    was refused, and a client installed months ago gets the better wording the
-    moment the relay is deployed.
-    """
-    try:
-        detail = exc.response.json().get("detail")
-    except Exception:  # noqa: BLE001 — an unparseable body is just "no detail"
-        return None
-    return str(detail) if detail else None
-
-
 def _parse_auth_spec(spec: str) -> tuple[str, str]:
     """Parse ``[provider:]email`` into ``(provider, email)``."""
     if ":" in spec:
@@ -217,7 +208,9 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     "Format: 'email' or 'provider:email'. "
     "Providers: any (default), google, github, hle. Repeatable.",
 )
+@click.pass_context
 def expose(
+    ctx: click.Context,
     service: str,
     auth: str,
     service_label: str | None,
@@ -237,30 +230,32 @@ def expose(
     for opt in options:
         key, sep, val = opt.partition("=")
         if not sep or not key:
-            console.print(f"[red]Error:[/red] --option must be KEY=VALUE (got '{opt}').")
-            raise SystemExit(1)
+            raise UsageError(f"--option must be KEY=VALUE (got '{opt}').")
         options_dict[key.strip()] = val
 
     # Validate apex / label / zone combination up front.
     if apex and not zone:
-        console.print("[red]Error:[/red] --apex requires --zone (e.g. --zone t00t.us).")
-        raise SystemExit(1)
+        raise UsageError("--apex requires --zone (e.g. --zone t00t.us).")
     if not apex and not service_label:
         # Names the form being taught, not the flag it replaced.
-        console.print(
-            "[red]Error:[/red] a label is required — it names the tunnel.\n"
-            "         [cyan]hle tunnel create <label> <url>[/cyan]  "
-            "(or use --apex with --zone to serve a bare zone root)."
+        raise UsageError(
+            "a label is required — it names the tunnel.",
+            hint=(
+                "[cyan]hle tunnel create <label> <url>[/cyan]  "
+                "(or use --apex with --zone to serve a bare zone root)."
+            ),
         )
-        raise SystemExit(1)
 
     upstream_auth_tuple: tuple[str, str] | None = None
     if upstream_basic_auth:
         if ":" not in upstream_basic_auth:
-            console.print("[red]Error:[/red] --upstream-basic-auth must be in USER:PASS format.")
-            raise SystemExit(1)
+            raise UsageError("--upstream-basic-auth must be in USER:PASS format.")
         u, _, p = upstream_basic_auth.partition(":")
         upstream_auth_tuple = (u, p)
+
+    # Resolved here so the root's --api-key reaches the tunnel too. None is
+    # still allowed: the tunnel reads the config file itself at connect time.
+    resolved_key = resolve_api_key(ctx, api_key)
 
     tunnel_config = TunnelConfig(
         service_url=service,
@@ -269,7 +264,7 @@ def expose(
         zone=zone,
         apex=apex,
         options=options_dict,
-        api_key=api_key,
+        api_key=resolved_key,
         websocket_enabled=websocket,
         verify_ssl=verify_ssl,
         upstream_basic_auth=upstream_auth_tuple,
@@ -283,13 +278,10 @@ def expose(
         async def _add_auth_callback(subdomain: str) -> None:
             import httpx
 
-            from hle_client.api import ApiClient, ApiClientConfig
-
-            resolved_key = api_key or config.load_api_key()
             if not resolved_key:
                 console.print("[yellow]Warning:[/yellow] No API key — skipping auth rules")
                 return
-            client = ApiClient(ApiClientConfig(api_key=resolved_key))
+            client = api(ctx, resolved_key)
             for prov, email in auth_specs:
                 try:
                     await client.add_access_rule(subdomain, email, prov)
@@ -325,8 +317,7 @@ def expose(
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
-        console.print(f"\n[red]Error:[/red] {exc}")
-        raise SystemExit(1) from None
+        raise HleError(str(exc)) from None
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +335,9 @@ def expose(
     default=None,
     help="API key. Falls back to ~/.config/hle/config.toml if not set.",
 )
+@click.pass_context
 def webhook(
+    ctx: click.Context,
     path: str,
     forward_to: str,
     service_label: str,
@@ -362,17 +355,15 @@ def webhook(
         path = f"/{path}"
     path = posixpath.normpath(path)
     if not path or path == "/":
-        console.print("[red]Error:[/red] --path must be a non-root path (e.g. /webhook/github)")
-        raise SystemExit(1)
+        raise UsageError("--path must be a non-root path (e.g. /webhook/github)")
     if ".." in path.split("/"):
-        console.print("[red]Error:[/red] --path must not contain '..' segments")
-        raise SystemExit(1)
+        raise UsageError("--path must not contain '..' segments")
 
     tunnel_config = TunnelConfig(
         service_url=forward_to,
         auth_mode="none",
         service_label=service_label,
-        api_key=api_key,
+        api_key=resolve_api_key(ctx, api_key),
         websocket_enabled=False,
         verify_ssl=False,
         webhook_path=path,
@@ -397,15 +388,12 @@ def webhook(
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
-        console.print(f"\n[red]Error:[/red] {exc}")
-        raise SystemExit(1) from None
+        raise HleError(str(exc)) from None
 
 
 # ---------------------------------------------------------------------------
 # hle auth — API key authentication
 # ---------------------------------------------------------------------------
-
-_API_KEY_PATTERN = re.compile(r"^hle_[0-9a-f]{32}$")
 
 
 @main.group()
@@ -420,7 +408,8 @@ def auth() -> None:
     default=None,
     help="Agent enrollment token to save instead (same as 'hle agent enroll').",
 )
-def login(api_key: str | None, agent_token: str | None = None) -> None:
+@click.pass_context
+def login(ctx: click.Context, api_key: str | None, agent_token: str | None = None) -> None:
     """Save a credential for this machine.
 
     One place to put a credential, whichever kind you were given. An agent
@@ -443,50 +432,59 @@ def login(api_key: str | None, agent_token: str | None = None) -> None:
         console.print("Opening [cyan]https://hle.world/dashboard[/cyan] ...")
         webbrowser.open("https://hle.world/dashboard")
         console.print("Copy your API key from the dashboard and paste it here.\n")
-        api_key = click.prompt("API key", hide_input=True)
+        api_key = str(prompt(ctx, "API key", hide_input=True))
 
-    if not _API_KEY_PATTERN.match(api_key):
-        console.print(
-            "[red]Error:[/red] Invalid API key format. "
-            "Expected 'hle_' followed by 32 hex characters."
-        )
-        raise SystemExit(1)
+    if not config.API_KEY_PATTERN.match(api_key):
+        raise HleError("Invalid API key format. Expected 'hle_' followed by 32 hex characters.")
 
     config.save_api_key(api_key)
     console.print("[green]Saved[/green] to ~/.config/hle/config.toml")
 
 
+def _mask(value: str) -> str:
+    return f"{value[:8]}...{value[-4:]}" if len(value) > 12 else value
+
+
 @auth.command("status")
-def auth_status() -> None:
+@click.pass_context
+def auth_status(ctx: click.Context) -> None:
     """Show which credentials this machine has, and where they came from.
 
     Both are reported, not just the first one found. A host can hold an API
     key and an agent token at once, and knowing only about one of them is how
     "this machine plainly is set up" turns into "no API key".
+
+    Exits 0 whether or not anything is set: the answer is the state, and a
+    script wanting to branch on it reads `-o json`.
     """
+    creds = config.load_credentials()
+    o = out(ctx)
+    o.data(
+        {
+            "api_key": bool(creds.api_key),
+            "api_key_source": creds.api_key_source,
+            "agent_token": bool(creds.agent_token),
+            "agent_token_source": creds.agent_token_source,
+        }
+    )
+    if o.json_mode:
+        return
 
-    def _mask(value: str) -> str:
-        return f"{value[:8]}...{value[-4:]}" if len(value) > 12 else value
-
-    env_key = os.environ.get("HLE_API_KEY")
-    config_key = config.load_api_key()
-    if env_key:
+    if creds.api_key_source == config.SOURCE_API_KEY_ENV:
         console.print("API key: [cyan]HLE_API_KEY environment variable[/cyan]")
-        console.print(f"         [dim]{_mask(env_key)}[/dim]")
-    elif config_key:
+        console.print(f"         [dim]{_mask(creds.api_key or '')}[/dim]")
+    elif creds.api_key:
         console.print("API key: [cyan]~/.config/hle/config.toml[/cyan]")
-        console.print(f"         [dim]{_mask(config_key)}[/dim]")
+        console.print(f"         [dim]{_mask(creds.api_key)}[/dim]")
     else:
         console.print("API key: [dim]none[/dim] — run [cyan]hle auth login[/cyan]")
 
-    env_token = os.environ.get("HLE_AGENT_TOKEN")
-    saved_token = config.load_agent_token()
-    if env_token:
+    if creds.agent_token_source == config.SOURCE_AGENT_TOKEN_ENV:
         console.print("Agent:   [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
-        console.print(f"         [dim]{_mask(env_token)}[/dim]")
-    elif saved_token:
+        console.print(f"         [dim]{_mask(creds.agent_token or '')}[/dim]")
+    elif creds.agent_token:
         console.print("Agent:   [cyan]~/.config/hle/agent.toml[/cyan]")
-        console.print(f"         [dim]{_mask(saved_token)}[/dim]")
+        console.print(f"         [dim]{_mask(creds.agent_token)}[/dim]")
 
 
 @auth.command()
@@ -538,7 +536,7 @@ def tunnel_create(ctx: click.Context, /, first: str, second: str | None, **kwarg
       hle tunnel create --apex --zone t00t.us http://localhost:3000
     """
     label, url = (first, second) if second is not None else (None, first)
-    kwargs["api_key"] = api_key_from_ctx(ctx, kwargs.get("api_key"))
+    kwargs["api_key"] = resolve_api_key(ctx, kwargs.get("api_key"))
     ctx.invoke(expose, service=url, service_label=label, **kwargs)
 
 
@@ -566,9 +564,9 @@ def version_command(ctx: click.Context) -> None:
     a noun and a verb, so `hle version` is what people type first. It printing
     a usage error was the grammar failing on its own terms.
     """
-    out = output_from_ctx(ctx)
-    out.data({"version": __version__})
-    out.print(f"hle, version {__version__}")
+    o = out(ctx)
+    o.data({"version": __version__})
+    o.print(f"hle, version {__version__}")
 
 
 plugins.register(main)
@@ -649,20 +647,19 @@ def agent() -> None:
 
 @agent.command()
 @click.argument("token", required=False)
-def enroll(token: str | None) -> None:
+@click.pass_context
+def enroll(ctx: click.Context, token: str | None) -> None:
     """Save an agent enrollment token (created in the dashboard)."""
     if token is None:
         console.print(
             "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
         )
-        token = click.prompt("Agent token", hide_input=True)
+        token = str(prompt(ctx, "Agent token", hide_input=True))
 
     if not token.startswith(config.AGENT_TOKEN_PREFIX):
-        console.print(
-            f"[red]Error:[/red] Invalid agent token. Expected one starting with "
-            f"'{config.AGENT_TOKEN_PREFIX}'."
+        raise HleError(
+            f"Invalid agent token. Expected one starting with '{config.AGENT_TOKEN_PREFIX}'."
         )
-        raise SystemExit(1)
 
     config.save_agent_token(token)
     console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
@@ -679,8 +676,7 @@ def run(token: str | None, relay_host: str, relay_port: int) -> None:
     """Run the agent: connect, fetch endpoints from the dashboard, and reconcile."""
     token = token or config.load_agent_token()
     if not token:
-        console.print("[red]Error:[/red] No agent token. Run [cyan]hle agent enroll[/cyan] first.")
-        raise SystemExit(1)
+        raise AuthError(NO_AGENT_TOKEN)
 
     client = AgentClient(token, relay_host=relay_host, relay_port=relay_port)
     console.print(f"[green]Agent running[/green] — control: {client.control_uri}")
@@ -696,28 +692,34 @@ def run(token: str | None, relay_host: str, relay_port: int) -> None:
     # report "stopped successfully" and, with Restart=always, start the whole
     # argument over. Say what happened and exit non-zero.
     if client.fatal_error:
-        console.print(f"\n[red]Agent stopped by the relay.[/red]\n{client.fatal_error}")
-        raise SystemExit(1)
+        raise HleError("Agent stopped by the relay.", hint=client.fatal_error)
 
 
 @agent.command("status")
-def agent_status() -> None:
-    """Show whether an agent token is configured."""
-    env_token = os.environ.get("HLE_AGENT_TOKEN")
-    if env_token:
+@click.pass_context
+def agent_status(ctx: click.Context) -> None:
+    """Show whether an agent token is configured.
+
+    Exits 0 either way, like `auth status`: "no token" is an answer, not a
+    failure, and a script that needs to branch on it reads `-o json`. (It
+    briefly exited 1 for the installer's benefit; the installer checks the
+    service instead, and the two status commands disagreeing was worse.)
+    """
+    creds = config.load_credentials()
+    o = out(ctx)
+    o.data({"agent_token": bool(creds.agent_token), "source": creds.agent_token_source})
+    if o.json_mode:
+        return
+    if creds.agent_token_source == config.SOURCE_AGENT_TOKEN_ENV:
         console.print("Agent token source: [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
         return
-    token = config.load_agent_token()
+    token = creds.agent_token
     if token:
         masked = f"{token[:9]}...{token[-4:]}" if len(token) > 13 else token
         console.print("Agent token source: [cyan]~/.config/hle/agent.toml[/cyan]")
         console.print(f"Token: [dim]{masked}[/dim]")
     else:
         console.print("[dim]No agent token configured. Run 'hle agent enroll'.[/dim]")
-        # Non-zero so a script can act on it. Without this the installer could
-        # confirm enrollment "succeeded", install a service, and leave it
-        # restarting forever on a missing token.
-        raise SystemExit(1)
 
 
 @agent.command("list")
@@ -729,7 +731,8 @@ def agent_status() -> None:
     help="API key (also reads HLE_API_KEY env var, then ~/.config/hle/config.toml)",
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output")
-def agent_list(api_key: str | None, as_json: bool) -> None:
+@click.pass_context
+def agent_list(ctx: click.Context, api_key: str | None, as_json: bool) -> None:
     """List the agents on your account, and whether they're online.
 
     Unlike 'hle agent status', which only inspects this machine, this asks the
@@ -737,52 +740,35 @@ def agent_list(api_key: str | None, as_json: bool) -> None:
     """
     import json as _json
 
-    import httpx
-
-    from hle_client.api import ApiClient, ApiClientConfig
     from hle_client.richcompat import Table
 
-    key = api_key or config.load_api_key()
-    if not key:
-        console.print("[red]Error:[/red] No API key. Run [cyan]hle auth login[/cyan] first.")
+    if not resolve_api_key(ctx, api_key):
         # "No API key" on a machine that plainly *is* set up reads as a broken
         # install. It has a credential — just not one that may read account
         # data. An agent token authenticates carrying traffic; letting it list
         # an account's agents would make a data-plane secret an account secret.
+        hint = None
         if config.load_agent_token():
-            console.print(
-                "[dim]This machine is enrolled as an agent, but an agent token cannot "
+            hint = (
+                "This machine is enrolled as an agent, but an agent token cannot "
                 "read your account — it only authorises the tunnels it carries.\n"
                 "Log in here, or run this from a machine where you already have.\n"
                 "To check the agent on this machine instead: "
-                "[cyan]hle agent status[/cyan][/dim]"
+                "[cyan]hle agent status[/cyan]"
             )
-        raise SystemExit(1)
+        raise AuthError("No API key. Run 'hle auth login' first.", hint=hint)
 
     async def _fetch() -> list[dict[str, Any]]:
-        return await ApiClient(ApiClientConfig(api_key=key)).list_agents()
+        return await api(ctx, api_key).list_agents()
 
     try:
         agents = asyncio.run(_fetch())
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-        if status == 401:
-            # Print what the relay said rather than a guess made here. It knows
-            # which credential arrived and why it was refused — an agent token
-            # is a valid credential of the wrong kind, and "API key rejected,
-            # run hle auth login" is advice that cannot help. Keeping the
-            # explanation server-side also means it improves for clients that
-            # are already installed.
-            console.print(f"[red]Error:[/red] {_server_detail(exc) or 'API key rejected.'}")
-        elif status == 404:
+    except Exception as exc:
+        err = ApiError.from_exception(exc)
+        if err.status == 404:
             # The endpoint 404s (rather than 403s) when the feature flag is off.
-            console.print("[yellow]Agents are not enabled on this server.[/yellow]")
-        else:
-            console.print(f"[red]Error:[/red] server returned {status}")
-        raise SystemExit(1) from None
-    except httpx.HTTPError as exc:
-        console.print(f"[red]Error:[/red] could not reach the relay — {exc}")
-        raise SystemExit(1) from None
+            raise HleError("Agents are not enabled on this server.") from None
+        raise err from None
 
     if as_json:
         console.print(_json.dumps(agents, indent=2))
@@ -972,9 +958,9 @@ def completion_cmd(shell: str) -> None:
         check=False,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        raise click.ClickException(
-            f"Could not generate {shell} completion. "
-            f'Try: eval "$(_HLE_COMPLETE={shell}_source hle)"'
+        raise HleError(
+            f"Could not generate {shell} completion.",
+            hint=f'Try: eval "$(_HLE_COMPLETE={shell}_source hle)"',
         )
     click.echo(result.stdout, nl=False)
 

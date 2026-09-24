@@ -17,7 +17,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from hle_client import __version__, config
-from hle_client.output import api_key_from_ctx, from_ctx
+from hle_client.context import out, resolve_api_key
 
 if TYPE_CHECKING:
     import click
@@ -81,51 +81,50 @@ def collect(api_key: str | None) -> dict[str, Any]:
 
 
 def render_status(ctx: click.Context) -> None:
-    out = from_ctx(ctx)
-    api_key = api_key_from_ctx(ctx, None)
-    state = collect(api_key)
+    o = out(ctx)
+    state = collect(resolve_api_key(ctx))
 
-    if out.json_mode:
-        out.data(state)
+    if o.json_mode:
+        o.data(state)
         return
 
     creds = state["credentials"]
-    out.print(f"[bold]HLE[/bold] v{state['version']}")
-    out.print()
+    o.print(f"[bold]HLE[/bold] v{state['version']}")
+    o.print()
 
-    out.print("[bold]Credentials[/bold]")
+    o.print("[bold]Credentials[/bold]")
     if creds["api_key"]:
-        out.print(f"  API key      [green]set[/green] [dim]({creds['api_key_source']})[/dim]")
+        o.print(f"  API key      [green]set[/green] [dim]({creds['api_key_source']})[/dim]")
     else:
-        out.print("  API key      [yellow]none[/yellow] [dim]— run: hle auth login[/dim]")
+        o.print("  API key      [yellow]none[/yellow] [dim]— run: hle auth login[/dim]")
     if creds["agent_token"]:
-        out.print("  Agent token  [green]set[/green] [dim](~/.config/hle/agent.toml)[/dim]")
-    out.print()
+        o.print("  Agent token  [green]set[/green] [dim](~/.config/hle/agent.toml)[/dim]")
+    o.print()
 
     daemons = state["daemons"]
-    out.print("[bold]Services on this machine[/bold]")
+    o.print("[bold]Services on this machine[/bold]")
     if daemons:
         for d in daemons:
-            out.print(f"  {d['name']} [dim]({d['scope']})[/dim]")
+            o.print(f"  {d['name']} [dim]({d['scope']})[/dim]")
     else:
-        out.print("  [dim]none installed[/dim]")
-    out.print()
+        o.print("  [dim]none installed[/dim]")
+    o.print()
 
     tunnels = state["tunnels"]
-    out.print("[bold]Published tunnels[/bold]")
+    o.print("[bold]Published tunnels[/bold]")
     if tunnels is None:
-        out.print("  [dim]could not ask the relay[/dim]")
+        o.print("  [dim]could not ask the relay[/dim]")
     elif not tunnels:
-        out.print("  [dim]none[/dim]")
+        o.print("  [dim]none[/dim]")
     else:
         for t in tunnels:
             live = "[green]live[/green]" if t.get("is_active") else "[dim]idle[/dim]"
-            out.print(f"  {t.get('subdomain', '?')}  {live}  [dim]{t.get('service_url', '')}[/dim]")
-    out.print()
+            o.print(f"  {t.get('subdomain', '?')}  {live}  [dim]{t.get('service_url', '')}[/dim]")
+    o.print()
 
     agents = state["agents"]
     if agents:
-        out.print("[bold]Agents[/bold]")
+        o.print("[bold]Agents[/bold]")
         for a in agents:
             online = "[green]online[/green]" if a.get("online") else "[dim]offline[/dim]"
-            out.print(f"  {a.get('name', '?')}  {online}")
+            o.print(f"  {a.get('name', '?')}  {online}")
