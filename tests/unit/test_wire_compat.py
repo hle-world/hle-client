@@ -72,3 +72,66 @@ class TestForwardCompatibility:
 
         with pytest.raises(ValueError):
             WsStreamClose.model_validate({})
+
+
+# The AgentHello bytes as captured under agent protocol 1.1, before the 1.2
+# fields existed. Deployed 1.1 clients send exactly this.
+_HELLO_1_1 = (
+    '{"type":"hello","token":"hlea_x","agent_version":"2608.1","capabilities":["fp"],'
+    '"instance_id":null,"hostname":null}'
+)
+# What a 1.1 peer's AgentHello model knows about.
+_HELLO_1_1_FIELDS = {"type", "token", "agent_version", "capabilities", "instance_id", "hostname"}
+
+
+class TestAgentProtocol12Compat:
+    """1.1 and 1.2 agents and servers must all still understand each other."""
+
+    def test_1_1_hello_parses_on_a_1_2_peer(self):
+        from hle_common.agent_protocol import AgentHello
+
+        hello = AgentHello.model_validate_json(_HELLO_1_1)
+        assert hello.token == "hlea_x"
+        assert hello.install_method is None
+        assert hello.platform is None
+        assert hello.python_version is None
+        assert hello.service_manager is None
+        assert hello.successor_of is None
+        assert hello.successor_nonce is None
+
+    def test_1_2_hello_is_a_superset_of_1_1(self):
+        """A 1.1 server reads the 1.2 hello with its own model shape.
+
+        The wire layer ignores unknown keys, so the only thing that could break
+        a 1.1 peer is a 1.1 field going missing or changing. Project the 1.2
+        sample down to the 1.1 field set and it must equal what 1.1 would have
+        produced itself.
+        """
+        from hle_common.agent_protocol import AgentHello
+
+        full = json.loads(_BASELINE["AgentHello.v1_2"])
+        assert set(full) > _HELLO_1_1_FIELDS
+        projected = {k: v for k, v in full.items() if k in _HELLO_1_1_FIELDS}
+        # Same parse path a 1.1 peer takes: fields it does not declare are dropped.
+        hello = AgentHello.model_validate(projected)
+        assert hello.capabilities == ["firepuncher", "discovery:docker", "update:venv"]
+        assert hello.instance_id == "inst-1"
+        assert hello.install_method is None  # not in the projection
+
+    def test_1_2_hello_with_defaults_only_adds_nulls(self):
+        """The 1.1 sample, serialised by 1.2, differs from 1.1 bytes only by new keys."""
+        new = json.loads(_BASELINE["AgentHello"])
+        old = json.loads(_HELLO_1_1)
+        assert {k: v for k, v in new.items() if k in old} == old
+        assert all(v is None for k, v in new.items() if k not in old)
+
+    @pytest.mark.parametrize(
+        "name",
+        ["UpdateRequest.full", "UpdateAck.refused", "UpdateProgress", "UpdateResult.failed"],
+    )
+    def test_update_frames_ignore_fields_from_the_future(self, name):
+        """The new models follow the same rule as the old: unknown keys are dropped."""
+        model = SAMPLES[name]
+        raw = json.loads(_BASELINE[name])
+        raw["a_1_3_field"] = {"nested": True}
+        assert type(model).model_validate(raw).model_dump_json() == _BASELINE[name]
