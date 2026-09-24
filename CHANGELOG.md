@@ -1,5 +1,9 @@
 # Changelog
 
+## v2609.7 — 2026-09-24
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2609.6 — 2026-09-11
 
 Upgrading an installed agent is now a supported operation. It was not, and on
