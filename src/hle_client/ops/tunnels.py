@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NoReturn
+import contextlib
+import weakref
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
 
@@ -18,8 +20,18 @@ def fail(exc: Exception, subdomain: str | None = None) -> NoReturn:
     raise ApiError.from_exception(exc, subdomain) from None
 
 
+# One lookup per client, not per call. A single command resolves the same
+# name several times over (the gate it warns about, then the change it
+# makes), and a dashboard resolves it on every poll; the code never changes
+# for a given key. Weak so a client that is dropped takes its entry with it.
+_USER_CODES: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
+
+
 async def user_code(api: ApiClient) -> str:
     """The account's ``user_code``, the suffix every subdomain carries."""
+    cached = _USER_CODES.get(api)
+    if cached:
+        return cached
     try:
         me = await api.get_me()
     except Exception as exc:
@@ -27,6 +39,9 @@ async def user_code(api: ApiClient) -> str:
     code = me.get("user_code")
     if not code:
         raise HleError("Could not resolve user_code from server")
+    # A client that cannot be weakly referenced is simply not cached.
+    with contextlib.suppress(TypeError):
+        _USER_CODES[api] = str(code)
     return str(code)
 
 

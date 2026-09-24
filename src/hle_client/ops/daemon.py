@@ -65,9 +65,9 @@ async def list_daemons(*, scope: bool | None = None) -> list[Daemon]:
     return await asyncio.to_thread(_sync_list, scope)
 
 
-def service_name(label: str, name: str | None = None) -> str:
+def service_name(label: str, name: str | None = None, *, plat: str | None = None) -> str:
     """The unit/plist/rc name a label maps to on this platform."""
-    plat = service_cmd.current_platform()
+    plat = plat or service_cmd.current_platform()
     if plat == "freebsd":
         return service_cmd.rc_service_name(label, name)
     if plat == "darwin":
@@ -84,7 +84,7 @@ async def install(spec: dict[str, Any], *, start: bool = True) -> Daemon:
     """
     plat = service_cmd._require_supported()
     await asyncio.to_thread(service_cmd._install_from_spec, spec, plat=plat, start=start)
-    name = service_name(str(spec["label"]), spec.get("name"))
+    name = service_name(str(spec["label"]), spec.get("name"), plat=plat)
     user_mode = bool(spec.get("user_mode"))
     return Daemon.from_spec(name, user_mode=user_mode, spec=spec)
 
