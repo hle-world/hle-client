@@ -1,5 +1,50 @@
 # Changelog
 
+## v2609.7 — 2026-09-24
+
+### Fixed
+
+- **`hle status` no longer reports a live agent as offline.** The status
+  check was comparing against the wrong field, so a fully connected agent
+  could show up dead on the dashboard with no way to tell it apart from one
+  that actually was.
+
+- **Hyphenated tunnel and agent labels resolve again.** Anything named with
+  a hyphen — a common shape for hostnames — silently failed to match, so
+  commands that took a label as an argument acted as if it didn't exist.
+
+- **`hle update` no longer corrupts a Homebrew install.** Updating a
+  Homebrew-managed install through the client's own updater wrote into the
+  keg in a way `brew` doesn't expect, leaving it broken until reinstalled
+  from scratch. `hle update` now detects an externally managed system
+  Python and refuses instead of guessing, pointing at `brew upgrade
+  hle-client` for that case.
+
+- **Shutdown closes tunnels instead of dropping them.** Stopping the client
+  with SIGTERM or SIGINT now sends a proper WebSocket close frame before
+  exiting, so the relay sees a clean disconnect rather than a broken
+  connection it has to time out.
+
+- **A dropped control connection no longer takes running tunnels down with
+  it.** The control channel and the tunnels it manages were tied together
+  more tightly than they needed to be — losing the former used to stop the
+  latter even though the data path was still fine. Tunnels now keep running
+  through a control-connection drop and reattach when it comes back.
+
+### Changed
+
+- **`tunnel webhook` and `tunnel preflight` show up in `hle tunnel
+  --help`.** Both commands worked before this release; they just weren't
+  listed, so finding them meant already knowing they existed.
+
+- **Daemon scope handling fixed on macOS**, including `daemon refresh`,
+  which was building service definitions against the wrong scope on that
+  platform.
+
+- **README rewritten in the current command grammar.** It still described
+  the pre-`noun verb` command shapes retired in v2609.5; every example now
+  matches what `--help` actually shows.
+
 ## v2609.6 — 2026-09-11
 
 Upgrading an installed agent is now a supported operation. It was not, and on
