@@ -13,6 +13,9 @@ years of support answers are written against them.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import click
@@ -220,3 +223,106 @@ class TestGlobalFlagsWorkWhereTheyAreTyped:
         """
         args = ["auth", "login", "--api-key", "hle_x"]
         assert hoist_global_options(args) == args
+
+
+class TestTunnelHelpListsEveryMovedVerb:
+    """The exact regression named in the audit (§6): `webhook`/`preflight` were
+
+    wired under `tunnel` with the *same* (hidden) command object used at the
+    root, so `hidden=True` hid them from `hle tunnel --help` too — the group
+    that is supposed to be where they are the advertised spelling.
+    """
+
+    def test_tunnel_help_lists_webhook_and_preflight(self):
+        result = CliRunner().invoke(main, ["tunnel", "--help"])
+        assert result.exit_code == 0
+        assert "webhook" in result.output
+        assert "preflight" in result.output
+
+
+class TestEveryAliasResolves:
+    """Every alias in every `AliasedGroup` in the tree, not just the root's.
+
+    `RootGroup`'s ``LEGACY_ALIASES`` (`cli.py:52`) and `config_group`'s
+    ``show -> get`` (`config_cmd.py:212`) are two separate alias tables; a
+    test that only walked one of them would miss a broken alias in the other.
+    """
+
+    def _all_aliased_groups(self) -> list[tuple[click.Group, str]]:
+        found: list[tuple[click.Group, str]] = []
+
+        def _visit(cmd: click.Command, path: str) -> None:
+            if isinstance(cmd, click.Group):
+                if getattr(cmd, "aliases", None):
+                    found.append((cmd, path))
+                for name, child in cmd.commands.items():
+                    _visit(child, f"{path} {name}")
+
+        _visit(main, "hle")
+        return found
+
+    def test_every_alias_resolves_to_its_named_target(self):
+        groups = self._all_aliased_groups()
+        assert groups, "expected at least one AliasedGroup with aliases"
+        for group, path in groups:
+            aliases: dict[str, str] = getattr(group, "aliases")  # noqa: B009
+            for old, target in aliases.items():
+                ctx = click.Context(group)
+                resolved = group.get_command(ctx, old)
+                assert resolved is not None, f"{path} : alias {old!r} -> {target!r} did not resolve"
+                parts = target.split()
+                expected: click.Command | None = group.get_command(ctx, parts[0])
+                for part in parts[1:]:
+                    assert isinstance(expected, click.Group)
+                    expected = expected.get_command(ctx, part)
+                assert resolved is expected, (
+                    f"{path} : alias {old!r} resolved to a different object than "
+                    f"looking up {target!r} directly"
+                )
+
+
+class TestReadmeCommandsParse:
+    """The README's examples, checked the way the audit's script checks docs.
+
+    `repos/hle/scripts/check-documented-commands.py` (server repo) parses
+    every `hle ...` example in a set of files against the installed client,
+    without running any of them, and says which ones the CLI would reject —
+    this is exactly how the audit found the README teaching a dead command
+    (`hle expose --service ... ` with no label, §"Bugs found"). That script
+    lives in the proprietary server repo, not here, so it is only reachable
+    from an orchestrator checkout that has both repos side by side; anywhere
+    else (a bare `hle-client` clone, this package's own CI) it is simply
+    absent, and this test says so instead of failing.
+    """
+
+    def _find_script(self) -> Path | None:
+        # The expected layout when both repos are checked out side by side
+        # under the orchestrator's `repos/` (see hle.orchistrator/CLAUDE.md).
+        here = Path(__file__).resolve()
+        for parent in here.parents:
+            candidate = parent / "hle" / "scripts" / "check-documented-commands.py"
+            if candidate.is_file():
+                return candidate
+            candidate = parent / "repos" / "hle" / "scripts" / "check-documented-commands.py"
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def test_readme_commands_pass_the_servers_doc_checker(self):
+        script = self._find_script()
+        if script is None:
+            pytest.skip(
+                "repos/hle/scripts/check-documented-commands.py not found — only "
+                "available from an orchestrator checkout with both repos cloned "
+                "side by side (see hle.orchistrator/CLAUDE.md's repository map); "
+                "not reachable from a standalone hle-client checkout or its own CI."
+            )
+        readme = Path(__file__).resolve().parents[2] / "README.md"
+        assert readme.is_file()
+        result = subprocess.run(  # noqa: S603 — fixed argv, local script + file
+            [sys.executable, str(script), str(readme)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
