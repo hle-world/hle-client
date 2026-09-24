@@ -87,22 +87,6 @@ def from_ctx(ctx: Any) -> Output:
     return Output()
 
 
-def api_key_from_ctx(ctx: Any, explicit: str | None) -> str | None:
-    """Resolve the API key: the command's own flag first, then the root's.
-
-    Precedence is flag → env → config file, and the root group already folded
-    env into its own value, so a leaf that was given nothing inherits it.
-    """
-    if explicit:
-        return explicit
-    obj = getattr(ctx, "obj", None)
-    if isinstance(obj, dict):
-        inherited = obj.get("api_key")
-        if isinstance(inherited, str) and inherited:
-            return inherited
-    return None
-
-
 class Output:
     """Rendering for one CLI invocation.
 
@@ -164,6 +148,21 @@ class Output:
             _RichConsole(stderr=True, no_color=not self._color).print(text)
         else:
             print(strip_markup(text), file=sys.stderr)
+
+    def report(self, message: str, *, hint: str | None = None, payload: Any = None) -> None:
+        """Render a failure: text with a hint, or one JSON object under ``-o json``.
+
+        Always stderr. In JSON mode the object goes there too, so stdout
+        stays exactly what a successful run would have printed there — for
+        an error, nothing.
+        """
+        if self.json_mode:
+            body = payload if payload is not None else {"error": message}
+            print(json.dumps(body, indent=2, default=str), file=sys.stderr)
+            return
+        self.error(f"[red]Error:[/red] {message}")
+        if hint:
+            self.error(f"[dim]{hint}[/dim]")
 
     def data(self, payload: Any) -> None:
         """Emit a resource. JSON when asked for, otherwise nothing.

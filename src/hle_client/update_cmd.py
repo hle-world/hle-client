@@ -16,6 +16,8 @@ from pathlib import Path
 import click
 
 from hle_client import __version__
+from hle_client.context import confirm, confirm_or_abort
+from hle_client.errors import HleError
 from hle_client.richcompat import Console
 
 console = Console()
@@ -132,7 +134,8 @@ def _installed_version(executable: str) -> str | None:
 @click.option("--check", is_flag=True, help="Only report current vs. latest; don't upgrade.")
 @click.option("--version", "target_version", default=None, help="Upgrade/downgrade to this version")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
-def update(check: bool, target_version: str | None, yes: bool) -> None:
+@click.pass_context
+def update(ctx: click.Context, check: bool, target_version: str | None, yes: bool) -> None:
     """Update the HLE client to the latest version (any install method)."""
     method = detect_install_method(sys.prefix, sys.executable)
     console.print(f"Installed: [bold]{__version__}[/bold]  (install method: {method})")
@@ -155,41 +158,42 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
         return
 
     if method == BREW:
-        console.print(
-            "[yellow]This client was installed by Homebrew.[/yellow] "
-            "Upgrading inside the keg would corrupt it. Run:\n"
-            "  brew upgrade hle-client"
+        raise HleError(
+            "This client was installed by Homebrew. Upgrading inside the keg would corrupt it.",
+            hint="Run:\n  brew upgrade hle-client",
         )
-        raise SystemExit(1)
 
     if method == EXTERNALLY_MANAGED:
-        console.print(
-            "[yellow]This Python is managed by the OS package manager (PEP 668).[/yellow] "
-            "pip will refuse to install into it. Upgrade with the tool that installed "
-            "the client, or:\n"
-            f"  pipx upgrade {_PACKAGE}\n"
-            f"  uv tool upgrade {_PACKAGE}"
+        raise HleError(
+            "This Python is managed by the OS package manager (PEP 668). "
+            "pip will refuse to install into it.",
+            hint=(
+                "Upgrade with the tool that installed the client, or:\n"
+                f"  pipx upgrade {_PACKAGE}\n"
+                f"  uv tool upgrade {_PACKAGE}"
+            ),
         )
-        raise SystemExit(1)
 
     target_desc = target_version or latest or "latest"
     if not yes:
-        click.confirm(f"Upgrade {_PACKAGE} to {target_desc}?", abort=True)
+        confirm_or_abort(ctx, f"Upgrade {_PACKAGE} to {target_desc}?", default=False)
 
     cmd = build_upgrade_command(method, sys.executable, version=target_version)
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]")
     try:
         result = subprocess.run(cmd, check=False)  # noqa: S603 — argv built internally
     except FileNotFoundError:
-        console.print(
-            f"[red]Could not run '{cmd[0]}'.[/red] Install it or upgrade manually with:\n"
-            f"  {sys.executable} -m pip install --upgrade {_PACKAGE}"
-        )
-        raise SystemExit(1) from None
+        raise HleError(
+            f"Could not run '{cmd[0]}'.",
+            hint=(
+                "Install it or upgrade manually with:\n"
+                f"  {sys.executable} -m pip install --upgrade {_PACKAGE}"
+            ),
+        ) from None
 
     if result.returncode != 0:
-        console.print("[red]Upgrade command failed.[/red]")
-        raise SystemExit(result.returncode)
+        # pip's own status, so a wrapper sees what pip would have said.
+        raise HleError("Upgrade command failed.", exit_code=result.returncode)
 
     # Exit code 0 is not the same as "the new version is installed". `pipx
     # upgrade` and `uv tool upgrade` both exit 0 while reporting "already at
@@ -215,13 +219,14 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
                 new_version = _installed_version(sys.executable)
 
     if expected and new_version and new_version != expected:
-        console.print(
-            f"[red]Still on {new_version}, not {expected}.[/red] The package index this "
-            f"machine sees is behind PyPI — usually a stale cache, or a release "
-            f"published moments ago. Retry in a minute, or force it:\n"
-            f"  {' '.join(build_upgrade_command(method, sys.executable, version=expected))}"
+        raise HleError(
+            f"Still on {new_version}, not {expected}.",
+            hint=(
+                "The package index this machine sees is behind PyPI — usually a stale "
+                "cache, or a release published moments ago. Retry in a minute, or force it:\n"
+                f"  {' '.join(build_upgrade_command(method, sys.executable, version=expected))}"
+            ),
         )
-        raise SystemExit(1)
 
     if new_version is None:
         # No evidence of failure, so don't claim one — but don't claim success
@@ -253,7 +258,7 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
 
     listed = ", ".join(f"{svc} ({'user' if user else 'system'})" for svc, user in services)
     console.print(f"Still running the previous version: [bold]{listed}[/bold]")
-    if not (yes or click.confirm(f"Restart {len(services)} service(s) now?", default=True)):
+    if not (yes or confirm(ctx, f"Restart {len(services)} service(s) now?", default=True)):
         console.print("[yellow]Left running the old version.[/yellow] Restart later with:")
         console.print("  hle daemon restart --all")
         return
@@ -275,14 +280,13 @@ def update(check: bool, target_version: str | None, yes: bool) -> None:
             needs_root = needs_root or not user_mode
             console.print(f"  [red]failed[/red] {svc} ({scope})")
     if failed:
-        console.print(
-            "[yellow]Some services did not restart.[/yellow] They are still on the old "
-            "version — check 'hle daemon status --agent' and the service log."
-        )
+        hint = "Check 'hle daemon status --agent' and the service log."
         if needs_root and os.geteuid() != 0:
             # `sudo hle daemon restart --all` is the obvious next thing to try
             # and it does not work: hle lives in ~/.local/bin, which sudo's
             # secure_path drops. Give the command that does.
             units = " ".join(svc for svc, user_mode in failed if not user_mode)
-            console.print(f"[dim]Run: sudo systemctl restart {units}[/dim]")
-        raise SystemExit(1)
+            hint += f"\nRun: sudo systemctl restart {units}"
+        raise HleError(
+            "Some services did not restart. They are still on the old version.", hint=hint
+        )

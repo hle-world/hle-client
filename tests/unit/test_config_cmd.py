@@ -12,8 +12,8 @@ _KEY = "hle_" + "a" * 32
 
 
 def _patch_client(mock_client: AsyncMock):
-    """Patch ApiClient construction in both api module and config_cmd module."""
-    return patch("hle_client.config_cmd.ApiClient", return_value=mock_client)
+    """Patch ApiClient where hle_client.context looks it up at call time."""
+    return patch("hle_client.api.ApiClient", return_value=mock_client)
 
 
 class TestConfigShow:

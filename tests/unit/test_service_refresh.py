@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from hle_client import __version__
+from hle_client.errors import HleError
 from hle_client.service_cmd import (
     build_agent_args,
     parse_service_spec,
@@ -123,7 +124,7 @@ class TestRefreshService:
         with (
             patch("hle_client.service_cmd.service_spec", return_value=SPEC),
             patch("hle_client.service_cmd.current_platform", return_value="freebsd"),
-            patch("hle_client.service_cmd._rcd_install", side_effect=SystemExit(1)),
+            patch("hle_client.service_cmd._rcd_install", side_effect=HleError("boom")),
         ):
             assert refresh_service("hle_agent", False) == "failed"
 

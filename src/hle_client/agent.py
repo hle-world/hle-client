@@ -13,17 +13,14 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
-import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import websockets
 import websockets.exceptions
 
-from hle_client import __version__
+from hle_client import __version__, config
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.identity import hostname, instance_id
@@ -47,18 +44,23 @@ logger = logging.getLogger(__name__)
 STATUS_INTERVAL = 15.0
 WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 
-# Enrollment token persistence (separate from the API-key config so they don't clash).
-AGENT_CONFIG_PATH = Path.home() / ".config" / "hle" / "agent.toml"
-AGENT_TOKEN_PREFIX = "hlea_"
-
-# Set by `hle daemon install agent` to the file the token was actually found
-# in, so the service does not have to reconstruct the path from HOME. A service
-# manager starts processes with an environment of its own choosing: on pfSense
-# the agent enrolls as `admin` and runs from rc.d, and if those two disagree
-# about HOME the token is written to one path and read from another. The agent
-# then restarts forever reporting "No agent token" while the file it needs is
-# sitting on disk. An absolute path removes the guesswork.
-AGENT_CONFIG_ENV = "HLE_AGENT_CONFIG"
+# Enrollment token persistence lives in hle_client.config. The names are kept
+# here for anything that imported them from this module.
+#
+# HLE_AGENT_CONFIG is set by `hle daemon install agent` to the file the token
+# was actually found in, so the service does not have to reconstruct the path
+# from HOME. A service manager starts processes with an environment of its own
+# choosing: on pfSense the agent enrolls as `admin` and runs from rc.d, and if
+# those two disagree about HOME the token is written to one path and read from
+# another. The agent then restarts forever reporting "No agent token" while
+# the file it needs is sitting on disk. An absolute path removes the guesswork.
+AGENT_CONFIG_PATH = config.AGENT_CONFIG_PATH
+AGENT_TOKEN_PREFIX = config.AGENT_TOKEN_PREFIX
+AGENT_CONFIG_ENV = config.AGENT_CONFIG_ENV
+agent_config_path = config.agent_config_path
+save_agent_token = config.save_agent_token
+load_agent_token = config.load_agent_token
+remove_agent_token = config.remove_agent_token
 
 
 def _fatal_agent_message(code: int | None, reason: str) -> str:
@@ -90,42 +92,6 @@ def _fatal_agent_message(code: int | None, reason: str) -> str:
             "Re-enroll from the dashboard: https://hle.world/dashboard"
         )
     return f"The relay stopped this agent and asked it not to reconnect (code {code}). {reason}"
-
-
-def agent_config_path() -> Path:
-    """The token file to read or write, honouring an explicit override."""
-    override = os.environ.get(AGENT_CONFIG_ENV)
-    return Path(override).expanduser() if override else AGENT_CONFIG_PATH
-
-
-def save_agent_token(token: str) -> None:
-    """Persist the agent enrollment token (0600)."""
-    path = agent_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(f'token = "{token}"\n')
-    path.chmod(0o600)
-
-
-def load_agent_token() -> str | None:
-    path = agent_config_path()
-    if not path.exists():
-        return None
-    try:
-        with open(path, "rb") as f:
-            return tomllib.load(f).get("token")
-    except (OSError, ValueError):
-        # Logs the path, never the token. The rule fires on the word "token"
-        # appearing in the message.
-        logger.debug("Failed to read agent token from %s", path)  # nosemgrep
-        return None
-
-
-def remove_agent_token() -> bool:
-    path = agent_config_path()
-    if path.exists():
-        path.unlink()
-        return True
-    return False
 
 
 # A tunnel-like object: connect() / disconnect() coroutines + is_connected /

@@ -19,6 +19,9 @@ from typing import Any
 
 import click
 
+from hle_client.errors import HleError
+from hle_client.output import from_ctx
+
 # Printed once per process. A loop calling `hle config list` in a script would
 # otherwise emit the same nag on every iteration.
 _warned: set[str] = set()
@@ -160,7 +163,17 @@ class LegacyModeCommand(click.Command):
 
 
 class RootGroup(AliasedGroup):
-    """The top-level group: legacy names, plus global options anywhere."""
+    """The top-level group: legacy names, global options anywhere, one error path."""
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         return super().parse_args(ctx, hoist_global_options(args))
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except HleError as exc:
+            # The only place an error is rendered. Commands raise; this
+            # decides what that looks like — stderr text, or JSON under
+            # `-o json` — and what the process exits with.
+            from_ctx(ctx).report(exc.message, hint=exc.hint, payload=exc.as_dict())
+            ctx.exit(exc.exit_code)
