@@ -19,6 +19,10 @@ from hle_common.agent_protocol import (
     AgentWelcome,
     EndpointSpec,
     EndpointStatus,
+    UpdateAck,
+    UpdateProgress,
+    UpdateRequest,
+    UpdateResult,
 )
 from hle_common.discovery import DiscoveredService, DiscoveryRefresh, DiscoveryReport
 from hle_common.fp_protocol import (
@@ -158,7 +162,22 @@ SAMPLES: dict[str, object] = {
         webhook_path="/hook",
         websocket_enabled=False,
     ),
+    # A 1.1-shaped hello: the 1.2 fields are left at their None defaults, so
+    # this pins that they serialise as explicit nulls rather than vanishing.
     "AgentHello": AgentHello(token="hlea_x", agent_version="2608.1", capabilities=["fp"]),
+    "AgentHello.v1_2": AgentHello(
+        token="hlea_x",
+        agent_version="2609.8",
+        capabilities=["firepuncher", "discovery:docker", "update:venv"],
+        instance_id="inst-1",
+        hostname="rpi",
+        install_method="venv",
+        platform="linux",
+        python_version="3.12.4",
+        service_manager="systemd",
+        successor_of="inst-0",
+        successor_nonce="n0nce",
+    ),
     "AgentWelcome": AgentWelcome(
         agent_public_id="pub-1",
         base_domain="hle.world",
@@ -174,6 +193,25 @@ SAMPLES: dict[str, object] = {
         label="ha", connected=True, public_url="https://ha-x7k.hle.world", error=None
     ),
     "AgentStatus": AgentStatus(endpoints=[EndpointStatus(label="ha", connected=True)]),
+    "UpdateRequest.minimal": UpdateRequest(request_id="upd-1", target_version="2609.9"),
+    "UpdateRequest.full": UpdateRequest(
+        request_id="upd-1", target_version="2609.9", deadline_s=120, drain_policy="force"
+    ),
+    "UpdateAck.accepted": UpdateAck(request_id="upd-1", accepted=True),
+    "UpdateAck.refused": UpdateAck(request_id="upd-1", accepted=False, reason="unsupported:brew"),
+    "UpdateProgress": UpdateProgress(
+        request_id="upd-1", phase="staging", detail="pip install hle-client==2609.9"
+    ),
+    "UpdateResult.ok": UpdateResult(
+        request_id="upd-1", ok=True, from_version="2609.8", to_version="2609.9"
+    ),
+    "UpdateResult.failed": UpdateResult(
+        request_id="upd-1",
+        ok=False,
+        from_version="2609.8",
+        to_version="2609.9",
+        log_tail=["staging failed", "No matching distribution found"],
+    ),
     # -- fp_protocol.py ---------------------------------------------------
     "ForwardRule": _RULE,
     "ForwardRule.anyport": ForwardRule(host="192.168.1.50"),
