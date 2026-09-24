@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from hle_client.ops.models import Agent, Daemon, Tunnel
 
 from hle_tui import data
 from hle_tui.app import HleApp
@@ -19,23 +20,31 @@ pytestmark = pytest.mark.asyncio
 
 SNAPSHOT = data.Snapshot(
     tunnels=[
-        {
-            "subdomain": "ha-x7k",
-            "is_active": True,
-            "service_url": "http://localhost:8123",
-            "auth_mode": "sso",
-            "tunnel_id": "t-1",
-        },
-        {
-            "subdomain": "old-x7k",
-            "is_active": False,
-            "service_url": "http://localhost:9000",
-            "auth_mode": "none",
-            "tunnel_id": "t-2",
-        },
+        Tunnel.from_api(
+            {
+                "subdomain": "ha-x7k",
+                "is_active": True,
+                "service_url": "http://localhost:8123",
+                "auth_mode": "sso",
+                "tunnel_id": "t-1",
+            }
+        ),
+        Tunnel.from_api(
+            {
+                "subdomain": "old-x7k",
+                "is_active": False,
+                "service_url": "http://localhost:9000",
+                "auth_mode": "none",
+                "tunnel_id": "t-2",
+            }
+        ),
     ],
-    agents=[{"name": "trikala", "online": True, "endpoint_count": 3, "agent_version": "2609.4"}],
-    daemons=[("hle-agent.service", False)],
+    agents=[
+        Agent.from_api(
+            {"name": "trikala", "online": True, "endpoint_count": 3, "agent_version": "2609.4"}
+        )
+    ],
+    daemons=[Daemon(name="hle-agent.service", scope="system")],
 )
 
 
@@ -89,16 +98,18 @@ class TestAgentState:
     """
 
     def test_a_connected_agent_reads_as_online(self):
-        snapshot = data.Snapshot(agents=[{"name": "rpi", "online": True}])
+        snapshot = data.Snapshot(agents=[Agent.from_api({"name": "rpi", "online": True})])
         assert data.agent_rows(snapshot)[0][1] == "online"
 
     def test_a_disconnected_agent_reads_as_offline(self):
-        snapshot = data.Snapshot(agents=[{"name": "rpi", "online": False}])
+        snapshot = data.Snapshot(agents=[Agent.from_api({"name": "rpi", "online": False})])
         assert data.agent_rows(snapshot)[0][1] == "offline"
 
     def test_a_disabled_agent_is_not_called_offline(self):
         """Turned off and not connected are different facts."""
-        snapshot = data.Snapshot(agents=[{"name": "rpi", "online": False, "is_active": False}])
+        snapshot = data.Snapshot(
+            agents=[Agent.from_api({"name": "rpi", "online": False, "is_active": False})]
+        )
         assert data.agent_rows(snapshot)[0][1] == "disabled"
 
 
