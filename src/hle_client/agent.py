@@ -486,6 +486,21 @@ class AgentClient:
         except ValueError as exc:
             logger.warning("Bad update request: %s", exc)
             return
+        # First, before any other check can touch it: the version becomes a
+        # directory name and a pip pin in a process that often runs as root.
+        try:
+            agent_update.validate_version(req.target_version)
+        except agent_update.InvalidVersionError:
+            logger.warning("Refused update: invalid target_version %r", req.target_version)
+            with contextlib.suppress(Exception):
+                await ws.send(
+                    UpdateAck(
+                        request_id=req.request_id,
+                        accepted=False,
+                        reason="invalid:target_version",
+                    ).model_dump_json()
+                )
+            return
         reason = self._refuse_update_reason(req)
         ack = UpdateAck(request_id=req.request_id, accepted=reason is None, reason=reason)
         with contextlib.suppress(Exception):
@@ -579,9 +594,11 @@ class AgentClient:
         logger.warning("Repointed current from unverified %s back to %s", state.to_version, prev)
 
     def _disarm_watchdog(self) -> None:
-        if self._watchdog_task is not None:
-            self._watchdog_task.cancel()
-            self._watchdog_task = None
+        task, self._watchdog_task = self._watchdog_task, None
+        # The timer itself calls this on its way into a rollback; cancelling
+        # the running task would abort that rollback at its next await.
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
 
     async def _watchdog_timer(self) -> None:
         await asyncio.sleep(self._health_timeout)

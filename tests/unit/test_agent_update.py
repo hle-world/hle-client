@@ -27,6 +27,7 @@ from hle_client.agent_update import (
     VERSIONS_DIR,
     BootCheck,
     FailedUpdate,
+    InvalidVersionError,
     RollbackError,
     StageError,
     SwapError,
@@ -42,6 +43,7 @@ from hle_client.agent_update import (
     read_update_state,
     relink_launchers,
     run_update,
+    validate_version,
     versioned_layout_present,
     write_update_state,
 )
@@ -354,7 +356,7 @@ class TestToolUpdater:
     def test_stage_fails_for_an_unknown_version(self, tmp_path):
         up, *_ = self._make(tmp_path, status=404)
         with pytest.raises(StageError, match="not on PyPI"):
-            up.stage("0.0.0")
+            up.stage("1999.1")
 
     def test_stage_fails_when_pypi_is_unreachable(self, tmp_path):
         up, *_ = self._make(tmp_path)
@@ -617,6 +619,16 @@ def request(**kw) -> str:
     return json.dumps(base)
 
 
+async def exited(client: AgentClient, timeout: float = 10.0) -> None:
+    """Wait for the watchdog to finish its rollback (the rollback runs in a
+    thread, so a fixed sleep is a race on a slow CI runner)."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while client.exit_code == 0:
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("watchdog never rolled back")
+        await asyncio.sleep(0.01)
+
+
 async def settle(client: AgentClient) -> None:
     if client._update_task is not None:
         await client._update_task
@@ -785,7 +797,7 @@ class TestWatchdog:
         ws = FakeWs()
         client._ws = ws
         await client._after_welcome(ws)
-        await asyncio.sleep(0.2)
+        await exited(client)
         assert up.calls == ["rollback"]
         assert client.exit_code == 1
         assert client._running is False
@@ -802,9 +814,26 @@ class TestWatchdog:
 
     async def test_timeout_with_no_connection_still_rolls_back(self, tmp_path):
         client, up, _ = self._armed(tmp_path, health_timeout=0.05)
-        await asyncio.sleep(0.15)
+        await exited(client)
         assert up.calls == ["rollback"]
         assert client.exit_code == 1
+        assert read_failed_marker(tmp_path) is not None
+
+    async def test_a_slow_rollback_is_not_cancelled_by_its_own_timer(self, tmp_path):
+        """The timer task runs the rollback; disarming must not cancel it.
+
+        On a slow CI runner the rollback thread was still running when the
+        self-cancel landed, so no marker was written and nothing exited.
+        """
+
+        class SlowRollback(RecordingUpdater):
+            def rollback(self) -> str:
+                time.sleep(0.3)
+                return super().rollback()
+
+        client, up, _ = self._armed(tmp_path, updater=SlowRollback(), health_timeout=0.01)
+        await exited(client)
+        assert up.calls == ["rollback"]
         assert read_failed_marker(tmp_path) is not None
 
     async def test_a_failed_rollback_is_recorded_and_still_exits(self, tmp_path):
@@ -813,7 +842,7 @@ class TestWatchdog:
                 raise RollbackError("previous is gone")
 
         client, _, _ = self._armed(tmp_path, updater=NoRollback(), health_timeout=0.05)
-        await asyncio.sleep(0.15)
+        await exited(client)
         failed = read_failed_marker(tmp_path)
         assert failed is not None
         assert "rollback failed: previous is gone" in failed.reason
@@ -938,3 +967,96 @@ class TestFailedMarkerReporting:
 
     def test_boot_check_type_is_exported(self):
         assert BootCheck("none").kind == "none"
+
+
+# --------------------------------------------------------------------------- #
+# target_version is untrusted: it becomes a directory name and a pip pin
+# --------------------------------------------------------------------------- #
+BAD_VERSIONS = [
+    "../x",
+    "..",
+    ".",
+    "2609.8/../..",
+    "/tmp/evil",
+    "",
+    "2609.8\n",
+    "2609.8 --index-url https://evil.example",
+    "2609.8@https://evil.example/x.whl",
+    "2609.8.dev0",
+    "26090.1",
+]
+
+
+class TestVersionValidation:
+    @pytest.mark.parametrize("good", ["2609.8", "2609.10", "2609.8.1", "9999.1"])
+    def test_release_versions_pass(self, good):
+        assert validate_version(good) == good
+
+    @pytest.mark.parametrize("bad", BAD_VERSIONS)
+    async def test_the_handler_refuses_before_anything_else(self, bad, tmp_path):
+        home = tmp_path / "hle"
+        home.mkdir()
+        client, up, _ = make_agent(home)
+        ws = FakeWs()
+        await client._handle_message(request(target_version=bad), ws)
+        (ack,) = ws.of_type("update_ack")
+        assert ack["accepted"] is False
+        assert ack["reason"] == "invalid:target_version"
+        assert ws.of_type("update_progress") == []
+        assert client._update_task is None
+        assert up.calls == []
+        assert list(home.iterdir()) == []
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["hle"]
+
+    @pytest.mark.parametrize("bad", BAD_VERSIONS)
+    def test_version_dir_refuses(self, bad, tmp_path):
+        up, _ = updater_for(make_home(tmp_path))
+        with pytest.raises(InvalidVersionError):
+            up.version_dir(bad)
+
+    @pytest.mark.parametrize("bad", BAD_VERSIONS)
+    def test_stage_and_verify_touch_nothing(self, bad, tmp_path):
+        home = make_home(tmp_path)
+        before = sorted(str(p) for p in tmp_path.rglob("*"))
+        up, runner = updater_for(home)
+        with pytest.raises(InvalidVersionError):
+            up.stage(bad)
+        with pytest.raises(InvalidVersionError):
+            up.verify(bad)
+        with pytest.raises(InvalidVersionError):
+            up.swap(bad, from_version=OLD)
+        assert runner.calls == []
+        assert sorted(str(p) for p in tmp_path.rglob("*")) == before
+        assert current_version(home) == OLD
+
+    @pytest.mark.parametrize("bad", ["../../etc", "..", "/etc"])
+    def test_rollback_refuses_a_tampered_previous(self, bad, tmp_path):
+        home = make_home(tmp_path)
+        (home / PREVIOUS_FILE).write_text(f"{bad}\n")
+        up, _ = updater_for(home)
+        with pytest.raises(RollbackError, match="not a usable version"):
+            up.rollback()
+        assert current_version(home) == OLD
+
+    @pytest.mark.parametrize("bad", ["../x", "2609.8 --index-url https://evil.example"])
+    def test_tool_updater_refuses_before_pypi_or_pip(self, bad, tmp_path):
+        runner = FakeRunner()
+        fetched: list[str] = []
+        home = tmp_path / "home"
+        up = ToolUpdater(
+            "pipx",
+            home,
+            run=runner,
+            fetch=lambda url, t: fetched.append(url) or 200,
+            hle_path=str(tmp_path / "hle"),
+        )
+        with pytest.raises(InvalidVersionError):
+            up.stage(bad)
+        with pytest.raises(InvalidVersionError):
+            up.swap(bad, from_version=OLD)
+        home.mkdir()
+        (home / PREVIOUS_FILE).write_text(f"{bad}\n")
+        with pytest.raises(RollbackError):
+            up.rollback()
+        assert fetched == []
+        assert runner.calls == []

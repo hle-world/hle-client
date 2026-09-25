@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,26 @@ class SwapError(UpdateError):
 
 class RollbackError(UpdateError):
     """The previous version could not be made current again."""
+
+
+class InvalidVersionError(UpdateError):
+    """A version string that is not a release of this package.
+
+    Versions become directory names and pip requirement pins, and the request
+    carrying one comes over the network to a process that often runs as root.
+    Anything but a plain CalVer release is refused before it touches either.
+    """
+
+
+# This repo's CalVer: YYMM.N, optionally YYMM.N.P (2609.8, 2609.8.1).
+VERSION_RE = re.compile(r"^\d{4}\.\d{1,3}(\.\d{1,3})?$")
+
+
+def validate_version(version: object) -> str:
+    """Return *version* if it is a plain release number; raise otherwise."""
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise InvalidVersionError(f"not a release version: {version!r}")
+    return version
 
 
 # --------------------------------------------------------------------------- #
@@ -454,7 +475,20 @@ class VersionedUpdater:
 
     # -- paths ---------------------------------------------------------------
     def version_dir(self, version: str) -> Path:
-        return self.home / VERSIONS_DIR / version
+        """``versions/<version>``; raises :class:`InvalidVersionError` otherwise.
+
+        Every path the updater creates, deletes or points ``current`` at comes
+        from here. The regex already rules out separators and dots-only names;
+        the parent check is the second line in case it is ever loosened. It is
+        lexical, not ``resolve()``: a flat install migrated into the layout is
+        a symlink ``versions/<old> -> ../venv`` and must stay a valid target.
+        """
+        validate_version(version)
+        versions = Path(os.path.normpath(self.home / VERSIONS_DIR))
+        path = Path(os.path.normpath(versions / version))
+        if path.parent != versions or path.name != version:
+            raise InvalidVersionError(f"{version!r} escapes {versions}")
+        return path
 
     @property
     def current(self) -> Path:
@@ -548,7 +582,10 @@ class VersionedUpdater:
             prev = ""
         if not prev:
             raise RollbackError("no previous version recorded")
-        target = self.version_dir(prev)
+        try:
+            target = self.version_dir(prev)
+        except InvalidVersionError as exc:
+            raise RollbackError(f"previous is not a usable version: {exc}") from exc
         if not target.exists():
             raise RollbackError(f"previous version {prev} is gone from {target.parent}")
         try:
@@ -657,13 +694,13 @@ class ToolUpdater:
         return self.home / PREVIOUS_FILE
 
     def _install_argv(self, version: str) -> list[str]:
-        spec = f"{_PACKAGE}=={version}"
+        spec = f"{_PACKAGE}=={validate_version(version)}"
         if self.tool == "pipx":
             return ["pipx", "install", "--force", spec]
         return ["uv", "tool", "install", "--force", spec]
 
     def stage(self, version: str) -> Path:
-        url = f"https://pypi.org/pypi/{_PACKAGE}/{version}/json"
+        url = f"https://pypi.org/pypi/{_PACKAGE}/{validate_version(version)}/json"
         try:
             status = self._fetch(url, 15.0)
         except Exception as exc:  # noqa: BLE001 — any transport error is the same answer
@@ -686,9 +723,10 @@ class ToolUpdater:
         return (result.stdout or "").strip()
 
     def swap(self, version: str, *, from_version: str) -> None:
+        argv = self._install_argv(version)  # validates before anything is written
         _write_atomic(self.previous_file, from_version + "\n")
         try:
-            result = self._run(self._install_argv(version), timeout=self._install_timeout)
+            result = self._run(argv, timeout=self._install_timeout)
         except (OSError, subprocess.SubprocessError) as exc:
             raise SwapError(f"{self.tool} install failed: {exc}") from exc
         if result.returncode != 0:
@@ -716,7 +754,11 @@ class ToolUpdater:
         if not prev:
             raise RollbackError("no previous version recorded")
         try:
-            result = self._run(self._install_argv(prev), timeout=self._install_timeout)
+            argv = self._install_argv(prev)
+        except InvalidVersionError as exc:
+            raise RollbackError(f"previous is not a usable version: {exc}") from exc
+        try:
+            result = self._run(argv, timeout=self._install_timeout)
         except (OSError, subprocess.SubprocessError) as exc:
             raise RollbackError(f"{self.tool} reinstall of {prev} failed: {exc}") from exc
         if result.returncode != 0:
