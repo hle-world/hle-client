@@ -49,8 +49,28 @@ from hle_client.agent_update import (
 )
 from hle_common.agent_protocol import UpdateRequest
 
-OLD = "2609.8"
-NEW = "2609.10"
+
+def _calver_key(version: str) -> tuple[int, int]:
+    """(YYMM, N) for CalVer ordering comparisons in this module's tests."""
+    yymm_str, n_str = version.split(".", 1)
+    return int(yymm_str), int(n_str.split(".", 1)[0])
+
+
+def _calver_neighbors(version: str) -> tuple[str, str]:
+    """An older and a newer CalVer release relative to *version*.
+
+    Update tests need a version below the running one (``OLD``) and one
+    above it (``NEW``) so a release bump never leaves them equal to
+    ``__version__`` -- the agent refuses same-version updates. Derived from
+    ``__version__`` itself so a release bump can't break these tests again.
+    """
+    yymm, n = _calver_key(version)
+    old = f"{yymm - 1}.99" if n == 0 else f"{yymm}.{n - 1}"
+    new = f"{yymm}.{n + 1}"
+    return old, new
+
+
+OLD, NEW = _calver_neighbors(__version__)
 SUPPORTED_VENV = UpdateSupport(True, "venv")
 
 
@@ -122,6 +142,48 @@ def updater_for(home: Path) -> tuple[VersionedUpdater, FakeRunner]:
 # --------------------------------------------------------------------------- #
 # Layout helpers
 # --------------------------------------------------------------------------- #
+class TestUpdateTestVersionBounds:
+    """Guards the OLD/NEW derivation above against silently regressing."""
+
+    def test_old_and_new_bracket_running_version(self):
+        assert _calver_key(OLD) < _calver_key(__version__) < _calver_key(NEW)
+
+    def test_neighbors_never_equal_running_version(self):
+        # The agent refuses same-version updates (unsupported:same-version);
+        # OLD/NEW must always differ from __version__, release after release.
+        assert __version__ != OLD
+        assert __version__ != NEW
+
+    @pytest.mark.parametrize(
+        ("version", "expected_old", "expected_new"),
+        [
+            ("2609.9", "2609.8", "2609.10"),
+            ("2609.0", "2608.99", "2609.1"),
+            ("2612.5", "2612.4", "2612.6"),
+            # The version this repo is releasing when this fix landed: proves
+            # the old hardcoded NEW = "2609.10" would have collided with the
+            # running version and tripped unsupported:same-version.
+            ("2609.10", "2609.9", "2609.11"),
+        ],
+    )
+    def test_calver_neighbors_examples(self, version, expected_old, expected_new):
+        assert _calver_neighbors(version) == (expected_old, expected_new)
+
+    @pytest.mark.parametrize("released_version", ["2609.9", "2609.10", "2610.0"])
+    def test_neighbors_survive_a_release_bump(self, monkeypatch, released_version):
+        """Simulates the running version being bumped by a release.
+
+        With the old hardcoded OLD/NEW this would have broken the moment
+        __version__ caught up to NEW; the derived values must keep tracking
+        whatever __version__ becomes.
+        """
+        monkeypatch.setattr("hle_client.__version__", released_version)
+        old, new = _calver_neighbors(released_version)
+        assert old != released_version
+        assert new != released_version
+        assert _calver_key(old) < _calver_key(released_version) < _calver_key(new)
+
+
 class TestLayout:
     def test_hle_home_defaults_and_env_override(self, tmp_path, monkeypatch):
         monkeypatch.delenv("HLE_HOME", raising=False)
