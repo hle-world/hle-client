@@ -65,11 +65,21 @@ class TunnelRegistration(WireModel):
     # server gain features without requiring a client release. Client→server
     # intent only — the client must never act on server-returned config.
     options: dict[str, str] = field(default_factory=dict)
+    # Seconds the relay should wait for the local service to answer a request.
+    # None = the relay's default (30s, 120s for a webhook). The relay caps it at
+    # its own maximum; relays that predate the field ignore it.
+    response_timeout: int | None = None
 
     def __post_init__(self) -> None:
         # Ordered as pydantic ran these: per-field checks first, then the
         # cross-field rule. `service_label` is normalised rather than merely
         # checked, so callers keep getting the sanitised value back.
+        if self.response_timeout is not None and (
+            isinstance(self.response_timeout, bool)
+            or not isinstance(self.response_timeout, int)
+            or self.response_timeout < 1
+        ):
+            raise ValueError("response_timeout must be a positive number of seconds")
         self.webhook_path = _validate_webhook_path(self.webhook_path)
         self.service_label = _normalise_service_label(self.service_label)
         _validate_options(self.options)
