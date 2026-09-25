@@ -49,8 +49,8 @@ from hle_client.agent_update import (
 )
 from hle_common.agent_protocol import UpdateRequest
 
-OLD = "2609.7"
-NEW = "2609.9"
+OLD = "2609.8"
+NEW = "2609.10"
 SUPPORTED_VENV = UpdateSupport(True, "venv")
 
 
