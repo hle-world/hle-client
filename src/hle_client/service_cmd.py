@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import getpass
 import json
+import logging
 import os
 import re
 import shutil
@@ -52,6 +53,7 @@ _UPSTREAM_AUTH_ENV: str = next(
 )
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 _SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 _LAUNCHD_LABEL_PREFIX = "world.hle"
@@ -67,6 +69,45 @@ AGENT_LABEL = "agent"
 # command the user typed months ago. Re-deriving it by parsing the exec line
 # back into flags is guesswork that fails silently; reading it back is not.
 _SPEC_MARKER = "hle-spec:"
+
+
+def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list[str]] | None:
+    """``(spec, allow)`` from an ``expose ...`` argv, parsed by the real command.
+
+    None when it cannot be read faithfully: it does not parse, or it carries
+    something a TunnelSpec cannot (an ``--api-key`` on the command line). The
+    caller then replays the argv unchanged rather than guess.
+
+    Nothing is taken from this process's environment: a value that came from
+    an envvar here is the refreshing user's, not the service's.
+    """
+    from click.core import ParameterSource
+
+    # Imported here: cli imports this module.
+    from hle_client.cli import expose
+
+    if run_args[:1] != ["expose"]:
+        return None
+    try:
+        ctx = expose.make_context("expose", list(run_args[1:]))
+    except click.exceptions.ClickException:
+        return None
+    except click.exceptions.Exit:
+        return None
+    params = dict(ctx.params)
+    for pname in list(params):
+        if ctx.get_parameter_source(pname) == ParameterSource.ENVIRONMENT:
+            params[pname] = None
+    if params.pop("api_key", None):
+        return None
+    allow = [str(a) for a in params.pop("allow", None) or ()]
+    try:
+        spec = spec_from_params(
+            service_url=params.pop("service"), label=params.pop("service_label"), **params
+        )
+    except (UsageError, ValueError):
+        return None
+    return spec, allow
 
 
 def spec_comment(spec: dict[str, Any] | None, *, xml: bool = False) -> str | None:
@@ -1275,20 +1316,34 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
     """
     label = str(spec["label"])
     env: dict[str, str] = {}
+    extra_stamp: dict[str, Any] = {}
     tunnel = stamped_tunnel_spec(spec)
+    allow: list[str] = [str(a) for a in spec.get("allow") or ()]
+    if tunnel is None and list(spec["run_args"])[:1] == ["expose"]:
+        # A tunnel stamped before TunnelSpec: argv only. Read it back through
+        # the real `expose` parser so it is rebuilt like a new install — which
+        # is what moves a secret written into argv out of ExecStart and the
+        # process list and into an owner-only environment.
+        migrated = _tunnel_spec_from_legacy_argv([str(a) for a in spec["run_args"]])
+        if migrated is None:
+            logger.warning(
+                "Service %s: could not read its expose arguments back; replaying them unchanged",
+                spec.get("name") or label,
+            )
+        else:
+            tunnel, allow = migrated
+            extra_stamp = {"tunnel": tunnel.model_dump(), "allow": allow}
     if tunnel is not None:
         # Rebuilt from the TunnelSpec rather than replayed, so a refresh after
         # an upgrade writes the argv this client version would write.
-        allow = [str(a) for a in spec.get("allow") or ()]
         run_args = build_expose_args(tunnel, allow=allow)
         env = expose_env(tunnel)
     else:
-        # Stamps written before TunnelSpec (and every agent/forward stamp)
-        # carry only argv, which is replayed as it was.
+        # Agent and forward stamps carry only argv, which is replayed as it was.
         run_args = [str(a) for a in spec["run_args"]]
     name = spec.get("name")
     user_mode = bool(spec.get("user_mode"))
-    stamped = {**spec, "version": __version__, "run_args": run_args}
+    stamped = {**spec, **extra_stamp, "version": __version__, "run_args": run_args}
     if run_args[:2] == ["agent", "run"]:
         # A self-update ends the agent on purpose (exit 1) and relies on the
         # manager to start it from `current`; a rollback does the same. Older

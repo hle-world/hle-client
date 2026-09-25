@@ -209,6 +209,8 @@ class AgentClient:
         # quietly "stopping successfully".
         self._fatal_error: str | None = None
         self._endpoints: dict[str, _Running] = {}
+        # Endpoints the server asked for that could not be started: label -> why.
+        self._failed: dict[str, str] = {}
         self._api_key: str | None = None
         self._base_domain: str | None = None
         self._fp: FpAgentSide | None = None
@@ -747,6 +749,10 @@ class AgentClient:
                 public_url=r.tunnel.public_url,
             )
             for label, r in self._endpoints.items()
+        ] + [
+            EndpointStatus(label=label, connected=False, error=reason)
+            for label, reason in self._failed.items()
+            if label not in self._endpoints
         ]
 
     # -- reconciler ----------------------------------------------------------
@@ -754,6 +760,12 @@ class AgentClient:
     async def reconcile(self, specs: list[EndpointSpec]) -> None:
         """Converge the running tunnel pool to *specs* (idempotent)."""
         desired = {s.label: s for s in specs}
+
+        # Endpoints that failed to start and are no longer asked for stop
+        # being reported.
+        for label in list(self._failed):
+            if label not in desired:
+                del self._failed[label]
 
         # Remove endpoints no longer desired.
         for label in list(self._endpoints):
@@ -788,9 +800,15 @@ class AgentClient:
             )
         except ValueError as exc:
             # One bad endpoint (a malformed basic-auth value, say) must not take
-            # the others down with it: skip it and say why.
-            logger.error("Endpoint %s not started: %s", spec.label, exc)
+            # the others down with it: skip it, and report it in status so the
+            # dashboard shows why instead of showing nothing. The message names
+            # the field, never its value.
+            reason = f"invalid endpoint: {exc}"
+            if self._failed.get(spec.label) != reason:
+                logger.error("Endpoint %s not started: %s", spec.label, exc)
+            self._failed[spec.label] = reason
             return
+        self._failed.pop(spec.label, None)
         tunnel = self._tunnel_factory(cfg)
         task = asyncio.create_task(tunnel.connect())
         self._endpoints[spec.label] = _Running(spec=spec, tunnel=tunnel, task=task)

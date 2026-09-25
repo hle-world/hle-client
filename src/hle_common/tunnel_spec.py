@@ -40,6 +40,14 @@ MAX_RESPONSE_TIMEOUT = 1200
 
 AUTH_MODES: tuple[str, ...] = ("sso", "none")
 
+# For reconcile_key: the value a null means, where the client knows it.
+_NULL_EQUALS: dict[str, Any] = {
+    "verify_ssl": False,
+    "forward_host": False,
+    "apex": False,
+    "options": {},
+}
+
 # Fields whose values must never be printed: repr masks them.
 SECRET_FIELDS: frozenset[str] = frozenset({"upstream_basic_auth"})
 
@@ -180,11 +188,19 @@ class TunnelSpec(WireModel):
         That is every field: there is no option a running tunnel picks up live.
         ``options`` is a dict, so it is frozen into sorted pairs to keep the
         key hashable and order-independent.
+
+        Null and the explicit default compare equal (``verify_ssl=None`` is
+        ``verify_ssl=False``), so a server that starts sending explicit values
+        where it used to send nulls does not restart every endpoint once.
+        ``response_timeout`` has no client-side default (the relay owns it), so
+        null stays distinct there.
         """
         key: list[Any] = []
         for name, value in self.tunnel_fields().items():
             if name == "label":
                 continue  # the label is the identity, not a property of it
+            if value is None and name in _NULL_EQUALS:
+                value = _NULL_EQUALS[name]
             if isinstance(value, dict):
                 value = tuple(sorted(value.items()))
             key.append(value)

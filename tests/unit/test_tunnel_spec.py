@@ -396,6 +396,21 @@ class TestReconcileKey:
         # One entry per field, so this fails if a new field is left out.
         assert len(self._BASE.reconcile_key()) == len(dataclasses.fields(TunnelSpec)) - 1
 
+    @pytest.mark.parametrize(
+        ("field", "default"),
+        [("verify_ssl", False), ("forward_host", False), ("apex", False), ("options", {})],
+    )
+    def test_null_equals_the_explicit_default(self, field: str, default: Any):
+        """A server switching from nulls to explicit defaults restarts nothing."""
+        explicit = dataclasses.replace(self._BASE, **{field: default})
+        assert explicit.reconcile_key() == self._BASE.reconcile_key()
+
+    def test_null_response_timeout_stays_distinct(self):
+        # The relay owns that default (30s, 120s for webhooks); the agent can't
+        # know which, so an explicit 30 is a change.
+        explicit = dataclasses.replace(self._BASE, response_timeout=30)
+        assert explicit.reconcile_key() != self._BASE.reconcile_key()
+
     def test_stable_across_option_order_and_id(self):
         a = dataclasses.replace(self._BASE, options={"a": "1", "b": "2"})
         b = dataclasses.replace(self._BASE, id=9, options={"b": "2", "a": "1"})
@@ -409,6 +424,9 @@ class TestReconcileKey:
 
 
 class _FakeTunnel:
+    is_connected = False
+    public_url = None
+
     def __init__(self, config: TunnelConfig) -> None:
         self.config = config
 
@@ -473,6 +491,47 @@ class TestAgentEndpoint:
         assert [t.config.service_label for t in created] == ["good"]
         await client._stop_all()
 
+    async def test_a_bad_endpoint_is_reported_with_its_reason(self):
+        created: list[_FakeTunnel] = []
+
+        def factory(cfg: TunnelConfig) -> _FakeTunnel:
+            created.append(_FakeTunnel(cfg))
+            return created[-1]
+
+        client = AgentClient("hlea_t", tunnel_factory=factory)
+        bad = EndpointSpec(id=1, label="bad", service_url="http://x", upstream_basic_auth="nocolon")
+        good = EndpointSpec(id=2, label="good", service_url="http://y")
+        await client.reconcile([bad, good])
+        status = {s.label: s for s in client._build_status()}
+        assert set(status) == {"bad", "good"}
+        assert status["bad"].connected is False
+        assert status["bad"].error is not None
+        assert "upstream_basic_auth" in status["bad"].error
+        assert "nocolon" not in status["bad"].error  # the value is never echoed
+        assert status["good"].error is None
+
+        # A later state_sync that fixes the spec clears the error.
+        await client.reconcile([dataclasses.replace(bad, upstream_basic_auth="u:p"), good])
+        status = {s.label: s for s in client._build_status()}
+        assert status["bad"].error is None
+        assert [t.config.service_label for t in created] == ["good", "bad"]
+
+        # One that drops the endpoint stops reporting it.
+        await client.reconcile([bad, good])
+        await client.reconcile([good])
+        assert [s.label for s in client._build_status()] == ["good"]
+        await client._stop_all()
+
+    async def test_a_running_endpoint_edited_into_a_bad_one_reports_the_error(self):
+        client = AgentClient("hlea_t", tunnel_factory=_FakeTunnel)
+        ep = EndpointSpec(id=1, label="a", service_url="http://x")
+        await client.reconcile([ep])
+        await client.reconcile([dataclasses.replace(ep, upstream_basic_auth="bad")])
+        [status] = client._build_status()
+        assert status.label == "a"
+        assert status.error is not None
+        await client._stop_all()
+
 
 # --------------------------------------------------------------------------- #
 # `hle daemon install tunnel` end to end: CLI -> unit file on disk
@@ -519,6 +578,84 @@ class TestDaemonInstallWritesTheSpec:
         assert spec is not None
         assert spec.upstream_basic_auth == "admin:pw"
         assert spec.response_timeout == 90
+
+    def _refresh(self, tmp_path: Path, stamp: dict[str, Any]) -> Path:
+        from unittest.mock import patch
+
+        from hle_client import service_cmd
+
+        with (
+            patch.object(service_cmd, "service_spec", return_value=stamp),
+            patch.object(service_cmd, "current_platform", return_value="linux"),
+            patch.object(service_cmd, "_unit_dir", return_value=tmp_path),
+            patch.object(service_cmd, "_unit_path_in_other_scope", return_value=None),
+            patch.object(service_cmd, "find_hle_path", return_value="/usr/bin/hle"),
+            patch.object(service_cmd.subprocess, "run") as run,
+        ):
+            run.return_value.returncode = 0
+            assert service_cmd.refresh_service("hle-ha.service", True) == "refreshed"
+        return tmp_path / "hle-ha.service"
+
+    def _old_stamp(self, *run_args: str) -> dict[str, Any]:
+        return {
+            "version": "2609.1",
+            "label": "ha",
+            "run_args": list(run_args),
+            "name": None,
+            "run_as": None,
+            "description": "HLE tunnel: ha",
+            "restart": "on-failure",
+            "agent_config": None,
+            "user_mode": True,
+        }
+
+    def test_refresh_moves_a_secret_out_of_an_old_argv(self, tmp_path: Path):
+        """A pre-TunnelSpec unit with the secret in ExecStart gets migrated."""
+        from hle_client.service_cmd import parse_service_spec
+
+        stamp = self._old_stamp(
+            "expose",
+            "--service",
+            "http://localhost:8123",
+            "--label",
+            "ha",
+            "--upstream-basic-auth",
+            "a:b",
+            "--allow",
+            "x@y.z",
+            "--verify-ssl",
+        )
+        unit = self._refresh(tmp_path, stamp)
+        text = unit.read_text()
+        exec_line = next(ln for ln in text.splitlines() if ln.startswith("ExecStart="))
+        assert "a:b" not in exec_line
+        assert "--upstream-basic-auth" not in exec_line
+        assert "--verify-ssl" in exec_line
+        assert "--allow x@y.z" in exec_line
+        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH=a:b"' in text
+        assert unit.stat().st_mode & 0o777 == 0o600
+        # Stamped with the spec now, so the next refresh takes the new path.
+        restamped = parse_service_spec(text)
+        assert restamped is not None
+        assert restamped["tunnel"]["upstream_basic_auth"] == "a:b"
+        assert restamped["allow"] == ["x@y.z"]
+
+    def test_refresh_ignores_the_refreshing_users_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("HLE_UPSTREAM_BASIC_AUTH", "mine:secret")
+        stamp = self._old_stamp("expose", "--service", "http://x", "--label", "ha")
+        text = self._refresh(tmp_path, stamp).read_text()
+        assert "mine:secret" not in text
+
+    def test_unparseable_old_argv_is_replayed_with_a_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        stamp = self._old_stamp("expose", "--service", "http://x", "--no-such-flag")
+        with caplog.at_level("WARNING", logger="hle_client.service_cmd"):
+            text = self._refresh(tmp_path, stamp).read_text()
+        assert "--no-such-flag" in text
+        assert any("ha" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
 
     def test_without_a_secret_the_unit_stays_world_readable(self, tmp_path: Path):
         unit = self._install(tmp_path, "--verify-ssl")
