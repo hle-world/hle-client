@@ -18,12 +18,15 @@ import platform as _platform
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
 import websockets.exceptions
 
-from hle_client import __version__, config
+if TYPE_CHECKING:
+    from pathlib import Path
+
+from hle_client import __version__, agent_update, config
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.identity import hostname, instance_id
@@ -36,6 +39,10 @@ from hle_common.agent_protocol import (
     AgentWelcome,
     EndpointSpec,
     EndpointStatus,
+    UpdateAck,
+    UpdateProgress,
+    UpdateRequest,
+    UpdateResult,
     update_capability,
 )
 from hle_common.discovery import DiscoveryReport
@@ -135,6 +142,7 @@ def _fatal_agent_message(code: int | None, reason: str) -> str:
 # A tunnel-like object: connect() / disconnect() coroutines + is_connected /
 # public_url properties. Real impl is hle_client.tunnel.Tunnel; tests inject fakes.
 TunnelFactory = Callable[[TunnelConfig], Any]
+UpdaterFactory = Callable[[agent_update.UpdateSupport], agent_update.Updater]
 
 
 def _default_tunnel_factory(cfg: TunnelConfig) -> Tunnel:
@@ -160,6 +168,10 @@ class AgentClient:
         tunnel_factory: TunnelFactory = _default_tunnel_factory,
         reconnect_delay: float = 1.0,
         max_reconnect_delay: float = 60.0,
+        home: Path | None = None,
+        support_probe: Callable[[], agent_update.UpdateSupport] | None = None,
+        updater_factory: UpdaterFactory | None = None,
+        health_timeout: float | None = None,
     ) -> None:
         self._token = token
         self._relay_host = relay_host
@@ -167,6 +179,28 @@ class AgentClient:
         self._tunnel_factory = tunnel_factory
         self._reconnect_delay = reconnect_delay
         self._max_reconnect_delay = max_reconnect_delay
+        # Self-update plumbing. Every external effect — the install classifier,
+        # pip, the symlink flip — goes through these so tests can swap them.
+        self._home = home or agent_update.hle_home()
+        self._support_probe = support_probe or agent_update.can_self_update
+        self._updater_factory = updater_factory or (
+            lambda support: agent_update.make_updater(support, self._home)
+        )
+        self._health_timeout = (
+            health_timeout if health_timeout is not None else agent_update.health_timeout()
+        )
+        self._update_task: asyncio.Task[None] | None = None
+        self._health_task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self._boot = agent_update.BootCheck("none")
+        self._ws: Any = None
+        # Non-zero when the process must end so the service manager relaunches
+        # it: after a swap (into the new version) or a rollback (into the old).
+        self._exit_code = 0
+        # Set to cut the reconnect back-off short when the process has to end
+        # (a rollback that fired while the control channel was down).
+        self._backoff: asyncio.Future[None] | None = None
+        agent_update.ensure_log_buffer()
         self._running = False
         # True once the current session reached "registered"; see run().
         self._registered = False
@@ -193,6 +227,7 @@ class AgentClient:
     async def run(self) -> None:
         """Run the control connection with reconnection until stopped."""
         self._running = True
+        self._arm_watchdog()
         delay = self._reconnect_delay
         while self._running:
             self._registered = False
@@ -216,6 +251,10 @@ class AgentClient:
                     message = _fatal_agent_message(code, reason)
                     logger.error("%s", message)
                     self._fatal_error = message
+                    if self._boot.kind == "watch":
+                        # The updated version was turned away for good. Waiting
+                        # out the timer would only delay the same rollback.
+                        await self._rollback_update(f"relay refused the updated agent: {message}")
                 elif not close_codes.should_reconnect(code):
                     # HANDOVER: a successor of ours took the identity over, as
                     # arranged. Not an error — no `_fatal_error`, so the caller
@@ -253,13 +292,33 @@ class AgentClient:
             if not self._running:
                 break
             logger.info("Reconnecting agent control in %.1fs ...", delay)
-            await asyncio.sleep(delay)
+            # A task so _restart_process() can cut it short; asyncio.wait
+            # does not raise when it is cancelled, but an outer cancel of
+            # run() still propagates.
+            self._backoff = asyncio.ensure_future(asyncio.sleep(delay))
+            try:
+                await asyncio.wait({self._backoff})
+            finally:
+                self._backoff.cancel()
+                self._backoff = None
             delay = min(delay * 2, self._max_reconnect_delay)
+        self._disarm_watchdog()
 
     @property
     def fatal_error(self) -> str | None:
         """Why the relay stopped this agent for good, if it did."""
         return self._fatal_error
+
+    @property
+    def exit_code(self) -> int:
+        """Non-zero when the process must exit so its service manager relaunches it.
+
+        Set after a self-update swapped ``current`` (the relaunch is the new
+        version) and after a watchdog rollback (the relaunch is the old one).
+        Non-zero on purpose: ``Restart=on-failure`` units would not come back
+        from a clean exit, and ``Restart=always`` ones do either way.
+        """
+        return self._exit_code
 
     async def stop(self) -> None:
         self._running = False
@@ -279,7 +338,8 @@ class AgentClient:
             # stage a new version into itself. The method is sent regardless so
             # the dashboard can tell a brew user what to run.
             install_method = detect_install_method()
-            update_cap = update_capability(install_method)
+            support = self._probe_support()
+            update_cap = update_capability(support.method) if support.supported else None
             if update_cap is not None:
                 capabilities.append(update_cap)
             hello = AgentHello(
@@ -319,15 +379,23 @@ class AgentClient:
             # Report the inventory once on connect so the dashboard has
             # something to show immediately, then only on request.
             await self._report_discovery(ws)
+            self._ws = ws
+            await self._after_welcome(ws)
 
             status_task = asyncio.create_task(self._status_loop(ws))
             try:
                 async for raw in ws:
                     await self._handle_message(raw, ws)
             finally:
+                self._ws = None
                 status_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await status_task
+                if self._health_task is not None:
+                    self._health_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._health_task
+                    self._health_task = None
                 if self._fp is not None:
                     await self._fp.close_all()
                     self._fp = None
@@ -362,19 +430,230 @@ class AgentClient:
                 self._spawn_preflight(msg, ws)
         elif mtype == "pong":
             pass
+        elif mtype == "update_request":
+            if ws is not None:
+                await self._handle_update_request(msg, ws)
         elif isinstance(mtype, str) and mtype.startswith("update_"):
-            # Protocol 1.2 remote update. This client speaks the models but not
-            # yet the procedure, so the frame is dropped — at INFO, not debug,
-            # because the operator pressed a button on the dashboard and this
-            # log line is the only explanation they will get for why nothing
-            # happened.
-            logger.info(
-                "Ignoring %s from the relay: this client (%s) cannot update itself yet",
-                mtype,
-                __version__,
-            )
+            # The other update_* frames go agent -> server only. Logged at
+            # INFO, not debug: the operator pressed a button on the dashboard
+            # and this line is the only explanation they will get.
+            logger.info("Ignoring %s from the relay: not a request", mtype)
         else:
             logger.debug("Unhandled agent control message: %s", mtype)
+
+    # -- self-update ---------------------------------------------------------
+
+    def _probe_support(self) -> agent_update.UpdateSupport:
+        try:
+            return self._support_probe()
+        except Exception as exc:  # noqa: BLE001 — classification is best-effort
+            logger.debug("Could not classify this install: %s", exc)
+            return agent_update.UpdateSupport(False, "unknown", "unsupported:unknown")
+
+    def _active_ws_streams(self) -> int:
+        """Live browser WebSocket streams across every endpoint tunnel.
+
+        A swap drops them all, so with ``drain_policy == "wait"`` an update is
+        refused while any are open. The count comes from what each tunnel
+        exposes; a tunnel that tracks nothing counts as idle.
+        """
+        total = 0
+        for running in self._endpoints.values():
+            count = getattr(running.tunnel, "active_ws_streams", 0)
+            with contextlib.suppress(TypeError, ValueError):
+                total += int(count)
+        return total
+
+    def _refuse_update_reason(self, req: UpdateRequest) -> str | None:
+        """Why *req* cannot be accepted right now, or None to go ahead."""
+        if self._update_task is not None and not self._update_task.done():
+            return "busy:updating"
+        if self._boot.kind == "watch":
+            # This process is itself an update still proving it works.
+            return "busy:updating"
+        support = self._probe_support()
+        if not support.supported:
+            return support.reason or f"unsupported:{support.method}"
+        if req.target_version == __version__:
+            return "unsupported:same-version"
+        if req.drain_policy == "wait" and self._active_ws_streams() > 0:
+            return "busy:draining"
+        return None
+
+    async def _handle_update_request(self, msg: dict[str, Any], ws: Any) -> None:
+        try:
+            req = UpdateRequest.model_validate(msg)
+        except ValueError as exc:
+            logger.warning("Bad update request: %s", exc)
+            return
+        reason = self._refuse_update_reason(req)
+        ack = UpdateAck(request_id=req.request_id, accepted=reason is None, reason=reason)
+        with contextlib.suppress(Exception):
+            await ws.send(ack.model_dump_json())
+        if reason is not None:
+            logger.info("Refused update to %s: %s", req.target_version, reason)
+            return
+        logger.info("Accepted update %s -> %s", __version__, req.target_version)
+        # A task, not an await: pip takes a while and the control channel has
+        # to keep handling state_sync and pings meanwhile.
+        self._update_task = asyncio.create_task(self._run_update(req, ws))
+
+    async def _run_update(self, req: UpdateRequest, ws: Any) -> None:
+        async def progress(p: UpdateProgress) -> None:
+            with contextlib.suppress(Exception):
+                await ws.send(p.model_dump_json())
+
+        try:
+            updater = self._updater_factory(self._probe_support())
+            await agent_update.run_update(
+                req,
+                updater=updater,
+                home=self._home,
+                from_version=__version__,
+                send_progress=progress,
+            )
+        except Exception as exc:  # noqa: BLE001 — every failure is reported the same way
+            logger.error("Update to %s failed: %s", req.target_version, exc)
+            result = UpdateResult(
+                request_id=req.request_id,
+                ok=False,
+                from_version=__version__,
+                to_version=req.target_version,
+                log_tail=agent_update.log_tail(),
+            )
+            with contextlib.suppress(Exception):
+                await ws.send(result.model_dump_json())
+            return
+        # `current` now points at the new version. Nothing more can be
+        # reported from here — the result comes from the process that
+        # replaces this one. Close cleanly so the relay sees a proper close
+        # frame, then let run() unwind and the caller exit non-zero.
+        logger.info("Restarting into %s", req.target_version)
+        await self._restart_process(ws)
+
+    async def _restart_process(self, ws: Any) -> None:
+        self._exit_code = 1
+        self._running = False
+        if self._backoff is not None:
+            self._backoff.cancel()
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
+
+    # -- watchdog (the updated process proving itself) -----------------------
+
+    def _arm_watchdog(self) -> None:
+        self._boot = agent_update.boot_check(self._home, __version__)
+        if self._boot.kind == "watch" and self._boot.state is not None:
+            logger.info(
+                "Running as update %s (%s -> %s); %.0fs to become healthy",
+                self._boot.state.request_id,
+                self._boot.state.from_version,
+                self._boot.state.to_version,
+                self._health_timeout,
+            )
+            self._watchdog_task = asyncio.create_task(self._watchdog_timer())
+        elif self._boot.kind == "report_failed":
+            logger.warning("A previous update failed: %s", self._boot.reason)
+            self._undo_unverified_swap()
+
+    def _undo_unverified_swap(self) -> None:
+        """Repoint ``current`` away from a version that never proved itself.
+
+        Reached when the swap happened but the service manager relaunched
+        something other than ``current`` (a unit still naming the flat venv,
+        say): this old process came up, so nobody ran the watchdog, and
+        ``current`` still names the unverified version. Left alone, the next
+        ``daemon refresh`` would start it without a watchdog.
+        """
+        state = self._boot.state
+        if state is None or state.to_version == __version__:
+            return
+        if agent_update.current_version(self._home) != state.to_version:
+            return
+        try:
+            prev = agent_update.VersionedUpdater(self._home).rollback()
+        except agent_update.UpdateError as exc:
+            logger.warning("Could not repoint current away from %s: %s", state.to_version, exc)
+            return
+        logger.warning("Repointed current from unverified %s back to %s", state.to_version, prev)
+
+    def _disarm_watchdog(self) -> None:
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+
+    async def _watchdog_timer(self) -> None:
+        await asyncio.sleep(self._health_timeout)
+        if self._boot.kind == "watch":
+            await self._rollback_update(f"not healthy within {self._health_timeout:.0f}s")
+
+    async def _after_welcome(self, ws: Any) -> None:
+        """Startup bookkeeping that needs a live control connection."""
+        if self._boot.kind == "report_failed" and self._boot.state is not None:
+            state = self._boot.state
+            result = UpdateResult(
+                request_id=state.request_id,
+                ok=False,
+                from_version=state.from_version,
+                to_version=state.to_version,
+                log_tail=self._boot.log_tail or agent_update.log_tail(),
+            )
+            if state.request_id != agent_update.LOCAL_REQUEST_ID:
+                await ws.send(result.model_dump_json())
+            agent_update.clear_failed_marker(self._home)
+            agent_update.clear_update_state(self._home)
+            self._boot = agent_update.BootCheck("none")
+        elif self._boot.kind == "watch":
+            self._health_task = asyncio.create_task(self._confirm_update_health(ws))
+
+    def _all_endpoints_connected(self) -> bool:
+        return all(bool(r.tunnel.is_connected) for r in self._endpoints.values())
+
+    async def _confirm_update_health(self, ws: Any, poll: float = 0.5) -> None:
+        """Declare the update good once every endpoint is up; then report it."""
+        while not self._all_endpoints_connected():
+            await asyncio.sleep(poll)
+        state = self._boot.state
+        if self._boot.kind != "watch" or state is None:
+            return
+        self._boot = agent_update.BootCheck("none")
+        self._disarm_watchdog()
+        agent_update.clear_update_state(self._home)
+        logger.info("Update %s healthy: %s is serving", state.request_id, state.to_version)
+        if state.request_id == agent_update.LOCAL_REQUEST_ID:
+            return
+        result = UpdateResult(
+            request_id=state.request_id,
+            ok=True,
+            from_version=state.from_version,
+            to_version=state.to_version,
+            log_tail=agent_update.log_tail(),
+        )
+        with contextlib.suppress(Exception):
+            await ws.send(result.model_dump_json())
+
+    async def _rollback_update(self, reason: str) -> None:
+        """Put the previous version back and exit so the manager relaunches it."""
+        state = self._boot.state
+        if self._boot.kind != "watch" or state is None:
+            return
+        self._boot = agent_update.BootCheck("none")
+        self._disarm_watchdog()
+        logger.error("Update %s failed: %s — rolling back", state.request_id, reason)
+        tail = agent_update.log_tail()
+        try:
+            updater = self._updater_factory(self._probe_support())
+            prev = await asyncio.to_thread(updater.rollback)
+            logger.info("Rolled back to %s", prev)
+        except Exception as exc:  # noqa: BLE001 — report it, still exit
+            reason = f"{reason}; rollback failed: {exc}"
+            logger.error("Rollback failed: %s", exc)
+        agent_update.write_failed_marker(
+            self._home, agent_update.FailedUpdate(state=state, reason=reason, log_tail=tail)
+        )
+        agent_update.clear_update_state(self._home)
+        await self._restart_process(self._ws)
 
     def _spawn_preflight(self, msg: dict[str, Any], ws: Any) -> None:
         """Run a preflight in the background and reply with the report."""

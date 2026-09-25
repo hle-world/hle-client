@@ -529,13 +529,20 @@ class TestHelloContent:
         {"type": "welcome", "agent_public_id": "pub-1", "base_domain": "hle.world"}
     )
 
-    async def _hello_sent(self, monkeypatch) -> dict:
+    async def _hello_sent(self, monkeypatch, supported: bool = False) -> dict:
         import hle_client.agent as agent_mod
+        from hle_client.agent_update import UpdateSupport
 
         ws = _FakeWs(self._WELCOME)
         monkeypatch.setattr(agent_mod.websockets, "connect", lambda *a, **kw: ws)
         monkeypatch.setattr(agent_mod, "active_providers", list)
-        client, _ = _make_client()
+        method = agent_mod.detect_install_method()
+        support = (
+            UpdateSupport(True, str(method))
+            if supported
+            else UpdateSupport(False, str(method), f"unsupported:{method}")
+        )
+        client = AgentClient("hlea_test", tunnel_factory=FakeTunnel, support_probe=lambda: support)
 
         async def no_discovery(_ws) -> None:
             return None
@@ -549,7 +556,10 @@ class TestHelloContent:
 
         monkeypatch.setattr(agent_mod, "detect_install_method", lambda: "venv")
         monkeypatch.setenv("INVOCATION_ID", "abc")
-        hello = await self._hello_sent(monkeypatch)
+        # The capability follows can_self_update(), not the bare method: a venv
+        # the installer does not own gets `install_method: venv` and no
+        # capability, because nothing would relaunch it from `current`.
+        hello = await self._hello_sent(monkeypatch, supported=True)
         assert hello["type"] == "hello"
         assert "update:venv" in hello["capabilities"]
         assert "firepuncher" in hello["capabilities"]
@@ -632,17 +642,14 @@ class TestInstallMethodDetection:
 
 
 class TestUpdateFramesOnA12Client:
-    """The models exist but the procedure does not yet: say so where the operator looks."""
+    """`update_request` is handled (see test_agent_update.py); the rest are not ours to receive."""
 
-    @pytest.mark.parametrize("mtype", ["update_request", "update_ack", "update_frobnicate"])
-    async def test_update_frames_are_logged_at_info(self, mtype, caplog):
+    @pytest.mark.parametrize("mtype", ["update_ack", "update_frobnicate"])
+    async def test_non_request_update_frames_are_logged_at_info(self, mtype, caplog):
         client, _ = _make_client()
         with caplog.at_level("INFO", logger="hle_client.agent"):
             await client._handle_message(json.dumps({"type": mtype, "request_id": "r"}))
-        assert any(
-            r.levelname == "INFO" and mtype in r.getMessage() and "cannot update" in r.getMessage()
-            for r in caplog.records
-        )
+        assert any(r.levelname == "INFO" and mtype in r.getMessage() for r in caplog.records)
 
     async def test_other_unknown_frames_stay_at_debug(self, caplog):
         client, _ = _make_client()
