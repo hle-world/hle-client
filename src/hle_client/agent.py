@@ -30,7 +30,7 @@ from hle_client import __version__, agent_update, config
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.identity import hostname, instance_id
-from hle_client.tunnel import Tunnel, TunnelConfig
+from hle_client.tunnel import Tunnel, TunnelConfig, to_tunnel_config
 from hle_common import close_codes
 from hle_common.agent_protocol import (
     AgentHello,
@@ -775,18 +775,22 @@ class AgentClient:
         # sent one, otherwise the agent's own token (the server accepts hlea_
         # tokens for tunnel registration). One enrollment, one secret.
         data_key = self._api_key or self._token
-        cfg = TunnelConfig(
-            service_url=spec.service_url,
-            relay_host=self._relay_host,
-            relay_port=self._relay_port,
-            auth_mode=spec.auth_mode,
-            service_label=spec.label,
-            api_key=data_key,
-            websocket_enabled=spec.websocket_enabled,
-            webhook_path=spec.webhook_path,
-            zone=spec.zone,
-            managed_by="hle-agent",
-        )
+        # The whole TunnelSpec (1.3), through the same mapping the CLI uses, so
+        # a dashboard endpoint can set everything `hle tunnel create` can. The
+        # agent is what manages these tunnels, whatever the spec says.
+        try:
+            cfg = to_tunnel_config(
+                spec,
+                api_key=data_key,
+                relay_host=self._relay_host,
+                relay_port=self._relay_port,
+                managed_by="hle-agent",
+            )
+        except ValueError as exc:
+            # One bad endpoint (a malformed basic-auth value, say) must not take
+            # the others down with it: skip it and say why.
+            logger.error("Endpoint %s not started: %s", spec.label, exc)
+            return
         tunnel = self._tunnel_factory(cfg)
         task = asyncio.create_task(tunnel.connect())
         self._endpoints[spec.label] = _Running(spec=spec, tunnel=tunnel, task=task)
