@@ -171,7 +171,7 @@ echo ""
 # Create branch, commit, push, open PR
 BRANCH="chore/release-$VERSION"
 echo "Creating branch $BRANCH..."
-git checkout -b "$BRANCH"
+git switch -c "$BRANCH"
 git add "${FILES_CHANGED[@]}"
 git commit -m "Bump version to $VERSION"
 git push -u origin "$BRANCH"
