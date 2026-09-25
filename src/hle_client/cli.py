@@ -8,12 +8,13 @@ import logging
 import os
 import sys
 import webbrowser
+from collections.abc import Callable
 from datetime import UTC
-from typing import Any
+from typing import Any, TypeVar
 
 import click
 
-from hle_client import __version__, config, plugins, shutdown
+from hle_client import __version__, config, notices, plugins, shutdown
 from hle_client.agent import AgentClient
 from hle_client.aliases import RootGroup
 from hle_client.config_cmd import config as config_group
@@ -134,6 +135,36 @@ def main(
     )
 
 
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def events_option(f: F) -> F:
+    """``--events jsonl`` for the long-running commands a supervisor spawns."""
+    return click.option(
+        "--events",
+        type=click.Choice(notices.EVENT_FORMATS),
+        default=None,
+        help=(
+            "Write machine-readable events to stdout, one JSON object per line "
+            "(registered, connected, disconnected, notice, error, fatal); human "
+            "output moves to stderr. Schema: docs/events.md."
+        ),
+    )(f)
+
+
+def _start_events(ctx: click.Context, events: str | None) -> Console:
+    """Turn events on for this command if asked; return the console for people.
+
+    Switched off again when the command's context closes, so an embedding
+    process (or a test runner) does not keep receiving them afterwards.
+    """
+    if events is None:
+        return notices.human_console() if notices.events_enabled() else console
+    notices.enable_events(events)
+    ctx.call_on_close(notices.disable_events)
+    return err_console
+
+
 def _parse_auth_spec(spec: str) -> tuple[str, str]:
     """Parse ``[provider:]email`` into ``(provider, email)``."""
     from hle_client.ops.access import parse_spec
@@ -162,6 +193,7 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     help="API key (also reads HLE_API_KEY env var, then ~/.config/hle/config.toml)",
 )
 @tunnel_options
+@events_option
 @click.pass_context
 def expose(
     ctx: click.Context,
@@ -170,9 +202,11 @@ def expose(
     service_label: str | None,
     api_key: str | None,
     allow: tuple[str, ...],
+    events: str | None = None,
     **tunnel_params: Any,
 ) -> None:
     """Expose a local service to the internet."""
+    human = _start_events(ctx, events)
     spec = spec_from_params(service_url=service, label=service_label, **tunnel_params)
     validate_label_and_apex(spec)
 
@@ -191,18 +225,18 @@ def expose(
             import httpx
 
             if not resolved_key:
-                console.print("[yellow]Warning:[/yellow] No API key — skipping auth rules")
+                human.print("[yellow]Warning:[/yellow] No API key — skipping auth rules")
                 return
             client = api(ctx, resolved_key)
             for prov, email in auth_specs:
                 try:
                     await client.add_access_rule(subdomain, email, prov)
-                    console.print(f"     Auth   [green]+[/green] {email} [dim]({prov})[/dim]")
+                    human.print(f"     Auth   [green]+[/green] {email} [dim]({prov})[/dim]")
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 409:
-                        console.print(f"     Auth   [dim]· {email} ({prov}) already exists[/dim]")
+                        human.print(f"     Auth   [dim]· {email} ({prov}) already exists[/dim]")
                     else:
-                        console.print(
+                        human.print(
                             f"     Auth   [yellow]! {email} failed: "
                             f"{exc.response.status_code}[/yellow]"
                         )
@@ -212,24 +246,24 @@ def expose(
     tunnel = Tunnel(config=tunnel_config, on_registered=on_registered_cb)
 
     if api_key and not os.environ.get("HLE_API_KEY"):
-        console.print(
+        human.print(
             "[yellow]Warning:[/yellow] API key passed via --api-key is visible in process "
             "listings.\n         Use HLE_API_KEY env var or ~/.config/hle/config.toml instead."
         )
 
-    console.print(f"\n[bold]HLE[/bold] v{__version__}  Exposing [cyan]{service}[/cyan]")
-    console.print("     Relay   [dim]hle.world[/dim]")
+    human.print(f"\n[bold]HLE[/bold] v{__version__}  Exposing [cyan]{service}[/cyan]")
+    human.print("     Relay   [dim]hle.world[/dim]")
     if service_label:
-        console.print(f"     Label   [dim]{service_label}[/dim]")
-    console.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
+        human.print(f"     Label   [dim]{service_label}[/dim]")
+    human.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
     if spec.response_timeout:
-        console.print(f"     Timeout [dim]{spec.response_timeout}s[/dim]")
-    console.print()
+        human.print(f"     Timeout [dim]{spec.response_timeout}s[/dim]")
+    human.print()
 
     try:
         shutdown.run(tunnel.connect())
     except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down ...[/yellow]")
+        human.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
         raise HleError(str(exc)) from None
 
@@ -250,6 +284,7 @@ def expose(
     help="API key. Falls back to ~/.config/hle/config.toml if not set.",
 )
 @tunnel_option("response_timeout")
+@events_option
 @click.pass_context
 def webhook(
     ctx: click.Context,
@@ -258,6 +293,7 @@ def webhook(
     service_label: str,
     api_key: str | None,
     response_timeout: int | None,
+    events: str | None = None,
 ) -> None:
     """Forward incoming webhooks to a local service.
 
@@ -266,6 +302,8 @@ def webhook(
         hle tunnel webhook --path /hook/github --forward-to http://localhost:3000 --label gh
     """
     import posixpath
+
+    human = _start_events(ctx, events)
 
     if not path.startswith("/"):
         path = f"/{path}"
@@ -289,21 +327,21 @@ def webhook(
     tunnel = Tunnel(config=tunnel_config)
 
     if api_key and not os.environ.get("HLE_API_KEY"):
-        console.print(
+        human.print(
             "[yellow]Warning:[/yellow] API key passed via --api-key is visible in process "
             "listings.\n         Use HLE_API_KEY env var or ~/.config/hle/config.toml instead."
         )
 
-    console.print(f"\n[bold]HLE[/bold] v{__version__}  Webhook forwarder")
-    console.print(f"     Path    [cyan]{path}[/cyan]")
-    console.print(f"     Forward [cyan]{forward_to}[/cyan]")
-    console.print("     Relay   [dim]hle.world[/dim]")
-    console.print()
+    human.print(f"\n[bold]HLE[/bold] v{__version__}  Webhook forwarder")
+    human.print(f"     Path    [cyan]{path}[/cyan]")
+    human.print(f"     Forward [cyan]{forward_to}[/cyan]")
+    human.print("     Relay   [dim]hle.world[/dim]")
+    human.print()
 
     try:
         shutdown.run(tunnel.connect())
     except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down ...[/yellow]")
+        human.print("\n[yellow]Shutting down ...[/yellow]")
     except TunnelFatalError as exc:
         raise HleError(str(exc)) from None
 
@@ -323,7 +361,11 @@ def auth() -> None:
 @click.option(
     "--agent-token",
     default=None,
-    help="Agent enrollment token to save instead (same as 'hle agent enroll').",
+    is_flag=False,
+    # Bare `--agent-token` prompts for it, so the token need not be typed
+    # into shell history — what `agent enroll` with no argument did.
+    flag_value="",
+    help="Agent enrollment token to save instead. Alone, prompts for it.",
 )
 @click.pass_context
 def login(ctx: click.Context, api_key: str | None, agent_token: str | None = None) -> None:
@@ -332,17 +374,17 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
     One place to put a credential, whichever kind you were given. An agent
     enrollment token used to have its own verb in its own group, so "where do
     I put this?" had two answers depending on which string you were holding.
+    `hle agent enroll TOKEN` still works; it is this command.
 
     \b
     Examples:
       hle auth login                        Paste an API key from the dashboard
       hle auth login --api-key hle_...      Non-interactive
       hle auth login --agent-token hlea_... Enrol this machine as an agent
+      hle auth login --agent-token          Same, pasting the token at a prompt
     """
     if agent_token is not None:
-        config.save_agent_token(agent_token)
-        console.print("[green]Agent token saved[/green] to ~/.config/hle/agent.toml")
-        console.print("[dim]Start it with: hle agent run  (or: hle daemon install agent)[/dim]")
+        _save_agent_token(ctx, agent_token or None)
         return
 
     if api_key is None:
@@ -356,6 +398,21 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
 
     config.save_api_key(api_key)
     console.print("[green]Saved[/green] to ~/.config/hle/config.toml")
+
+
+def _save_agent_token(ctx: click.Context, token: str | None) -> None:
+    """Validate and save an agent enrollment token, prompting when none was given."""
+    if token is None:
+        console.print(
+            "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
+        )
+        token = str(prompt(ctx, "Agent token", hide_input=True))
+
+    ops_agents.enroll(token)
+    console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
+    console.print(
+        "Start the agent with: [cyan]hle agent run[/cyan]  (or: hle daemon install agent)"
+    )
 
 
 def _mask(value: str) -> str:
@@ -422,6 +479,7 @@ def logout() -> None:
 @click.argument("second", required=False, metavar="")
 @click.option("--api-key", default=None, help="API key. Defaults to the root --api-key.")
 @tunnel_options
+@events_option
 @click.pass_context
 def tunnel_create(ctx: click.Context, /, first: str, second: str | None, **kwargs: Any) -> None:
     """Expose a local service to the internet.
@@ -547,20 +605,15 @@ def agent() -> None:
     """Run a multi-tunnel agent controlled from the dashboard."""
 
 
-@agent.command()
+# The old spelling of `hle auth login --agent-token`. Hidden, not aliased
+# through the group's table: it takes the token as an argument where login
+# takes it as an option, so it cannot simply resolve to the same command.
+@agent.command(hidden=True)
 @click.argument("token", required=False)
 @click.pass_context
 def enroll(ctx: click.Context, token: str | None) -> None:
-    """Save an agent enrollment token (created in the dashboard)."""
-    if token is None:
-        console.print(
-            "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
-        )
-        token = str(prompt(ctx, "Agent token", hide_input=True))
-
-    ops_agents.enroll(token)
-    console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
-    console.print("Start the agent with: [cyan]hle agent run[/cyan]")
+    """Save an agent enrollment token. Now: hle auth login --agent-token."""
+    _save_agent_token(ctx, token)
 
 
 @agent.command()
@@ -569,19 +622,28 @@ def enroll(ctx: click.Context, token: str | None) -> None:
 )
 @click.option("--relay-host", default="hle.world", help="Relay host")
 @click.option("--relay-port", default=443, type=int, help="Relay port")
-def run(token: str | None, relay_host: str, relay_port: int) -> None:
+@events_option
+@click.pass_context
+def run(
+    ctx: click.Context,
+    token: str | None,
+    relay_host: str,
+    relay_port: int,
+    events: str | None = None,
+) -> None:
     """Run the agent: connect, fetch endpoints from the dashboard, and reconcile."""
+    human = _start_events(ctx, events)
     token = token or config.load_agent_token()
     if not token:
         raise AuthError(NO_AGENT_TOKEN)
 
     client = AgentClient(token, relay_host=relay_host, relay_port=relay_port)
-    console.print(f"[green]Agent running[/green] — control: {client.control_uri}")
-    console.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
+    human.print(f"[green]Agent running[/green] — control: {client.control_uri}")
+    human.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
     try:
         shutdown.run(client.run())
     except KeyboardInterrupt:
-        console.print("\n[yellow]Agent stopped.[/yellow]")
+        human.print("\n[yellow]Agent stopped.[/yellow]")
         return
 
     # The relay can end the agent deliberately — a duplicate on another
@@ -594,7 +656,7 @@ def run(token: str | None, relay_host: str, relay_port: int) -> None:
     # service manager relaunches whatever `current` now points at. Non-zero,
     # because Restart=on-failure would not bring it back from a clean exit.
     if client.exit_code:
-        console.print("[yellow]Agent restarting to change version.[/yellow]")
+        human.print("[yellow]Agent restarting to change version.[/yellow]")
         sys.exit(client.exit_code)
 
 
@@ -622,7 +684,7 @@ def agent_status(ctx: click.Context) -> None:
         console.print("Agent token source: [cyan]~/.config/hle/agent.toml[/cyan]")
         console.print(f"Token: [dim]{masked}[/dim]")
     else:
-        console.print("[dim]No agent token configured. Run 'hle agent enroll'.[/dim]")
+        console.print("[dim]No agent token configured. Run 'hle auth login --agent-token'.[/dim]")
 
 
 @agent.command("list")
@@ -671,7 +733,7 @@ def agent_list(ctx: click.Context, api_key: str | None, as_json: bool) -> None:
         console.print("[dim]No agents yet.[/dim]")
         console.print(
             "[dim]Create one at https://hle.world/dashboard → Agents, "
-            "then run 'hle agent enroll <token>'.[/dim]"
+            "then run 'hle auth login --agent-token <token>'.[/dim]"
         )
         return
 

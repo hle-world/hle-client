@@ -76,7 +76,7 @@ async def _warn_if_basic_auth_active(ctx: click.Context, client: ApiClient, subd
         f"[yellow]Warning:[/yellow] Basic Auth is currently active on "
         f"[cyan]{subdomain}[/cyan].\n"
         "  Email rules and PIN are bypassed while it's active.\n"
-        "  Remove Basic Auth first ([dim]hle tunnel basic-auth remove "
+        "  Remove Basic Auth first ([dim]hle tunnel basic-auth delete "
         f"{subdomain}[/dim]) to re-enable SSO/PIN access control."
     )
     if not confirm(ctx, "  Continue anyway?", default=False):
@@ -160,7 +160,7 @@ def _print_status(detail: TunnelDetail) -> None:
 # ---------------------------------------------------------------------------
 
 
-@click.group(cls=AliasedGroup, aliases={"show": "get"})
+@click.group(cls=AliasedGroup, aliases={"show": "get"}, hidden_aliases={"auth-mode": "set"})
 def config() -> None:
     """Create, inspect and secure tunnels.
 
@@ -169,8 +169,13 @@ def config() -> None:
       hle tunnel create ha http://localhost:8123   Run a tunnel
       hle tunnel list                              What is published
       hle tunnel get ha                            One tunnel, in full
-      hle tunnel access add ha you@example.com     Let someone in
+      hle tunnel set ha --auth none                Make it public
+      hle tunnel access create ha you@example.com  Let someone in
       hle tunnel delete ha                         Remove the record
+
+    \b
+    access, pin, basic-auth and share use the same verbs as tunnel itself:
+    list, get, create, set, delete.
     """
 
 
@@ -289,26 +294,56 @@ def delete_cmd(ctx: click.Context, label: str, yes: bool, api_key: str | None) -
     asyncio.run(_run())
 
 
-# ---- auth-mode ------------------------------------------------------------
+# ---- set ------------------------------------------------------------------
 
 
-@config.command("auth-mode")
+@config.command("set")
 @click.argument("label")
 @click.option(
-    "--set",
+    "--auth",
     "mode",
     type=click.Choice(["sso", "none"]),
-    required=True,
-    help="Auth mode to apply",
+    default=None,
+    help="Gate mode: sso (visitors sign in) or none (public).",
+)
+# `auth-mode LABEL --set X` resolves here (a hidden alias), so the flag it
+# was spelled with has to parse here too.
+@click.option(
+    "--set",
+    "legacy_mode",
+    type=click.Choice(["sso", "none"]),
+    default=None,
+    hidden=True,
 )
 @_api_key_option
 @click.pass_context
-def auth_mode_cmd(ctx: click.Context, label: str, mode: str, api_key: str | None) -> None:
-    """Set the SSO gate mode for a tunnel."""
+def set_cmd(
+    ctx: click.Context,
+    label: str,
+    mode: str | None,
+    legacy_mode: str | None,
+    api_key: str | None,
+) -> None:
+    """Change a published tunnel's settings.
+
+    The one verb for changing a tunnel in place. `auth-mode LABEL --set X`
+    was a noun of its own with its value behind an option named after the
+    verb; it still works, spelled the old way.
+
+    \b
+    Example:
+      hle tunnel set ha --auth sso     SSO gate on
+      hle tunnel set ha --auth none    Anyone with the URL gets in
+    """
+    if mode is not None and legacy_mode is not None and mode != legacy_mode:
+        raise UsageError("--auth and --set disagree; pass one.")
+    chosen = mode or legacy_mode
+    if chosen is None:
+        raise UsageError("Nothing to set.", hint="hle tunnel set LABEL --auth sso|none")
 
     async def _run() -> None:
-        subdomain = await ops_tunnels.set_auth_mode(api(ctx, api_key), label, mode)
-        console.print(f"[green]✓[/green] {subdomain} auth_mode = {mode}")
+        subdomain = await ops_tunnels.set_auth_mode(api(ctx, api_key), label, chosen)
+        console.print(f"[green]✓[/green] {subdomain} auth_mode = {chosen}")
 
     asyncio.run(_run())
 
@@ -318,7 +353,7 @@ def auth_mode_cmd(ctx: click.Context, label: str, mode: str, api_key: str | None
 # ---------------------------------------------------------------------------
 
 
-@config.group("access")
+@config.group("access", cls=AliasedGroup, hidden_aliases={"add": "create", "remove": "delete"})
 def access_grp() -> None:
     """Manage tunnel access allow-list (SSO email rules)."""
 
@@ -356,7 +391,7 @@ def access_list(ctx: click.Context, label: str, api_key: str | None) -> None:
     asyncio.run(_run())
 
 
-@access_grp.command("add")
+@access_grp.command("create")
 @click.argument("label")
 @click.argument("email")
 @click.option(
@@ -385,7 +420,7 @@ def access_add(
     asyncio.run(_run())
 
 
-@access_grp.command("remove")
+@access_grp.command("delete")
 @click.argument("label")
 @click.argument("rule_id", type=int)
 @_api_key_option
@@ -455,7 +490,7 @@ def access_replace(
 # ---------------------------------------------------------------------------
 
 
-@config.group("pin")
+@config.group("pin", cls=AliasedGroup, hidden_aliases={"status": "get", "remove": "delete"})
 def pin_grp() -> None:
     """Manage tunnel PIN access control."""
 
@@ -483,7 +518,7 @@ def pin_set(ctx: click.Context, label: str, api_key: str | None) -> None:
     asyncio.run(_run())
 
 
-@pin_grp.command("remove")
+@pin_grp.command("delete")
 @click.argument("label")
 @_api_key_option
 @click.pass_context
@@ -497,7 +532,7 @@ def pin_remove(ctx: click.Context, label: str, api_key: str | None) -> None:
     asyncio.run(_run())
 
 
-@pin_grp.command("status")
+@pin_grp.command("get")
 @click.argument("label")
 @_api_key_option
 @click.pass_context
@@ -523,7 +558,7 @@ def pin_status(ctx: click.Context, label: str, api_key: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-@config.group("basic-auth")
+@config.group("basic-auth", cls=AliasedGroup, hidden_aliases={"status": "get", "remove": "delete"})
 def basic_auth_grp() -> None:
     """Manage tunnel HTTP Basic Auth access control."""
 
@@ -557,7 +592,7 @@ def basic_auth_set(ctx: click.Context, label: str, api_key: str | None) -> None:
     asyncio.run(_run())
 
 
-@basic_auth_grp.command("remove")
+@basic_auth_grp.command("delete")
 @click.argument("label")
 @_api_key_option
 @click.pass_context
@@ -571,7 +606,7 @@ def basic_auth_remove(ctx: click.Context, label: str, api_key: str | None) -> No
     asyncio.run(_run())
 
 
-@basic_auth_grp.command("status")
+@basic_auth_grp.command("get")
 @click.argument("label")
 @_api_key_option
 @click.pass_context
@@ -600,7 +635,7 @@ def basic_auth_status(ctx: click.Context, label: str, api_key: str | None) -> No
 # ---------------------------------------------------------------------------
 
 
-@config.group("share")
+@config.group("share", cls=AliasedGroup, hidden_aliases={"revoke": "delete"})
 def share_grp() -> None:
     """Manage temporary share links for a tunnel."""
 
@@ -614,7 +649,10 @@ def share_grp() -> None:
     show_default=True,
     help="Link validity duration",
 )
-@click.option("--label", "link_label", default="", help="Optional label for the link")
+@click.option("--name", "link_name", default=None, help="Optional name for the link")
+# The old spelling. `--label` names the tunnel everywhere else, and here it
+# named the link instead, right next to a LABEL argument that is the tunnel.
+@click.option("--label", "legacy_link_label", default=None, hidden=True)
 @click.option("--max-uses", default=None, type=int, help="Maximum number of uses")
 @_api_key_option
 @click.pass_context
@@ -622,11 +660,15 @@ def share_create(
     ctx: click.Context,
     label: str,
     duration: str,
-    link_label: str,
+    link_name: str | None,
+    legacy_link_label: str | None,
     max_uses: int | None,
     api_key: str | None,
 ) -> None:
     """Create a temporary share link for a tunnel."""
+    if link_name is not None and legacy_link_label is not None and link_name != legacy_link_label:
+        raise UsageError("--name and --label both name the link; pass one.")
+    link_label = link_name if link_name is not None else (legacy_link_label or "")
 
     async def _run() -> None:
         link = await ops_auth.create_share(
@@ -690,7 +732,7 @@ def share_list(ctx: click.Context, label: str, api_key: str | None) -> None:
     asyncio.run(_run())
 
 
-@share_grp.command("revoke")
+@share_grp.command("delete")
 @click.argument("label")
 @click.argument("link_id", type=int)
 @_api_key_option

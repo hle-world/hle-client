@@ -161,10 +161,16 @@ class TestRefreshTunnelSpecStamps:
             assert refresh_service("hle-ha.service", True) == "refreshed"
         return install.call_args.kwargs
 
-    def test_an_old_stamp_replays_its_argv(self):
+    def test_an_old_stamp_is_rewritten_in_the_current_grammar(self):
+        """Plan §2.6a: `daemon refresh` (run by `hle update`) moves old units off
+        `expose`. The legacy argv is read back through the real parser and
+        rebuilt, so the exec line becomes `tunnel create LABEL URL`."""
         kwargs = self._refresh(_OLD_TUNNEL_STAMP)
-        assert kwargs["run_args"] == _OLD_TUNNEL_STAMP["run_args"]
+        assert kwargs["run_args"] == ["tunnel", "create", "ha", "http://localhost:8123"]
         assert kwargs["env"] == {}
+        # The re-stamp gains the spec it was read back to, so the next refresh
+        # does not have to parse argv at all.
+        assert kwargs["spec"]["tunnel"]["service_url"] == "http://localhost:8123"
 
     def test_a_new_stamp_is_rebuilt_from_its_tunnel_spec(self):
         tunnel = TunnelSpec(
@@ -182,11 +188,10 @@ class TestRefreshTunnelSpecStamps:
         }
         kwargs = self._refresh(stamp)
         assert kwargs["run_args"] == [
-            "expose",
-            "--service",
-            "http://localhost:8123",
-            "--label",
+            "tunnel",
+            "create",
             "ha",
+            "http://localhost:8123",
             "--response-timeout",
             "90",
             "--allow",
@@ -197,7 +202,84 @@ class TestRefreshTunnelSpecStamps:
         assert kwargs["spec"]["run_args"] == kwargs["run_args"]
         assert kwargs["spec"]["tunnel"] == tunnel.model_dump()
 
-    def test_an_unusable_tunnel_key_falls_back_to_argv(self):
+    def test_an_unusable_tunnel_key_falls_back_to_the_argv(self):
+        """The spec cannot be used, so the argv is read instead — and rebuilt."""
         for bad in ({"label": "ha"}, {"label": 5, "service_url": []}, "not a dict"):
             kwargs = self._refresh({**_OLD_TUNNEL_STAMP, "tunnel": bad})
-            assert kwargs["run_args"] == _OLD_TUNNEL_STAMP["run_args"]
+            assert kwargs["run_args"] == ["tunnel", "create", "ha", "http://localhost:8123"]
+
+    def test_an_argv_only_stamp_in_the_new_grammar_is_read_too(self):
+        stamp = {
+            **_OLD_TUNNEL_STAMP,
+            "run_args": ["tunnel", "create", "ha", "http://localhost:8123", "--verify-ssl"],
+        }
+        kwargs = self._refresh(stamp)
+        assert kwargs["run_args"] == [
+            "tunnel",
+            "create",
+            "ha",
+            "http://localhost:8123",
+            "--verify-ssl",
+        ]
+        assert kwargs["spec"]["tunnel"]["verify_ssl"] is True
+
+    def test_an_unreadable_legacy_argv_is_replayed_unchanged(self):
+        """An --api-key on the command line cannot go into a TunnelSpec; rather
+        than guess, the argv is kept as it was."""
+        argv = ["expose", "--service", "http://x", "--label", "ha", "--api-key", "hle_x"]
+        kwargs = self._refresh({**_OLD_TUNNEL_STAMP, "run_args": argv})
+        assert kwargs["run_args"] == argv
+
+
+class TestRefreshForwardStamps:
+    def _refresh(self, run_args):
+        stamp = {**_OLD_TUNNEL_STAMP, "label": "fp-rpi-22", "run_args": run_args}
+        with (
+            patch("hle_client.service_cmd.service_spec", return_value=stamp),
+            patch("hle_client.service_cmd.current_platform", return_value="linux"),
+            patch("hle_client.service_cmd._systemd_install") as install,
+        ):
+            assert refresh_service("hle-fp-rpi-22.service", True) == "refreshed"
+        return install.call_args.kwargs
+
+    def test_a_legacy_fp_unit_is_renamed_to_forward(self):
+        """Every start of an `fp` unit wrote the rename note to its log."""
+        kwargs = self._refresh(["fp", "--agent", "rpi", "--to", "22", "--port", "9922"])
+        assert kwargs["run_args"] == ["forward", "--agent", "rpi", "--to", "22", "--port", "9922"]
+        assert kwargs["spec"]["run_args"] == kwargs["run_args"]
+
+    def test_a_forward_unit_is_left_as_it_is(self):
+        argv = ["forward", "rpi", "22", "--port", "9922"]
+        assert self._refresh(argv)["run_args"] == argv
+
+
+class TestUnitsSilenceDeprecationNotes:
+    """A unit may exec an old spelling until refreshed; its log is no place for
+    advice nobody reads (audit: every `fp` unit start wrote the rename note)."""
+
+    def test_systemd(self):
+        text = render_unit(
+            label="ha",
+            hle_path="/usr/bin/hle",
+            run_args=["tunnel", "create", "ha", "http://x"],
+            user_mode=True,
+            run_as_user=None,
+        )
+        assert "Environment=HLE_NO_DEPRECATION_WARNINGS=1" in text
+
+    def test_launchd(self):
+        text = render_launchd_plist(
+            label="ha",
+            plist_label="world.hle.ha",
+            hle_path="/usr/local/bin/hle",
+            run_args=["tunnel", "create", "ha", "http://x"],
+            run_as_user=None,
+            log_dir="/tmp",
+        )
+        assert "<key>HLE_NO_DEPRECATION_WARNINGS</key>" in text
+
+    def test_rcd(self):
+        text = render_rc_script(
+            label="ha", hle_path="/usr/local/bin/hle", run_args=["tunnel", "create", "ha", "x"]
+        )
+        assert "HLE_NO_DEPRECATION_WARNINGS=1" in text

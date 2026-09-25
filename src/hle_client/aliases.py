@@ -84,11 +84,26 @@ class AliasedGroup(click.Group):
     Resolution happens in ``get_command`` rather than by registering the same
     command twice, so the alias cannot drift from the command it points at and
     ``--help`` lists each command exactly once.
+
+    Two kinds of alias share one table. ``aliases`` are the renamed top-level
+    nouns and print the one-line note on use. ``hidden_aliases`` are old verbs
+    inside a noun (``access add`` for ``access create``): they resolve just as
+    well and print nothing, because there are far more of them, they sit in
+    units and scripts nobody reads the stderr of, and a nag per verb would be
+    noise rather than guidance. Both are in ``self.aliases`` so every walker of
+    the tree sees every spelling; ``self.silent`` says which ones stay quiet.
     """
 
-    def __init__(self, *args: Any, aliases: dict[str, str] | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        aliases: dict[str, str] | None = None,
+        hidden_aliases: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        self.aliases: dict[str, str] = aliases or {}
+        self.aliases: dict[str, str] = {**(aliases or {}), **(hidden_aliases or {})}
+        self.silent: frozenset[str] = frozenset(hidden_aliases or ())
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         command = super().get_command(ctx, cmd_name)
@@ -106,7 +121,7 @@ class AliasedGroup(click.Group):
             if resolved is None or not isinstance(resolved, click.Group):
                 return None
             resolved = resolved.get_command(ctx, part)
-        if resolved is not None:
+        if resolved is not None and cmd_name not in self.silent:
             warn_once(cmd_name, target)
         return resolved
 

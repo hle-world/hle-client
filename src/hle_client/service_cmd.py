@@ -38,7 +38,7 @@ from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 import click
 
 from hle_client import __version__, config
-from hle_client.aliases import LegacyModeCommand, ModeGroup
+from hle_client.aliases import AliasedGroup, LegacyModeCommand, ModeGroup
 from hle_client.errors import HleError, UsageError
 from hle_client.richcompat import Console, Table
 from hle_client.tunnel_options import spec_from_params, tunnel_options, validate_label_and_apex
@@ -70,9 +70,19 @@ AGENT_LABEL = "agent"
 # back into flags is guesswork that fails silently; reading it back is not.
 _SPEC_MARKER = "hle-spec:"
 
+# The head of the argv a tunnel unit execs.
+TUNNEL_CREATE = ["tunnel", "create"]
+
+# Set in every generated unit, plist and rc script. A service runs whatever
+# argv it was installed with until it is refreshed, and one written by an
+# older client may still use a renamed spelling; the "`hle fp` is now `hle
+# forward`" note then landed in the service log on every start, where nobody
+# who could act on it would read it.
+_QUIET_ENV = ("HLE_NO_DEPRECATION_WARNINGS", "1")
+
 
 def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list[str]] | None:
-    """``(spec, allow)`` from an ``expose ...`` argv, parsed by the real command.
+    """``(spec, allow)`` from an ``expose``/``tunnel create`` argv, parsed by the real command.
 
     None when it cannot be read faithfully: it does not parse, or it carries
     something a TunnelSpec cannot (an ``--api-key`` on the command line). The
@@ -84,12 +94,17 @@ def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list
     from click.core import ParameterSource
 
     # Imported here: cli imports this module.
-    from hle_client.cli import expose
+    from hle_client.cli import expose, tunnel_create
 
-    if run_args[:1] != ["expose"]:
+    command: click.Command
+    if run_args[:1] == ["expose"]:
+        command, rest = expose, run_args[1:]
+    elif run_args[:2] == ["tunnel", "create"]:
+        command, rest = tunnel_create, run_args[2:]
+    else:
         return None
     try:
-        ctx = expose.make_context("expose", list(run_args[1:]))
+        ctx = command.make_context(str(command.name), list(rest))
     except click.exceptions.ClickException:
         return None
     except click.exceptions.Exit:
@@ -101,10 +116,14 @@ def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list
     if params.pop("api_key", None):
         return None
     allow = [str(a) for a in params.pop("allow", None) or ()]
+    params.pop("events", None)  # how the process reports, not part of the tunnel
+    if command is tunnel_create:
+        first, second = params.pop("first"), params.pop("second")
+        url, label = (second, first) if second is not None else (first, None)
+    else:
+        url, label = params.pop("service"), params.pop("service_label")
     try:
-        spec = spec_from_params(
-            service_url=params.pop("service"), label=params.pop("service_label"), **params
-        )
+        spec = spec_from_params(service_url=url, label=label, **params)
     except (UsageError, ValueError):
         return None
     return spec, allow
@@ -202,7 +221,13 @@ def launchd_label(label: str, name: str | None = None) -> str:
 
 
 def build_expose_args(spec: TunnelSpec, *, allow: tuple[str, ...] | list[str] = ()) -> list[str]:
-    """Build the ``expose`` argv for a service definition, from a ``TunnelSpec``.
+    """Build the ``tunnel create`` argv for a service definition, from a ``TunnelSpec``.
+
+    Emits the current grammar, ``tunnel create [LABEL] URL ...``. Units used
+    to exec ``expose --service URL --label L``, which kept the legacy name
+    load-bearing: every generated unit depended on it. ``expose`` still parses
+    (it is what ``tunnel create`` runs), and ``daemon refresh`` rewrites old
+    units to this form.
 
     Secrets are never part of argv — anyone on the machine can read a process
     list, and the unit file's ExecStart line with it. ``upstream_basic_auth``
@@ -211,15 +236,16 @@ def build_expose_args(spec: TunnelSpec, *, allow: tuple[str, ...] | list[str] = 
     read at runtime from the running user's config or ``HLE_API_KEY``.
 
     Raises ``ValueError`` for a webhook spec: webhooks run through
-    ``tunnel webhook``, which ``expose`` is not.
+    ``tunnel webhook``, which ``tunnel create`` is not.
     """
     if spec.webhook_path:
-        raise ValueError("a webhook spec cannot be run as `hle expose`")
+        raise ValueError("a webhook spec cannot be run as `hle tunnel create`")
     if not spec.service_url:
         raise ValueError("a tunnel needs a service_url")
-    args = ["expose", "--service", spec.service_url]
+    args = ["tunnel", "create"]
     if spec.label:
-        args += ["--label", spec.label]
+        args.append(spec.label)
+    args.append(spec.service_url)
     if spec.zone:
         args += ["--zone", spec.zone]
     if spec.apex:
@@ -276,12 +302,13 @@ def build_fp_args(
     relay_host: str | None = None,
     relay_port: int | None = None,
 ) -> list[str]:
-    """Build the ``fp`` argv (no secrets) for the service definition.
+    """Build the ``forward AGENT TARGET`` argv (no secrets) for the service definition.
 
+    ``fp --agent A --to T`` before; ``daemon refresh`` rewrites those units.
     The API key is read at runtime from the running user's config or
     ``HLE_API_KEY``, never written into the unit.
     """
-    args = ["fp", "--agent", agent, "--to", target]
+    args = ["forward", agent, target]
     if bind_port:
         args += ["--port", str(bind_port)]
     if bind_host:
@@ -440,6 +467,7 @@ def render_unit(
     # path at runtime finds the wrong one whenever those differ.
     if agent_config:
         lines.append(f"Environment=HLE_AGENT_CONFIG={agent_config}")
+    lines.append(f"Environment={_QUIET_ENV[0]}={_QUIET_ENV[1]}")
     # Values argv must not carry (secrets). The unit file is written 0600
     # whenever there are any, see _write_service_file.
     for key, value in sorted((env or {}).items()):
@@ -609,7 +637,7 @@ def _systemd_install(
                     "as well would run two copies on one credential — they take every tunnel "
                     "off each other about once a second.\n"
                     "Remove the existing one first:\n"
-                    f"  hle daemon uninstall{'' if user_mode else ' --user'} --label {label}\n"
+                    f"  hle daemon delete {label}{'' if user_mode else ' --user'}\n"
                     "or keep it and skip this install."
                 ),
             )
@@ -714,7 +742,7 @@ def _systemd_list(*, user_mode: bool | None) -> None:
         console.print(
             "[dim]Two copies of one service run on the same credentials and fight over "
             "every tunnel. Remove whichever you did not mean to keep:\n"
-            "  hle daemon uninstall --user --label <label>   (or without --user)[/dim]"
+            "  hle daemon delete <label> --user   (or without --user)[/dim]"
         )
 
 
@@ -765,7 +793,7 @@ def render_launchd_plist(
     # The token file by absolute path. launchd hands a daemon its own
     # environment, so deriving the path from HOME at runtime can resolve
     # somewhere the enrolling user never wrote to.
-    plist_env = dict(sorted((env or {}).items()))
+    plist_env = {_QUIET_ENV[0]: _QUIET_ENV[1], **dict(sorted((env or {}).items()))}
     if agent_config:
         plist_env = {"HLE_AGENT_CONFIG": agent_config, **plist_env}
     if plist_env:
@@ -1030,6 +1058,7 @@ def render_rc_script(
         f'command_args="{daemon_flags} -P ${{pidfile}} -p /var/run/${{name}}.child.pid '
         f"-o ${{logfile}} /usr/bin/env HOME=${{{svc}_home}} "
         f"HLE_AGENT_CONFIG=${{{svc}_config}} "
+        f"{_QUIET_ENV[0]}={_QUIET_ENV[1]} "
         f'${{hle_command}} {args}"',
         'procname="/usr/sbin/daemon"',
         "",
@@ -1319,12 +1348,14 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
     extra_stamp: dict[str, Any] = {}
     tunnel = stamped_tunnel_spec(spec)
     allow: list[str] = [str(a) for a in spec.get("allow") or ()]
-    if tunnel is None and list(spec["run_args"])[:1] == ["expose"]:
+    stamped_args = [str(a) for a in spec["run_args"]]
+    if tunnel is None and (stamped_args[:1] == ["expose"] or stamped_args[:2] == TUNNEL_CREATE):
         # A tunnel stamped before TunnelSpec: argv only. Read it back through
         # the real `expose` parser so it is rebuilt like a new install — which
         # is what moves a secret written into argv out of ExecStart and the
-        # process list and into an owner-only environment.
-        migrated = _tunnel_spec_from_legacy_argv([str(a) for a in spec["run_args"]])
+        # process list and into an owner-only environment, and what moves the
+        # exec line from `expose` to `tunnel create`.
+        migrated = _tunnel_spec_from_legacy_argv(stamped_args)
         if migrated is None:
             logger.warning(
                 "Service %s: could not read its expose arguments back; replaying them unchanged",
@@ -1339,8 +1370,11 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
         run_args = build_expose_args(tunnel, allow=allow)
         env = expose_env(tunnel)
     else:
-        # Agent and forward stamps carry only argv, which is replayed as it was.
-        run_args = [str(a) for a in spec["run_args"]]
+        # Agent and forward stamps carry only argv, which is replayed — with a
+        # forward's legacy `fp` head renamed. `forward` is the same command
+        # object, so every argv `fp` accepted parses identically; rebuilding it
+        # instead would have to reproduce repeated --to/--port pairs exactly.
+        run_args = ["forward", *stamped_args[1:]] if stamped_args[:1] == ["fp"] else stamped_args
     name = spec.get("name")
     user_mode = bool(spec.get("user_mode"))
     stamped = {**spec, **extra_stamp, "version": __version__, "run_args": run_args}
@@ -1465,23 +1499,70 @@ def refresh_service(name: str, user_mode: bool) -> str:
     return "refreshed"
 
 
-def _resolve_label(label: str | None, agent_mode: bool, *, extra_hint: str = "") -> str:
-    """Resolve the label for uninstall/status/restart: --agent implies the agent label.
+def _label_from_service_name(target: str) -> tuple[str, str | None]:
+    """``(label, explicit name)`` for a NAME argument.
 
-    ``extra_hint`` names any other way out that the calling command offers, so the
-    error doesn't hide the flag that is usually the right answer.
+    NAME is normally the label (``ha``, ``agent``). ``hle daemon list`` prints
+    unit names, though, and people paste what they were shown — so a systemd
+    unit or launchd label is accepted too and read back to its label, with
+    the name kept so the exact file is the one acted on.
     """
+    for prefix, suffix in (("hle-", ".service"), (f"{_LAUNCHD_LABEL_PREFIX}.", ".plist")):
+        stem = target.removesuffix(suffix)
+        if stem.startswith(prefix) and (target.endswith(suffix) or prefix != "hle-"):
+            return stem[len(prefix) :], target
+    return target, None
+
+
+def _resolve_target(
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    *,
+    extra_hint: str = "",
+) -> tuple[str, str | None]:
+    """``(label, name)`` for delete/logs/status/restart/refresh.
+
+    NAME is the positional form; ``--label``, ``--agent`` and ``--name`` are
+    the old spellings, hidden but still read, because units, scripts and
+    support answers carry them. ``extra_hint`` names any other way out that the
+    calling command offers, so the error doesn't hide the flag that is usually
+    the right answer.
+    """
+    if target is not None:
+        from_target, target_name = _label_from_service_name(target)
+        if label is not None and label != from_target:
+            raise UsageError(f"NAME {target!r} and --label {label!r} disagree; pass one.")
+        if agent_mode and from_target != AGENT_LABEL:
+            raise UsageError(f"NAME {target!r} and --agent disagree; pass one.")
+        return from_target, name or target_name
     if label:
-        return label
+        return label, name
     if agent_mode:
-        return AGENT_LABEL
+        return AGENT_LABEL, name
     raise UsageError(
-        f"--label is required (or pass --agent for the agent service{extra_hint}).",
+        f"NAME is required: the service's label, e.g. `agent` or `ha`{extra_hint}.",
         hint="hle daemon list shows what is installed.",
     )
 
 
-@click.group()
+def _target_options(f: F) -> F:
+    """NAME, plus the flag spellings it replaced (hidden, still honoured)."""
+    f = click.option("--name", default=None, hidden=True, help="Explicit unit/plist name")(f)
+    f = click.option("--label", default=None, hidden=True, help="Service label")(f)
+    f = click.option(
+        "--agent",
+        "agent_mode",
+        is_flag=True,
+        default=False,
+        hidden=True,
+        help="Target the agent service",
+    )(f)
+    return click.argument("target", metavar="NAME", required=False)(f)
+
+
+@click.group(cls=AliasedGroup, hidden_aliases={"uninstall": "delete"})
 def service() -> None:
     """Install and manage background services (systemd/launchd/rc.d).
 
@@ -1490,7 +1571,7 @@ def service() -> None:
       hle daemon install tunnel ha http://localhost:8123
       hle daemon install agent
       hle daemon list
-      hle daemon logs --agent
+      hle daemon logs agent
     """
 
 
@@ -1649,7 +1730,7 @@ def install(
         console.print(
             f"[yellow]No agent token at {agent_config}.[/yellow] "
             "The service will start and immediately exit until you run "
-            "[cyan]hle agent enroll <token>[/cyan]."
+            "[cyan]hle auth login --agent-token <token>[/cyan]."
         )
 
     spec: dict[str, Any] = {
@@ -1751,30 +1832,37 @@ def install_forward(ctx: click.Context, /, agent_name: str, target: str, **kwarg
     ctx.invoke(install, fp_mode=True, agent_name=agent_name, fp_target=target, **kwargs)
 
 
-@service.command("uninstall")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@service.command("delete")
+@_target_options
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
 @click.option(
     "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
 )
 def uninstall(
-    agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    user_mode: bool,
+    system_mode: bool,
 ) -> None:
-    """Stop, disable, and remove a background service."""
+    """Stop, disable, and remove a background service.
+
+    \b
+    Examples:
+      hle daemon delete ha
+      hle daemon delete agent --user
+    """
     from hle_client.ops import daemon as ops_daemon
 
     _require_supported()
-    label = _resolve_label(label, agent_mode)
+    label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     asyncio.run(ops_daemon.uninstall(label, name=name, user_mode=user_mode))
 
 
 @service.command("logs")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
 @click.option(
     "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
@@ -1782,6 +1870,7 @@ def uninstall(
 @click.option("-n", "--lines", default=50, show_default=True, help="How many lines to show")
 @click.option("-f", "--follow", is_flag=True, default=False, help="Keep printing new lines")
 def logs(
+    target: str | None,
     agent_mode: bool,
     label: str | None,
     name: str | None,
@@ -1799,12 +1888,12 @@ def logs(
 
     \b
     Examples:
-      hle daemon logs --agent
-      hle daemon logs --label ha -n 200
-      hle daemon logs --agent -f
+      hle daemon logs agent
+      hle daemon logs ha -n 200
+      hle daemon logs agent -f
     """
     plat = _require_supported()
-    label = _resolve_label(label, agent_mode)
+    label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
 
     if plat == "linux":
@@ -1837,41 +1926,56 @@ def logs(
 
 
 @service.command("status")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
 @click.option(
     "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
 )
 def status(
-    agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    user_mode: bool,
+    system_mode: bool,
 ) -> None:
-    """Show status for a background service."""
+    """Show status for a background service.
+
+    \b
+    Examples:
+      hle daemon status agent
+      hle daemon status ha --user
+    """
     from hle_client.ops import daemon as ops_daemon
 
     _require_supported()
-    label = _resolve_label(label, agent_mode)
+    label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     asyncio.run(ops_daemon.status(label, name=name, user_mode=user_mode))
 
     # A service manager reports on a process, not on whether it works. An agent
     # with no token exits immediately and is restarted forever, so "running as
     # pid 87998" is true, reassuring, and useless. Say the part it cannot know.
-    if agent_mode and config.load_credentials().agent_token is None:
+    if label == AGENT_LABEL and config.load_credentials().agent_token is None:
         console.print(
             "\n[yellow]No agent token is configured[/yellow] — if the service is "
             "running it is restarting in a loop."
         )
-        console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
+        console.print(
+            "Fix with: [cyan]hle auth login --agent-token <token>[/cyan], then restart it."
+        )
 
 
 @service.command("restart")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--all", "restart_all", is_flag=True, default=False, help="Restart every hle service")
-def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: bool) -> None:
+def restart(
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    restart_all: bool,
+) -> None:
     """Restart a background service, or all of them with --all.
 
     Exists because there was no way to do this through the CLI: the docs told
@@ -1899,7 +2003,9 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
             raise HleError(f"Could not restart {', '.join(failed)}.")
         return
 
-    label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
+    label, name = _resolve_target(
+        target, agent_mode, label, name, extra_hint=", or --all for every service"
+    )
     svc = ops_daemon.service_name(label, name)
     if asyncio.run(ops_daemon.restart(svc)):
         console.print(f"[green]Restarted[/green] {svc}")
@@ -1908,11 +2014,15 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
 
 
 @service.command("refresh")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--all", "refresh_all", is_flag=True, default=False, help="Refresh every hle service")
-def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: bool) -> None:
+def refresh(
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    refresh_all: bool,
+) -> None:
     """Rebuild a service file against the installed client, then start it.
 
     For after an upgrade, or after anything that moved the client on disk. A
@@ -1952,7 +2062,9 @@ def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: 
             raise HleError(f"Could not refresh {', '.join(failed)}.")
         return
 
-    label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
+    label, name = _resolve_target(
+        target, agent_mode, label, name, extra_hint=", or --all for every service"
+    )
     svc = ops_daemon.service_name(label, name)
     unit_scope = installed_scope(svc)
     if unit_scope is None:
