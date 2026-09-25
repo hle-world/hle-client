@@ -14,29 +14,67 @@ is not modified either way and never imports textual — which is the point.
 `hle-client` has to stay small enough for a pfSense or OpenWrt box, and those
 machines want the tunnel, not a rendering library.
 
-## What it shows
+## What it does
 
-Three tables over the same data the CLI reads — there is no second copy of the
-API client, the systemd handling or the config lookup in here:
+Three tabs over the same service layer the CLI uses (`hle_client.ops`). There
+is no second copy of the API client, the systemd handling or the config lookup
+in here, and every edit shows the `hle …` command it stands for in the status
+bar, so anything done here can be scripted afterwards.
 
-| Tab | Contents |
-|---|---|
-| Tunnels | subdomain, live/idle, upstream service, auth mode |
-| Agents | name, online/offline, host |
-| Services | installed units, and which scope each is in |
+| Tab | Table | Detail |
+|---|---|---|
+| Tunnels | subdomain, live/idle, upstream service, auth mode | **Enter** opens the tunnel: public URL, state, and editing for its access rules, gate mode, PIN, basic auth and share links |
+| Agents | name, online/offline/disabled, endpoints, version, last seen | the highlighted agent's version, host, last seen, and whatever else the relay reports |
+| Daemons | installed services, scope, kind, state | **l** tails the log |
+
+The tunnel pane covers:
+
+| Section | Actions | Same as |
+|---|---|---|
+| Access rules | add `[provider:]email`, remove the selected rule | `hle tunnel access add/remove` |
+| Gate mode | SSO or public (asks first) | `hle tunnel auth-mode --set` |
+| PIN | set, remove (asks first) | `hle tunnel pin set/remove` |
+| Basic auth | set user and password, remove (asks first) | `hle tunnel basic-auth set/remove` |
+| Share links | create for 1h/24h/7d with a label, list, revoke | `hle tunnel share create/list/revoke` |
+
+A new share link's URL is shown once, and copied to the clipboard where the
+terminal allows it. The relay keeps only a prefix, so that is the only time the
+full link exists.
+
+On a terminal narrower than 120 columns the tunnel pane opens as its own
+screen instead of beside the table.
 
 ## Keys
 
-| Key | Action |
-|---|---|
-| `r` | Refresh now |
-| `o` | Open the selected tunnel in a browser |
-| `d` | Delete the selected tunnel (asks first) |
-| `s` | Restart the selected service |
-| `q` | Quit |
+| Key | Where | Action |
+|---|---|---|
+| `Enter` | Tunnels | Open the tunnel pane |
+| `o` | Tunnels | Open the tunnel in a browser |
+| `d` | Tunnels | Delete the tunnel record (asks first) |
+| `n` | Tunnels | Show the CLI command to create a tunnel |
+| `s` | Daemons | Restart the daemon (asks first) |
+| `l` | Daemons | Tail the daemon's log (last 200 lines, re-read every 2s) |
+| `r` | anywhere | Refresh now |
+| `Esc` | pane or screen | Close it |
+| `q` | anywhere | Quit |
 
-Deleting asks for confirmation. A dashboard makes a keystroke cheap, which is
-exactly why removing a tunnel and its access rules must not be one.
+Anything that deletes, restarts or opens a gate asks first. A dashboard makes
+a keystroke cheap, which is exactly why those must not be one.
+
+The cursor follows the row, not the position: after a refresh that reorders
+the list it is still on the tunnel, agent or daemon it was on.
+
+Errors never close the dashboard. A refused key says so and says what to run;
+"Could not reach the relay" means exactly that.
+
+## Still CLI-only
+
+- Creating a tunnel (`hle tunnel create`), webhooks and preflight.
+- Installing, uninstalling and refreshing daemons, and following a log live
+  (`hle daemon logs -f`).
+- Agent enrolment, `hle agent services`, forwards, `hle update`, `hle auth`.
+- The per-agent endpoint list, install method and platform: the relay's agent
+  list does not return them yet. The pane shows them the day it does.
 
 ## Options
 
