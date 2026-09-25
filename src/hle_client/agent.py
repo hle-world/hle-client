@@ -13,6 +13,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import platform as _platform
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +36,7 @@ from hle_common.agent_protocol import (
     AgentWelcome,
     EndpointSpec,
     EndpointStatus,
+    update_capability,
 )
 from hle_common.discovery import DiscoveryReport
 from hle_common.fp_protocol import ForwardRule, default_rules
@@ -61,6 +65,40 @@ agent_config_path = config.agent_config_path
 save_agent_token = config.save_agent_token
 load_agent_token = config.load_agent_token
 remove_agent_token = config.remove_agent_token
+
+
+def detect_service_manager(env: dict[str, str] | None = None) -> str | None:
+    """Which service manager started this process, from what it puts in the environment.
+
+    systemd sets ``INVOCATION_ID`` on every unit it starts; launchd sets
+    ``XPC_SERVICE_NAME`` (and ``LAUNCH_JOB`` on older releases). rc.d sets
+    nothing distinctive, so a pfSense agent reports None even when it is
+    supervised — the server treats None as "unknown", not "unsupervised".
+    """
+    if env is None:
+        env = dict(os.environ)
+    if env.get("INVOCATION_ID"):
+        return "systemd"
+    if env.get("XPC_SERVICE_NAME") or env.get("LAUNCH_JOB"):
+        return "launchd"
+    return None
+
+
+def detect_install_method() -> str | None:
+    """Classify this install for the hello, never raising.
+
+    The classifier lives in the update command; it is imported lazily so an
+    agent process does not pay for click at import time, and any failure
+    degrades to "unknown" rather than stopping the agent from connecting.
+    """
+    if os.path.exists("/.dockerenv"):
+        return "docker"
+    try:
+        from hle_client.update_cmd import detect_install_method as classify
+
+        return classify(sys.prefix, sys.executable)
+    except Exception:  # noqa: BLE001 — hello metadata is best-effort
+        return None
 
 
 def _fatal_agent_message(code: int | None, reason: str) -> str:
@@ -178,6 +216,13 @@ class AgentClient:
                     message = _fatal_agent_message(code, reason)
                     logger.error("%s", message)
                     self._fatal_error = message
+                elif not close_codes.should_reconnect(code):
+                    # HANDOVER: a successor of ours took the identity over, as
+                    # arranged. Not an error — no `_fatal_error`, so the caller
+                    # exits 0 — but reconnecting would take the endpoints back
+                    # off the process that is supposed to have them now.
+                    self._running = False
+                    logger.info("Relay handed this agent over to its successor; exiting")
                 wait = close_codes.retry_after_seconds(code)
                 if wait is not None:
                     logger.warning("Relay asked this agent to slow down (code %s)", code)
@@ -230,12 +275,23 @@ class AgentClient:
             # available; discovery depends on what's detectable here.
             capabilities = ["firepuncher"]
             capabilities += [f"discovery:{p.name}" for p in active_providers()]
+            # `update:<method>` is advertised only for installs the agent can
+            # stage a new version into itself. The method is sent regardless so
+            # the dashboard can tell a brew user what to run.
+            install_method = detect_install_method()
+            update_cap = update_capability(install_method)
+            if update_cap is not None:
+                capabilities.append(update_cap)
             hello = AgentHello(
                 token=self._token,
                 agent_version=__version__,
                 capabilities=capabilities,
                 instance_id=instance_id(),
                 hostname=hostname(),
+                install_method=install_method,
+                platform=_platform.system().lower() or None,
+                python_version=_platform.python_version(),
+                service_manager=detect_service_manager(),
             )
             await ws.send(hello.model_dump_json())
 
@@ -306,6 +362,17 @@ class AgentClient:
                 self._spawn_preflight(msg, ws)
         elif mtype == "pong":
             pass
+        elif isinstance(mtype, str) and mtype.startswith("update_"):
+            # Protocol 1.2 remote update. This client speaks the models but not
+            # yet the procedure, so the frame is dropped — at INFO, not debug,
+            # because the operator pressed a button on the dashboard and this
+            # log line is the only explanation they will get for why nothing
+            # happened.
+            logger.info(
+                "Ignoring %s from the relay: this client (%s) cannot update itself yet",
+                mtype,
+                __version__,
+            )
         else:
             logger.debug("Unhandled agent control message: %s", mtype)
 
