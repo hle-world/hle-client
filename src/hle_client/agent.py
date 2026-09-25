@@ -30,6 +30,7 @@ from hle_client import __version__, agent_update, config
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.identity import hostname, instance_id
+from hle_client.notices import emit_event
 from hle_client.tunnel import Tunnel, TunnelConfig, to_tunnel_config
 from hle_common import close_codes
 from hle_common.agent_protocol import (
@@ -242,6 +243,7 @@ class AgentClient:
                 raise
             except websockets.exceptions.ConnectionClosed as exc:
                 code = exc.rcvd.code if exc.rcvd is not None else None
+                was_live = self._registered
                 if close_codes.is_fatal(code):
                     # Reconnecting after one of these cannot help and can do
                     # real harm: two agents on one token that both keep
@@ -253,6 +255,7 @@ class AgentClient:
                     message = _fatal_agent_message(code, reason)
                     logger.error("%s", message)
                     self._fatal_error = message
+                    emit_event("fatal", level="error", source="agent", message=message, code=code)
                     if self._boot.kind == "watch":
                         # The updated version was turned away for good. Waiting
                         # out the timer would only delay the same rollback.
@@ -270,8 +273,11 @@ class AgentClient:
                     delay = max(delay, wait)
                     self._registered = False
                 logger.warning("Agent control connection lost: %s", exc)
+                if self._fatal_error is None:
+                    self._emit_lost(was_live, str(exc), code)
             except Exception as exc:  # noqa: BLE001 — control conn is best-effort
                 logger.warning("Agent control connection lost: %s", exc)
+                self._emit_lost(self._registered, str(exc), None)
             finally:
                 # Reset on any session that got as far as registering, not just
                 # one that ended cleanly. Relay restarts end the session with an
@@ -306,6 +312,14 @@ class AgentClient:
             delay = min(delay * 2, self._max_reconnect_delay)
         self._disarm_watchdog()
 
+    @staticmethod
+    def _emit_lost(was_live: bool, message: str, code: int | None) -> None:
+        """``disconnected`` for a control session that worked, ``error`` for an attempt."""
+        if was_live:
+            emit_event("disconnected", level="warning", source="agent", message=message, code=code)
+        else:
+            emit_event("error", level="error", source="agent", message=message, code=code)
+
     @property
     def fatal_error(self) -> str | None:
         """Why the relay stopped this agent for good, if it did."""
@@ -331,6 +345,7 @@ class AgentClient:
     async def _connect_once(self) -> None:
         logger.info("Connecting agent control to %s", self.control_uri)
         async with websockets.connect(self.control_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
+            emit_event("connected", source="agent", message=f"Connected to {self.control_uri}")
             # Advertise what this agent can do so the dashboard only offers
             # features the agent actually supports. Firepuncher is always
             # available; discovery depends on what's detectable here.
@@ -376,6 +391,12 @@ class AgentClient:
                 "Agent registered: public_id=%s endpoints=%d",
                 welcome.agent_public_id,
                 len(welcome.endpoints),
+            )
+            emit_event(
+                "registered",
+                level="success",
+                source="agent",
+                message=f"Agent registered with {len(welcome.endpoints)} endpoint(s)",
             )
             await self.reconcile(welcome.endpoints)
             # Report the inventory once on connect so the dashboard has
@@ -806,6 +827,7 @@ class AgentClient:
             reason = f"invalid endpoint: {exc}"
             if self._failed.get(spec.label) != reason:
                 logger.error("Endpoint %s not started: %s", spec.label, exc)
+                emit_event("error", level="error", label=spec.label, message=reason)
             self._failed[spec.label] = reason
             return
         self._failed.pop(spec.label, None)

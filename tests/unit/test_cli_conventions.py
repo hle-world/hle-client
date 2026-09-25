@@ -123,25 +123,28 @@ _HONOURS_ROOT_API_KEY: dict[str, tuple[list[str], str | None]] = {
     "hle status": (["status"], None),
     "hle agent list": (["agent", "list"], None),
     "hle tunnel access list": (["tunnel", "access", "list", "ha-x7k"], None),
-    "hle tunnel access add": (["tunnel", "access", "add", "ha-x7k", "friend@example.com"], None),
-    "hle tunnel access remove": (["tunnel", "access", "remove", "ha-x7k", "1"], None),
+    "hle tunnel access create": (
+        ["tunnel", "access", "create", "ha-x7k", "friend@example.com"],
+        None,
+    ),
+    "hle tunnel access delete": (["tunnel", "access", "delete", "ha-x7k", "1"], None),
     "hle tunnel access replace": (
         ["tunnel", "access", "replace", "ha-x7k", "friend@example.com"],
         None,
     ),
-    "hle tunnel auth-mode": (["tunnel", "auth-mode", "ha-x7k", "--set", "sso"], None),
-    "hle tunnel basic-auth status": (["tunnel", "basic-auth", "status", "ha-x7k"], None),
-    "hle tunnel basic-auth remove": (["tunnel", "basic-auth", "remove", "ha-x7k"], None),
+    "hle tunnel set": (["tunnel", "set", "ha-x7k", "--auth", "sso"], None),
+    "hle tunnel basic-auth get": (["tunnel", "basic-auth", "get", "ha-x7k"], None),
+    "hle tunnel basic-auth delete": (["tunnel", "basic-auth", "delete", "ha-x7k"], None),
     "hle tunnel basic-auth set": (
         ["tunnel", "basic-auth", "set", "ha-x7k"],
         "user\npassword123\npassword123\n",
     ),
-    "hle tunnel pin status": (["tunnel", "pin", "status", "ha-x7k"], None),
-    "hle tunnel pin remove": (["tunnel", "pin", "remove", "ha-x7k"], None),
+    "hle tunnel pin get": (["tunnel", "pin", "get", "ha-x7k"], None),
+    "hle tunnel pin delete": (["tunnel", "pin", "delete", "ha-x7k"], None),
     "hle tunnel pin set": (["tunnel", "pin", "set", "ha-x7k"], "1234\n1234\n"),
     "hle tunnel share create": (["tunnel", "share", "create", "ha-x7k"], None),
     "hle tunnel share list": (["tunnel", "share", "list", "ha-x7k"], None),
-    "hle tunnel share revoke": (["tunnel", "share", "revoke", "ha-x7k", "1"], None),
+    "hle tunnel share delete": (["tunnel", "share", "delete", "ha-x7k", "1"], None),
 }
 
 # `expose` / `tunnel create`, `webhook` (root and `tunnel webhook`) and
@@ -183,6 +186,31 @@ def test_leaf_api_key_still_wins_over_root(path: str, recorder: type[_RecordingA
     )
     assert recorder.captured, f"{path} never constructed an ApiClient ({result.output})"
     assert recorder.captured[0] == leaf_key
+
+
+# The spellings the verbs above replaced (plan §2.5). They resolve to the same
+# command objects through hidden aliases, so the root key must reach them too.
+_OLD_SPELLINGS: dict[str, tuple[list[str], str | None]] = {
+    "access add": (["tunnel", "access", "add", "ha-x7k", "friend@example.com"], None),
+    "access remove": (["tunnel", "access", "remove", "ha-x7k", "1"], None),
+    "auth-mode --set": (["tunnel", "auth-mode", "ha-x7k", "--set", "sso"], None),
+    "basic-auth status": (["tunnel", "basic-auth", "status", "ha-x7k"], None),
+    "basic-auth remove": (["tunnel", "basic-auth", "remove", "ha-x7k"], None),
+    "pin status": (["tunnel", "pin", "status", "ha-x7k"], None),
+    "pin remove": (["tunnel", "pin", "remove", "ha-x7k"], None),
+    "share revoke": (["tunnel", "share", "revoke", "ha-x7k", "1"], None),
+    "share create --label": (["tunnel", "share", "create", "ha-x7k", "--label", "x"], None),
+}
+
+
+@pytest.mark.parametrize("path", sorted(_OLD_SPELLINGS), ids=sorted(_OLD_SPELLINGS))
+def test_root_api_key_reaches_old_spellings(path: str, recorder: type[_RecordingApiClient]) -> None:
+    argv, stdin = _OLD_SPELLINGS[path]
+    result = CliRunner().invoke(main, ["--api-key", _ROOT_KEY, *argv], input=stdin)
+    assert recorder.captured, f"{path} never constructed an ApiClient ({result.output})"
+    assert recorder.captured[0] == _ROOT_KEY
+    # Hidden aliases are quiet: only the four renamed top-level names print a note.
+    assert "note:" not in result.stderr
 
 
 _TUNNEL_BASED: dict[str, list[str]] = {

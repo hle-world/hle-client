@@ -144,7 +144,7 @@ class TestDeleteTunnel:
         result = await tunnels.delete_tunnel(a, "ha")
         assert isinstance(result, Conflict)
         assert "stop it" in result.reason
-        assert "hle daemon uninstall" in (result.hint or "")
+        assert "hle daemon delete" in (result.hint or "")
         assert not [c for c, _ in a.calls if c == "delete_tunnel_record"]
 
     async def test_force_sends_the_request_and_the_relay_decides(self):
