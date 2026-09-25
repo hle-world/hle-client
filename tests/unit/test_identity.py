@@ -176,6 +176,7 @@ class TestCloseCodes:
             close_codes.LABEL_IN_USE,
             close_codes.REPLACED,
             close_codes.DUPLICATE_INSTANCE,
+            close_codes.HANDOVER,
             close_codes.TOO_MANY_REGISTRATIONS,
             close_codes.IDLE_TIMEOUT,
         ]
@@ -191,6 +192,7 @@ class TestCloseCodes:
             close_codes.LABEL_IN_USE,
             close_codes.REPLACED,
             close_codes.DUPLICATE_INSTANCE,
+            close_codes.HANDOVER,
             close_codes.TOO_MANY_REGISTRATIONS,
             close_codes.IDLE_TIMEOUT,
         ):

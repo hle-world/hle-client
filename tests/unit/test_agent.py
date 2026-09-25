@@ -477,6 +477,12 @@ class TestFatalCloses:
         assert client.fatal_error is None
         assert slept and slept[0] >= 60.0
 
+    async def test_a_handover_stops_quietly_without_reconnecting(self, monkeypatch):
+        """4011: our successor took over. Not an error, but retrying would undo it."""
+        client, slept = await self._run_until_stopped(monkeypatch, self._closed(4011, "handover"))
+        assert slept == []
+        assert client.fatal_error is None
+
     async def test_the_hello_says_which_process_it_comes_from(self):
         """Without this the relay cannot tell a reconnect from a second machine."""
         from hle_client.agent import instance_id
@@ -488,3 +494,158 @@ class TestFatalCloses:
         )
         assert hello.instance_id == instance_id()
         assert hello.hostname == "mimos"
+
+
+class _FakeWs:
+    """A control connection that answers the hello with a welcome, then ends."""
+
+    def __init__(self, welcome: str) -> None:
+        self.sent: list[str] = []
+        self._welcome = welcome
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(raw)
+
+    async def recv(self) -> str:
+        return self._welcome
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        raise StopAsyncIteration
+
+    async def __aenter__(self) -> _FakeWs:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class TestHelloContent:
+    """Protocol 1.2: the hello describes the install so the relay knows what it can ask of it."""
+
+    _WELCOME = json.dumps(
+        {"type": "welcome", "agent_public_id": "pub-1", "base_domain": "hle.world"}
+    )
+
+    async def _hello_sent(self, monkeypatch) -> dict:
+        import hle_client.agent as agent_mod
+
+        ws = _FakeWs(self._WELCOME)
+        monkeypatch.setattr(agent_mod.websockets, "connect", lambda *a, **kw: ws)
+        monkeypatch.setattr(agent_mod, "active_providers", list)
+        client, _ = _make_client()
+
+        async def no_discovery(_ws) -> None:
+            return None
+
+        monkeypatch.setattr(client, "_report_discovery", no_discovery)
+        await client._connect_once()
+        return json.loads(ws.sent[0])
+
+    async def test_a_self_updatable_install_advertises_the_capability(self, monkeypatch):
+        import hle_client.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "detect_install_method", lambda: "venv")
+        monkeypatch.setenv("INVOCATION_ID", "abc")
+        hello = await self._hello_sent(monkeypatch)
+        assert hello["type"] == "hello"
+        assert "update:venv" in hello["capabilities"]
+        assert "firepuncher" in hello["capabilities"]
+        assert hello["install_method"] == "venv"
+        assert hello["service_manager"] == "systemd"
+        assert hello["platform"] in ("linux", "darwin", "freebsd", "windows")
+        assert hello["python_version"].count(".") == 2
+        assert hello["successor_of"] is None
+        assert hello["successor_nonce"] is None
+
+    async def test_a_brew_install_says_so_but_claims_no_capability(self, monkeypatch):
+        import hle_client.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "detect_install_method", lambda: "brew")
+        hello = await self._hello_sent(monkeypatch)
+        assert hello["install_method"] == "brew"
+        assert not [c for c in hello["capabilities"] if c.startswith("update:")]
+
+    async def test_an_unknown_install_sends_null_not_a_guess(self, monkeypatch):
+        import hle_client.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "detect_install_method", lambda: None)
+        hello = await self._hello_sent(monkeypatch)
+        assert hello["install_method"] is None
+        assert not [c for c in hello["capabilities"] if c.startswith("update:")]
+
+
+class TestServiceManagerDetection:
+    def test_systemd(self):
+        from hle_client.agent import detect_service_manager
+
+        assert detect_service_manager({"INVOCATION_ID": "x"}) == "systemd"
+
+    @pytest.mark.parametrize("env", [{"XPC_SERVICE_NAME": "world.hle.agent"}, {"LAUNCH_JOB": "1"}])
+    def test_launchd(self, env):
+        from hle_client.agent import detect_service_manager
+
+        assert detect_service_manager(env) == "launchd"
+
+    def test_nothing_recognisable_is_none(self):
+        from hle_client.agent import detect_service_manager
+
+        assert detect_service_manager({"HOME": "/root"}) is None
+        assert detect_service_manager({"INVOCATION_ID": ""}) is None
+
+
+class TestInstallMethodDetection:
+    def test_docker_wins_over_the_venv_classifier(self, monkeypatch):
+        import hle_client.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod.os.path, "exists", lambda p: p == "/.dockerenv")
+        assert agent_mod.detect_install_method() == "docker"
+
+    def test_a_crashing_classifier_degrades_to_unknown(self, monkeypatch):
+        import hle_client.agent as agent_mod
+        from hle_client import update_cmd
+
+        monkeypatch.setattr(agent_mod.os.path, "exists", lambda p: False)
+
+        def boom(*a, **kw):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(update_cmd, "detect_install_method", boom)
+        assert agent_mod.detect_install_method() is None
+
+    def test_uses_the_cli_classifier_on_the_running_interpreter(self, monkeypatch):
+        import hle_client.agent as agent_mod
+        from hle_client import update_cmd
+
+        monkeypatch.setattr(agent_mod.os.path, "exists", lambda p: False)
+        seen: list[tuple[str, str]] = []
+
+        def classify(prefix, executable, **kw):
+            seen.append((prefix, executable))
+            return update_cmd.PIPX
+
+        monkeypatch.setattr(update_cmd, "detect_install_method", classify)
+        assert agent_mod.detect_install_method() == "pipx"
+        assert seen == [(agent_mod.sys.prefix, agent_mod.sys.executable)]
+
+
+class TestUpdateFramesOnA12Client:
+    """The models exist but the procedure does not yet: say so where the operator looks."""
+
+    @pytest.mark.parametrize("mtype", ["update_request", "update_ack", "update_frobnicate"])
+    async def test_update_frames_are_logged_at_info(self, mtype, caplog):
+        client, _ = _make_client()
+        with caplog.at_level("INFO", logger="hle_client.agent"):
+            await client._handle_message(json.dumps({"type": mtype, "request_id": "r"}))
+        assert any(
+            r.levelname == "INFO" and mtype in r.getMessage() and "cannot update" in r.getMessage()
+            for r in caplog.records
+        )
+
+    async def test_other_unknown_frames_stay_at_debug(self, caplog):
+        client, _ = _make_client()
+        with caplog.at_level("DEBUG", logger="hle_client.agent"):
+            await client._handle_message(json.dumps({"type": "something_else"}))
+        assert all(r.levelname == "DEBUG" for r in caplog.records)
