@@ -116,6 +116,7 @@ def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list
     if params.pop("api_key", None):
         return None
     allow = [str(a) for a in params.pop("allow", None) or ()]
+    params.pop("events", None)  # how the process reports, not part of the tunnel
     if command is tunnel_create:
         first, second = params.pop("first"), params.pop("second")
         url, label = (second, first) if second is not None else (first, None)

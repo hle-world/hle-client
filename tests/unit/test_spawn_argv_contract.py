@@ -88,6 +88,7 @@ def _spec_from_params(params: dict[str, Any]) -> TunnelSpec:
     params = dict(params)
     params.pop("api_key", None)
     params.pop("allow", None)
+    params.pop("events", None)
     return spec_from_params(
         service_url=params.pop("service"), label=params.pop("service_label"), **params
     )

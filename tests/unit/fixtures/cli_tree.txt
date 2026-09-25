@@ -22,6 +22,7 @@ hle agent run  [command]  hidden=False  help='Run the agent: connect, fetch endp
     option   --token                      name=token type=text required=False multiple=False nargs=1 flag=False envvar=HLE_AGENT_TOKEN default_set=False hidden=False
     option   --relay-host                 name=relay_host type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --relay-port                 name=relay_port type=integer required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent services  [command]  hidden=False  help='List services this machine can see and could expose.'
     option   --provider                   name=provider type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
@@ -172,6 +173,7 @@ hle expose  [command]  hidden=True  help='Expose a local service to the internet
     option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle forward  [command]  hidden=False  help='Forward TCP ports from a remote agent to this machine.'
     option   --agent                      name=agent type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
@@ -246,6 +248,7 @@ hle tunnel create  [command]  hidden=False  help='Expose a local service to the 
     option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel delete  [command]  hidden=False  help="Delete a tunnel's record."
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -312,6 +315,7 @@ hle tunnel webhook  [command]  hidden=False  help='Forward incoming webhooks to 
     option   --label                      name=service_label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle update  [command]  hidden=False  help='Update the HLE client to the latest version (any install method).'
     option   --check                      name=check type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
@@ -326,6 +330,7 @@ hle webhook  [command]  hidden=True  help='Forward incoming webhooks to a local 
     option   --label                      name=service_label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 ALIASES
   hle : config -> tunnel

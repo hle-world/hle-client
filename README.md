@@ -297,9 +297,16 @@ hle -o json status
 ### Server notices
 
 While a tunnel is connected, the relay can push informational messages that the
-client renders to stderr (e.g. `✓ Auto-protect added you@example.com via Google
-SSO`). Wording is server-controlled so new notices do not require a client
-release.
+client prints (e.g. `✓ Auto-protect added you@example.com via Google SSO`).
+Wording is server-controlled so new notices do not require a client release.
+
+### Structured events for supervisors
+
+A program that runs `hle` as a child process should not parse that text. Pass
+`--events jsonl` to `hle tunnel create`, `hle tunnel webhook` or `hle agent run`.
+stdout then carries one JSON object per line: `connected`, `registered`,
+`disconnected`, `notice`, `error` and `fatal`. Everything meant for a person
+goes to stderr. The schema is in [docs/events.md](docs/events.md).
 
 ### Global Options
 
