@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hle-tui"
-version = "2609.9"
+version = "2609.10"
 description = "Interactive terminal dashboard for HLE — an hle-client plugin"
 readme = "README.md"
 requires-python = ">=3.11"
