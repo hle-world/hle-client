@@ -1,5 +1,32 @@
 # Changelog
 
+## v2609.10 — 2026-09-25
+
+### Added
+
+- **`--events jsonl` on tunnel/webhook/agent commands** for supervisors.
+  Outputs one JSON object per line on stdout (human output goes to stderr).
+  Events include `connected`, `registered`, `disconnected`, `notice`, `error`
+  and `fatal`, with timestamp, source (tunnel/agent), label, code and message.
+  Schema in `docs/events.md`.
+
+### Changed
+
+- **One verb set across every noun: `list / get / create / set / delete`.** All
+  old spellings (`add`, `remove`, `status`, etc.) still work but are hidden
+  from help, silent and no longer suggested. Daemon commands now accept
+  positional names like `hle daemon status agent` instead of `--label agent`.
+  `agent enroll` → `auth login --agent-token`.
+- **New CLI tree with canonical commands visible, old spellings hidden.**
+  `tunnel set LABEL --auth MODE` replaces the old `--auth-mode`. `tunnel
+  access create|delete` replace `add|remove`. `tunnel pin/basic-auth get|delete`
+  replace `status|remove`. `tunnel share delete` replaces `revoke`. `daemon
+  delete` replaces `uninstall`.
+- **Daemon units emit the new grammar when refreshed.** `hle daemon refresh`
+  rewrites systemd/launchd/rc.d units to use `tunnel create` instead of
+  `expose` and `forward` instead of `fp`. Old units still work; refresh
+  updates them automatically.
+
 ## v2609.9 — 2026-09-25
 
 ### Added
