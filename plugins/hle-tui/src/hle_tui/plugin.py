@@ -27,13 +27,15 @@ import click
     help="How often to re-poll the relay. 0 disables polling.",
 )
 def tui(api_key: str | None, refresh: int) -> None:
-    """Interactive dashboard for tunnels, agents and services.
+    """Interactive dashboard for tunnels, agents and daemons.
 
     \b
     Keys:
-      r  refresh now        d  delete the selected tunnel
-      o  open in a browser  s  restart the selected service
-      q  quit
+      enter  tunnel detail: access rules, gate mode, PIN, basic auth, share links
+      r      refresh now          o  open the tunnel in a browser
+      d      delete the tunnel    n  how to create one (CLI)
+      s      restart the daemon   l  tail the daemon's log
+      esc    close a pane         q  quit
     """
     try:
         from hle_tui.app import HleApp

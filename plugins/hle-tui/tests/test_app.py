@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
+from hle_client.errors import AuthError, UnreachableError
 from hle_client.ops.models import Agent, Daemon, Tunnel
 
 from hle_tui import data
 from hle_tui.app import HleApp
 
-# Only the app tests are async; the row-shaping ones are plain functions.
-pytestmark = pytest.mark.asyncio
+# The async tests run under asyncio_mode = "auto" (pyproject.toml); marking the
+# module asyncio also marked the plain row-shaping functions, and warned.
 
 SNAPSHOT = data.Snapshot(
     tunnels=[
@@ -75,11 +75,25 @@ class TestItShowsWhatItRead:
 
     async def test_an_unreachable_relay_is_not_shown_as_an_empty_list(self):
         """ "No tunnels" and "could not ask" look identical in a table."""
-        with patch.object(data, "collect", _collect(data.Snapshot(tunnels=None))):
+        snapshot = data.Snapshot(tunnels=None, tunnels_error=UnreachableError("ConnectError"))
+        with patch.object(data, "collect", _collect(snapshot)):
             app = HleApp(refresh_seconds=0)
             async with app.run_test() as pilot:
                 await pilot.pause()
                 assert "Could not reach" in app.last_status
+
+    async def test_a_refused_key_is_not_called_unreachable(self):
+        """A 401 used to read "Could not reach the relay" — advice that cannot help."""
+        snapshot = data.Snapshot(
+            tunnels=None, tunnels_error=AuthError("Invalid or missing API key.", status=401)
+        )
+        with patch.object(data, "collect", _collect(snapshot)):
+            app = HleApp(refresh_seconds=0)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert "Could not reach" not in app.last_status
+                assert "refused the API key" in app.last_status
+                assert "hle auth login" in app.last_status
 
     async def test_a_missing_key_says_what_to_run(self):
         snapshot = data.Snapshot(error="No API key. Run: hle auth login")
@@ -129,7 +143,7 @@ class TestDestructiveActionsAsk:
         delete.assert_not_called()
 
     async def test_confirming_deletes_the_selected_tunnel(self):
-        async def _deleted(subdomain, _key=None):
+        async def _deleted(subdomain, _key=None, **_kwargs):
             return f"Deleted {subdomain}."
 
         with (
