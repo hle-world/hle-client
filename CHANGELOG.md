@@ -2,7 +2,44 @@
 
 ## v2609.9 — 2026-09-25
 
-<!-- TODO: Fill in release notes before merging -->
+### Added
+
+- **The agent can update itself when the relay asks.** Stage A: the agent
+  installs a new version into a versioned layout, flips one symlink, and
+  restarts through its service manager. The new process proves itself within
+  a timeout or the old version rolls back automatically. Supported on
+  installer venvs, pipx and uv; Homebrew, Docker, k8s and the HA addon use
+  their usual update paths. `hle update` uses the same staged mechanism.
+- **`--response-timeout SECONDS` on every tunnel command.** Set how long the
+  relay waits for your service to respond (1–1200 seconds; relay default 30).
+- **`--upstream-basic-auth` can now be daemonised.** When stored in a daemon
+  unit, it lives in the environment (not argv) with the unit file mode 0600
+  for safety.
+- **hle-tui: tunnel detail pane.** Enter opens a right-hand pane with the
+  public URL, state and gate; edit access rules, PIN, basic-auth and
+  share-links in place; tail daemon logs; view agent details. Every
+  destructive action asks first. The status bar shows the equivalent
+  `hle` command.
+
+### Changed
+
+- **One tunnel option set shared by expose, tunnel create and daemon install.**
+  Help text is now consistent across all four (using expose's wording). The
+  CLI tree was regenerated; options now appear in TunnelSpec field order.
+- **Dashboard-managed agent endpoints accept every tunnel option** (protocol 1.3).
+  Endpoints with specs the agent cannot map are reported as disconnected with
+  the reason, not silently dropped.
+- **Agent units now use `Restart=always`** so systemd keeps them running.
+- **Fresh installs use a versioned layout** under `~/.local/share/hle` with
+  a `current` symlink (existing installs migrate on their first relay update).
+
+### Fixed
+
+- **`daemon refresh` moves `--upstream-basic-auth` out of argv** into the
+  environment for units created before this release.
+- **An endpoint the agent cannot start** is now reported as disconnected with
+  the reason, instead of vanishing from status.
+- **Ctrl-C during a rollback** no longer aborts it.
 
 ## v2609.8 — 2026-09-25
 
