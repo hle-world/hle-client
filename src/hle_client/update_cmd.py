@@ -178,6 +178,56 @@ def update(ctx: click.Context, check: bool, target_version: str | None, yes: boo
     if not yes:
         confirm_or_abort(ctx, f"Upgrade {_PACKAGE} to {target_desc}?", default=False)
 
+    home = _versioned_home(method)
+    if home is not None:
+        new_version: str | None = _versioned_update(home, target_version or latest)
+    else:
+        new_version = _in_place_update(method, target_version, latest)
+
+    _restart_services(ctx, yes=yes, home=home, new_version=new_version)
+
+
+def _versioned_home(method: str) -> Path | None:
+    """The installer's versioned layout, when this client runs from it."""
+    if method != VENV:
+        return None
+    from hle_client.agent_update import layout_home
+
+    return layout_home()
+
+
+def _versioned_update(home: Path, version: str | None) -> str:
+    """Install *version* side by side and repoint ``current`` at it.
+
+    The running venv is never touched, so this process keeps its own code
+    (no half-old, half-new lazy imports) and ``current`` moves in one rename.
+    """
+    from hle_client.agent_update import UpdateError, VersionedUpdater, current_version
+
+    if not version:
+        raise HleError(
+            "Could not tell which version to install.",
+            hint="PyPI was unreachable. Name one: hle update --version <version>",
+        )
+    if current_version(home) == version:
+        console.print(f"[green]{version} is already current.[/green]")
+        return version
+    updater = VersionedUpdater(home)
+    try:
+        console.print(f"[dim]Installing {_PACKAGE}=={version} into {updater.version_dir(version)}")
+        updater.stage(version)
+        updater.verify(version)
+        updater.swap(version, from_version=__version__)
+    except UpdateError as exc:
+        raise HleError(
+            f"Update to {version} failed; {__version__} is still current.", hint=str(exc)
+        ) from None
+    console.print(f"[green]Updated to {version}.[/green] {home / 'current'} now points at it.")
+    return version
+
+
+def _in_place_update(method: str, target_version: str | None, latest: str | None) -> str | None:
+    """Upgrade the environment this client runs from (pipx, uv, a plain venv)."""
     cmd = build_upgrade_command(method, sys.executable, version=target_version)
     console.print(f"[dim]$ {' '.join(cmd)}[/dim]")
     try:
@@ -237,7 +287,25 @@ def update(ctx: click.Context, check: bool, target_version: str | None, yes: boo
         )
     else:
         console.print(f"[green]Updated to {new_version}.[/green]")
+    return new_version
 
+
+def _agent_services(services: list[tuple[str, bool]]) -> bool:
+    from hle_client.service_cmd import service_spec
+
+    for svc, user_mode in services:
+        try:
+            spec = service_spec(svc, user_mode)
+        except Exception:
+            continue
+        if spec and [str(a) for a in spec.get("run_args", [])][:2] == ["agent", "run"]:
+            return True
+    return False
+
+
+def _restart_services(
+    ctx: click.Context, *, yes: bool, home: Path | None, new_version: str | None
+) -> None:
     # A service started before the upgrade is still running the old code, and
     # nothing about it looks wrong — `hle --version` reports the new one while
     # the process serving traffic is the previous release. Telling people to
@@ -262,6 +330,23 @@ def update(ctx: click.Context, check: bool, target_version: str | None, yes: boo
         console.print("[yellow]Left running the old version.[/yellow] Restart later with:")
         console.print("  hle daemon restart --all")
         return
+
+    if (
+        home is not None
+        and new_version
+        and new_version != __version__
+        and _agent_services(services)
+    ):
+        # The agent service then starts under the same watchdog a dashboard
+        # update gets: not healthy in time means `current` goes back. The
+        # result is logged, not sent — no server is waiting on a local update.
+        import time
+
+        from hle_client.agent_update import LOCAL_REQUEST_ID, UpdateState, write_update_state
+
+        write_update_state(
+            home, UpdateState(LOCAL_REQUEST_ID, __version__, new_version, time.time())
+        )
 
     failed = []
     needs_root = False

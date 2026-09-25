@@ -238,23 +238,79 @@ install_with_uv() {
     fi
 }
 
+# Latest hle-client on PyPI, or nothing if the index can't be reached directly.
+pypi_latest() {
+    "$1" -c 'import json, urllib.request
+print(json.load(urllib.request.urlopen("https://pypi.org/pypi/hle-client/json", timeout=15))["info"]["version"])' 2>/dev/null
+}
+
+# Versioned layout, so the agent can update itself and roll back:
+#
+#   $HLE_HOME/versions/<v>/   one venv per version
+#   $HLE_HOME/current         -> versions/<v>, what ~/.local/bin/hle and
+#                                every service unit run
+#   $HLE_HOME/previous        the version current pointed at before
+#
+# An install from before this layout (a flat $HLE_HOME/venv) is left where it
+# is: a running agent may still be executing from it. The services are
+# repointed at current by refresh_existing_services below; the old venv can be
+# deleted by hand once nothing runs from it.
 install_with_venv() {
     PYTHON="$1"
-    VENV_DIR="$HOME/.local/share/hle/venv"
+    HLE_HOME="${HLE_HOME:-$HOME/.local/share/hle}"
+    VERSIONS_DIR="$HLE_HOME/versions"
+    mkdir -p "$VERSIONS_DIR"
 
-    info "Installing in isolated venv at $VENV_DIR..."
+    # The venv has to be built at its final path (venvs don't survive a move),
+    # so the version is needed up front.
+    TARGET_VERSION="$VERSION"
+    if [ -z "$TARGET_VERSION" ]; then
+        TARGET_VERSION=$(pypi_latest "$PYTHON") || TARGET_VERSION=""
+    fi
+    if [ -z "$TARGET_VERSION" ]; then
+        # pypi.org itself is unreachable, but pip may still have an index (a
+        # mirror in pip.conf). Let pip choose, then build at that version.
+        PROBE_DIR="$VERSIONS_DIR/.probe"
+        rm -rf "$PROBE_DIR"
+        "$PYTHON" -m venv "$PROBE_DIR"
+        "$PROBE_DIR/bin/pip" install --quiet "$INSTALL_SPEC"
+        TARGET_VERSION=$("$PROBE_DIR/bin/python" -c "import hle_client; print(hle_client.__version__)")
+        rm -rf "$PROBE_DIR"
+    fi
+    VERSION="$TARGET_VERSION"
+    VENV_DIR="$VERSIONS_DIR/$TARGET_VERSION"
+
+    info "Installing hle-client==$TARGET_VERSION in isolated venv at $VENV_DIR..."
     rm -rf "$VENV_DIR"
     "$PYTHON" -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-    "$VENV_DIR/bin/pip" install --quiet "$INSTALL_SPEC"
+    "$VENV_DIR/bin/pip" install --quiet "${PACKAGE}==${TARGET_VERSION}"
 
-    # Verify before symlinking
+    # Verify before pointing anything at it
     verify_install "$VENV_DIR/bin/python"
+
+    # Remember what current pointed at, then repoint it in one rename.
+    if [ -L "$HLE_HOME/current" ]; then
+        PREV_VERSION=$(basename "$(readlink "$HLE_HOME/current")")
+        if [ "$PREV_VERSION" != "$TARGET_VERSION" ]; then
+            printf '%s\n' "$PREV_VERSION" > "$HLE_HOME/previous"
+        fi
+    fi
+    rm -f "$HLE_HOME/current.tmp"
+    ln -s "versions/$TARGET_VERSION" "$HLE_HOME/current.tmp"
+    # mv can't replace a symlink to a directory portably (GNU -T vs BSD -h).
+    "$PYTHON" -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' \
+        "$HLE_HOME/current.tmp" "$HLE_HOME/current"
+
+    if [ -d "$HLE_HOME/venv" ]; then
+        info "Left the previous install at $HLE_HOME/venv in place."
+        info "Delete it once no service runs from it (hle daemon list)."
+    fi
 
     # Symlink the hle binary
     mkdir -p "$HOME/.local/bin"
-    ln -sf "$VENV_DIR/bin/hle" "$HOME/.local/bin/hle"
-    link_into_system_path "$VENV_DIR/bin/hle"
+    ln -sfn "$HLE_HOME/current/bin/hle" "$HOME/.local/bin/hle"
+    link_into_system_path "$HLE_HOME/current/bin/hle"
     ensure_local_bin
 }
 
