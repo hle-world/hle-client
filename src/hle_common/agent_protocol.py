@@ -17,6 +17,7 @@ from typing import Literal
 
 # Runtime import, not just typing: pydantic resolves this to build the model.
 from hle_common.fp_protocol import ForwardRule  # noqa: TC001
+from hle_common.tunnel_spec import TunnelSpec
 from hle_common.wire import WireModel
 
 # 1.1 adds firepuncher: `forward_rules` on welcome/state_sync, and `fp_*` frames
@@ -25,7 +26,10 @@ from hle_common.wire import WireModel
 # (so the server knows which agents *can* update), the `successor_*` handover
 # fields, and close code 4011 HANDOVER. Everything is optional: a 1.1 peer sees
 # fields it ignores and message types it does not handle, nothing it rejects.
-AGENT_PROTOCOL_VERSION = "1.2"
+# 1.3 makes EndpointSpec the full TunnelSpec (verify_ssl, forward_host,
+# upstream_basic_auth, apex, options, response_timeout, managed_by). All new
+# fields default to null, so 1.2 peers see only keys they ignore.
+AGENT_PROTOCOL_VERSION = "1.3"
 
 # Install methods whose venv the agent owns outright and can stage a new version
 # into. Everything else (brew keg, docker image, system pip, PEP 668 interpreter)
@@ -67,26 +71,33 @@ class AgentMsgType(StrEnum):
 
 
 @dataclass(kw_only=True)
-class EndpointSpec(WireModel):
-    """One endpoint the agent should run."""
-
+class _EndpointIdentity:
+    # A base of its own so that dataclass field ordering puts `id` first, where
+    # it has always been on the wire: fields are collected base-first, and this
+    # base sits after TunnelSpec in EndpointSpec's MRO.
     id: int
-    label: str
-    service_url: str
-    zone: str | None = None  # custom-zone domain, or None for the base domain
-    auth_mode: str = "sso"
-    webhook_path: str | None = None
-    websocket_enabled: bool = True
 
-    def reconcile_key(self) -> tuple[str, str | None, str, str | None, bool]:
-        """Identity used to detect when a running tunnel must be restarted."""
-        return (
-            self.service_url,
-            self.zone,
-            self.auth_mode,
-            self.webhook_path,
-            self.websocket_enabled,
-        )
+
+@dataclass(kw_only=True, repr=False)
+class EndpointSpec(TunnelSpec, _EndpointIdentity):
+    """One endpoint the agent should run: a full ``TunnelSpec`` plus its id.
+
+    Up to 1.2 this carried five tunnel fields, so a dashboard endpoint could not
+    set verify-ssl, forward-host, upstream basic auth, apex, options or a
+    response timeout. 1.3 makes it the whole spec. The 1.2 fields keep their
+    names, order and defaults; the new ones default to None, so a 1.2 server
+    still produces an EndpointSpec a 1.3 agent reads, and a 1.2 agent reading
+    a 1.3 one simply ignores the keys it does not know.
+
+    ``label`` and ``service_url`` stay required here, as they always were on
+    the wire; ``reconcile_key()`` comes from ``TunnelSpec`` and covers every
+    field, so a dashboard edit of any of them restarts that endpoint.
+    """
+
+    # `field()` with no default: a bare annotation would inherit the
+    # TunnelSpec class attribute as its default and quietly make them optional.
+    label: str = field()
+    service_url: str = field()
 
 
 @dataclass(kw_only=True)
