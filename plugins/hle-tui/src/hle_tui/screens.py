@@ -463,6 +463,16 @@ class TunnelPane(VerticalScroll):
             say(self.app, "No share link selected.")
             return
         link_id = link.id
+        name = f"{link.label!r}" if link.label else f"#{link_id}"
+        expiry = f" (expires {link.expires_at})" if link.expires_at else ""
+        # Irreversible: a revoked link cannot be revived, and whoever holds
+        # it needs a new one sent to them.
+        if not await self._confirm(
+            f"Revoke share link {name}{expiry} on {sub}? Anyone holding it loses access.",
+            "Revoke",
+        ):
+            say(self.app, "Left alone.")
+            return
         ok, _ = await attempt(
             self.app,
             lambda: ops_auth.revoke_share(self.store.api, sub, link_id),

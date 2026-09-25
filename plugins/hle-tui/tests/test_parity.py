@@ -197,6 +197,33 @@ class TestKeyedCursor:
                 assert table.cursor_row == 0
                 assert app._selected("#tunnels-table") == "old-x7k"
 
+    async def test_ticks_during_a_slow_poll_are_dropped_not_queued(self):
+        import asyncio
+
+        release = asyncio.Event()
+        calls = 0
+
+        async def slow(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return snapshot(HA)
+
+        with patch.object(data, "collect", slow):
+            app = HleApp(api_key=KEY, refresh_seconds=0)
+            async with app.run_test() as pilot:
+                await settle(pilot)
+                for _ in range(5):
+                    app.refresh_data()
+                await settle(pilot)
+                assert calls == 1
+                release.set()
+                await settle(pilot)
+                assert app.query_one("#tunnels-table", DataTable).row_count == 1
+                app.refresh_data()
+                await settle(pilot)
+                assert calls == 2
+
     async def test_the_footer_says_when_it_last_heard(self):
         with patch.object(data, "collect", Sequence(snapshot(HA))):
             app = HleApp(api_key=KEY, refresh_seconds=0)
@@ -409,8 +436,37 @@ class TestTunnelPane:
 
                 pane.query_one("#td-share-revoke", Button).press()
                 await settle(pilot)
+                await pilot.click("#yes")
+                await settle(pilot)
                 revoke.assert_awaited_once_with(api, "ha-x7k", 5)
                 assert app.last_cli == "hle tunnel share revoke ha-x7k 5"
+
+    async def test_revoking_a_share_asks_and_declining_keeps_it(self):
+        """Irreversible: whoever holds the link would need a new one sent."""
+        revoke = AsyncMock(return_value="ha-x7k")
+        p1, p2, p3 = gate_patches()
+        with (
+            patch.object(data, "collect", Sequence(snapshot(HA))),
+            p1,
+            p2,
+            p3,
+            patch("hle_client.ops.auth.revoke_share", revoke),
+        ):
+            app = HleApp(api_key=KEY, refresh_seconds=0)
+            async with app.run_test(size=WIDE) as pilot:
+                await settle(pilot)
+                app.open_tunnel("ha-x7k")
+                await settle(pilot)
+                app.query_one("#td-share-revoke", Button).press()
+                await settle(pilot)
+                question = str(app.screen.query_one("#box Label").render())
+                assert "for-mum" in question
+                assert "2026-09-26" in question
+                await pilot.click("#no")
+                await settle(pilot)
+                revoke.assert_not_called()
+                assert app.last_status == "Left alone."
+                assert app.query_one("#td-shares", DataTable).row_count == 1
 
 
 # ---------------------------------------------------------------------------

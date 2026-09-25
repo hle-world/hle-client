@@ -110,6 +110,7 @@ class HleApp(App[None]):
         self.last_status = ""
         self.last_cli: str | None = None
         self._poll_line: str | None = None
+        self._polling = False
         self._tunnel_pane: TunnelPane | None = None
         self.store.subscribe(self._on_store)
 
@@ -175,11 +176,24 @@ class HleApp(App[None]):
 
     # -- data ---------------------------------------------------------------
 
+    def refresh_data(self) -> None:
+        # A tick that lands while a poll is in flight is dropped: not queued
+        # (workers would pile up on the store's lock during a slow fetch) and
+        # not cancelling the running one (exclusive=True would, and a fetch
+        # slower than the interval would then never finish).
+        # The flag is set here, synchronously, because the store's lock is
+        # only taken once the worker runs.
+        if self._polling:
+            return
+        self._polling = True
+        self._poll()
+
     @work(group="poll", exit_on_error=False)
-    async def refresh_data(self) -> None:
-        # The store serialises refreshes itself: a tick that lands while one
-        # is in flight waits for it instead of cancelling it.
-        await self.store.refresh()
+    async def _poll(self) -> None:
+        try:
+            await self.store.refresh()
+        finally:
+            self._polling = False
 
     def _on_store(self, store: data.StateStore) -> None:
         self._fill("#tunnels-table", store.tunnel_table())
