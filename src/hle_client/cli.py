@@ -30,8 +30,15 @@ from hle_client.ops import agents as ops_agents
 from hle_client.output import OUTPUT_FORMATS, TABLE, Output
 from hle_client.richcompat import Console
 from hle_client.service_cmd import service as service_group
-from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError
+from hle_client.tunnel import Tunnel, TunnelFatalError, to_tunnel_config
+from hle_client.tunnel_options import (
+    spec_from_params,
+    tunnel_option,
+    tunnel_options,
+    validate_label_and_apex,
+)
 from hle_client.update_cmd import update as update_command
+from hle_common.tunnel_spec import TunnelSpec
 
 console = Console()
 # Notices about the environment go to stderr: `--json` output must stay
@@ -142,7 +149,6 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
 
 @main.command(hidden=True)
 @click.option("--service", required=True, help="Local service URL (e.g. http://localhost:8080)")
-@click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
 @click.option(
     "--label",
     "service_label",
@@ -150,122 +156,32 @@ def _parse_auth_spec(spec: str) -> tuple[str, str]:
     help="Service label (e.g. ha, jellyfin). Required unless --apex is set.",
 )
 @click.option(
-    "--zone",
-    default=None,
-    help="Custom zone to publish under (e.g. t00t.us). Required for --apex.",
-)
-@click.option(
-    "--apex",
-    is_flag=True,
-    default=False,
-    help="Serve at the bare zone root (e.g. https://t00t.us) instead of a subdomain.",
-)
-@click.option(
-    "--option",
-    "options",
-    multiple=True,
-    metavar="KEY=VALUE",
-    help="Generic server-interpreted parameter, passed through verbatim. "
-    "Repeatable. The server defines which keys are valid. Example: --option zone=t00t.us",
-)
-@click.option(
     "--api-key",
     default=None,
     envvar="HLE_API_KEY",
     help="API key (also reads HLE_API_KEY env var, then ~/.config/hle/config.toml)",
 )
-@click.option("--websocket/--no-websocket", default=True, help="Enable WebSocket proxying")
-@click.option(
-    "--verify-ssl",
-    is_flag=True,
-    default=False,
-    help="Enable SSL certificate verification (by default self-signed certs are accepted)",
-)
-@click.option(
-    "--upstream-basic-auth",
-    "upstream_basic_auth",
-    default=None,
-    metavar="USER:PASS",
-    help="Inject Basic Auth into every request to the local service. Format: USER:PASS",
-)
-@click.option(
-    "--forward-host",
-    is_flag=True,
-    default=False,
-    help="Forward the browser's Host header to the local service "
-    "(for services that validate Host).",
-)
-@click.option(
-    "--allow",
-    "allow",
-    multiple=True,
-    metavar="[PROVIDER:]EMAIL",
-    help="Allow an email to access this tunnel via SSO. "
-    "Format: 'email' or 'provider:email'. "
-    "Providers: any (default), google, github, hle. Repeatable.",
-)
+@tunnel_options
 @click.pass_context
 def expose(
     ctx: click.Context,
+    /,
     service: str,
-    auth: str,
     service_label: str | None,
-    zone: str | None,
-    apex: bool,
-    options: tuple[str, ...],
     api_key: str | None,
-    websocket: bool,
-    verify_ssl: bool,
-    upstream_basic_auth: str | None,
-    forward_host: bool,
     allow: tuple[str, ...],
+    **tunnel_params: Any,
 ) -> None:
     """Expose a local service to the internet."""
-    # Parse --option KEY=VALUE pairs into a passthrough dict.
-    options_dict: dict[str, str] = {}
-    for opt in options:
-        key, sep, val = opt.partition("=")
-        if not sep or not key:
-            raise UsageError(f"--option must be KEY=VALUE (got '{opt}').")
-        options_dict[key.strip()] = val
-
-    # Validate apex / label / zone combination up front.
-    if apex and not zone:
-        raise UsageError("--apex requires --zone (e.g. --zone t00t.us).")
-    if not apex and not service_label:
-        # Names the form being taught, not the flag it replaced.
-        raise UsageError(
-            "a label is required — it names the tunnel.",
-            hint=(
-                "[cyan]hle tunnel create <label> <url>[/cyan]  "
-                "(or use --apex with --zone to serve a bare zone root)."
-            ),
-        )
-
-    upstream_auth_tuple: tuple[str, str] | None = None
-    if upstream_basic_auth:
-        if ":" not in upstream_basic_auth:
-            raise UsageError("--upstream-basic-auth must be in USER:PASS format.")
-        u, _, p = upstream_basic_auth.partition(":")
-        upstream_auth_tuple = (u, p)
+    spec = spec_from_params(service_url=service, label=service_label, **tunnel_params)
+    validate_label_and_apex(spec)
 
     # Resolved here so the root's --api-key reaches the tunnel too. None is
     # still allowed: the tunnel reads the config file itself at connect time.
     resolved_key = resolve_api_key(ctx, api_key)
 
-    tunnel_config = TunnelConfig(
-        service_url=service,
-        auth_mode=auth,
-        service_label=service_label,
-        zone=zone,
-        apex=apex,
-        options=options_dict,
-        api_key=resolved_key,
-        websocket_enabled=websocket,
-        verify_ssl=verify_ssl,
-        upstream_basic_auth=upstream_auth_tuple,
-        forward_host=forward_host,
-    )
+    tunnel_config = to_tunnel_config(spec, api_key=resolved_key)
+    websocket = spec.websocket_enabled
 
     auth_specs = [_parse_auth_spec(s) for s in allow]
     on_registered_cb = None
@@ -306,6 +222,8 @@ def expose(
     if service_label:
         console.print(f"     Label   [dim]{service_label}[/dim]")
     console.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
+    if spec.response_timeout:
+        console.print(f"     Timeout [dim]{spec.response_timeout}s[/dim]")
     console.print()
 
     try:
@@ -331,6 +249,7 @@ def expose(
     default=None,
     help="API key. Falls back to ~/.config/hle/config.toml if not set.",
 )
+@tunnel_option("response_timeout")
 @click.pass_context
 def webhook(
     ctx: click.Context,
@@ -338,6 +257,7 @@ def webhook(
     forward_to: str,
     service_label: str,
     api_key: str | None,
+    response_timeout: int | None,
 ) -> None:
     """Forward incoming webhooks to a local service.
 
@@ -355,15 +275,16 @@ def webhook(
     if ".." in path.split("/"):
         raise UsageError("--path must not contain '..' segments")
 
-    tunnel_config = TunnelConfig(
+    spec = TunnelSpec(
+        label=service_label,
         service_url=forward_to,
         auth_mode="none",
-        service_label=service_label,
-        api_key=resolve_api_key(ctx, api_key),
         websocket_enabled=False,
         verify_ssl=False,
         webhook_path=path,
+        response_timeout=response_timeout,
     )
+    tunnel_config = to_tunnel_config(spec, api_key=resolve_api_key(ctx, api_key))
 
     tunnel = Tunnel(config=tunnel_config)
 
@@ -499,23 +420,8 @@ def logout() -> None:
 # the label-less form the docs have always shown, and the one --apex needs.
 @click.argument("first", metavar="[LABEL] URL")
 @click.argument("second", required=False, metavar="")
-@click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
-@click.option("--zone", default=None, help="Custom zone to publish under (e.g. t00t.us).")
-@click.option(
-    "--apex",
-    is_flag=True,
-    default=False,
-    help="Serve at the bare zone root instead of a subdomain. Requires --zone.",
-)
-@click.option("--option", "options", multiple=True, metavar="KEY=VALUE", help="Passed through.")
 @click.option("--api-key", default=None, help="API key. Defaults to the root --api-key.")
-@click.option("--websocket/--no-websocket", default=True, help="Enable WebSocket proxying")
-@click.option("--verify-ssl", is_flag=True, default=False, help="Verify upstream TLS certificates")
-@click.option(
-    "--upstream-basic-auth", default=None, metavar="USER:PASS", help="Basic auth for the upstream."
-)
-@click.option("--forward-host", is_flag=True, default=False, help="Forward the browser's Host.")
-@click.option("--allow", multiple=True, metavar="[PROVIDER:]EMAIL", help="Allow an email via SSO.")
+@tunnel_options
 @click.pass_context
 def tunnel_create(ctx: click.Context, /, first: str, second: str | None, **kwargs: Any) -> None:
     """Expose a local service to the internet.

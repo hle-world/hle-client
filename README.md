@@ -93,9 +93,16 @@ Options:
 - `--apex` — Serve at the bare zone root instead of a subdomain. Requires `--zone`
 - `--websocket/--no-websocket` — Enable/disable WebSocket proxying (default: enabled)
 - `--verify-ssl` — Verify the local service's TLS certificate (default: off, accepts self-signed)
-- `--upstream-basic-auth USER:PASS` — Inject Basic Auth into requests forwarded to the local service
+- `--upstream-basic-auth USER:PASS` — Inject Basic Auth into requests forwarded to the local service (also reads `HLE_UPSTREAM_BASIC_AUTH`)
 - `--forward-host` — Forward the browser's Host header to the local service
+- `--option KEY=VALUE` — Server-interpreted parameter, passed through verbatim (repeatable)
+- `--response-timeout SECONDS` — How long the relay waits for the local service to respond (default 30, max 1200)
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
+
+`hle daemon install tunnel` takes the same options, so any tunnel you can run
+you can also install as a service. `--upstream-basic-auth` is written to the
+service's environment, never its command line, and the service file is then
+readable by its owner only.
 
 ### `hle tunnel preflight`
 
@@ -120,6 +127,7 @@ Options:
 - `--path` — Webhook path prefix, e.g. `/webhook/github` (required). Cannot be `/`
 - `--forward-to` — Local URL to forward webhooks to (required)
 - `--label` — Webhook label, e.g. `github-hook` (required)
+- `--response-timeout SECONDS` — How long the relay waits for the local service to respond (default 120 for webhooks, max 1200)
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
 
 Webhook tunnels bypass SSO so external services (GitHub, Stripe, etc.) can deliver payloads without authentication.

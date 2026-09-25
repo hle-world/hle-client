@@ -52,6 +52,7 @@ from hle_common.protocol import (
     NoticePayload,
     ProtocolMessage,
 )
+from hle_common.tunnel_spec import TunnelSpec, parse_basic_auth
 
 
 class TunnelFatalError(Exception):
@@ -102,6 +103,8 @@ class TunnelConfig:
     """Serve at the bare zone root (e.g. t00t.us) instead of a subdomain. Requires `zone`."""
     options: dict[str, str] = field(default_factory=dict)
     """Generic server-interpreted feature parameters, passed through verbatim."""
+    response_timeout: int | None = None
+    """Seconds the relay waits for the local service (None = relay default; relay caps it)."""
 
     def __post_init__(self) -> None:
         # A scheme-less service URL ("localhost:9998") makes httpx treat
@@ -111,6 +114,52 @@ class TunnelConfig:
         # so every entry point (expose, forward, agent endpoints) is covered.
         if self.service_url and "://" not in self.service_url:
             self.service_url = f"http://{self.service_url}"
+
+
+def to_tunnel_config(
+    spec: TunnelSpec,
+    *,
+    api_key: str | None = None,
+    relay_host: str | None = None,
+    relay_port: int | None = None,
+    managed_by: str | None = None,
+) -> TunnelConfig:
+    """The one mapping from a ``TunnelSpec`` to the runtime ``TunnelConfig``.
+
+    Every entry point (``expose``/``tunnel create``, ``tunnel webhook``, agent
+    endpoints) goes through here, so a spec field cannot reach one of them and
+    not another. The keyword arguments are what is *not* part of the tunnel's
+    description: where the relay is, which credential to use, and — for an
+    orchestrator such as the agent — who manages it, which overrides whatever
+    the spec says.
+
+    Null spec fields take the TunnelConfig default. Raises ``ValueError`` for a
+    spec without a service URL or with a malformed ``upstream_basic_auth``.
+    """
+    if not spec.service_url:
+        raise ValueError("a tunnel needs a service_url")
+    extra: dict[str, Any] = {}
+    if relay_host:
+        extra["relay_host"] = relay_host
+    if relay_port:
+        extra["relay_port"] = relay_port
+    return TunnelConfig(
+        service_url=spec.service_url,
+        service_label=spec.label or "",
+        zone=spec.zone,
+        auth_mode=spec.auth_mode,
+        webhook_path=spec.webhook_path,
+        websocket_enabled=spec.websocket_enabled,
+        verify_ssl=bool(spec.verify_ssl),
+        forward_host=bool(spec.forward_host),
+        upstream_basic_auth=parse_basic_auth(spec.upstream_basic_auth),
+        apex=bool(spec.apex),
+        options=dict(spec.options or {}),
+        response_timeout=spec.response_timeout,
+        managed_by=managed_by or spec.managed_by,
+        api_key=api_key,
+        **extra,
+    )
 
 
 # Hard limits to protect against a malicious or compromised relay server.
@@ -632,6 +681,7 @@ class Tunnel:
                 options=self.config.options,
                 instance_id=instance_id(),
                 hostname=hostname(),
+                response_timeout=self.config.response_timeout,
             )
             register_msg = ProtocolMessage(
                 type=MessageType.TUNNEL_REGISTER,

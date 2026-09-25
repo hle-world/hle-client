@@ -60,6 +60,7 @@ from hle_common.preflight import (
     Severity,
 )
 from hle_common.protocol import ErrorPayload, MessageType, NoticePayload, ProtocolMessage
+from hle_common.tunnel_spec import TunnelSpec
 
 _RULE = ForwardRule(host="localhost", port=22)
 
@@ -98,6 +99,13 @@ SAMPLES: dict[str, object] = {
         webhook_path="/webhook/github",
         apex=True,
         options={"k": "v"},
+    ),
+    "TunnelRegistration.response_timeout": TunnelRegistration(
+        service_url="http://localhost:8080",
+        service_label="hook",
+        api_key="hle_" + "a" * 32,
+        webhook_path="/webhook/github",
+        response_timeout=300,
     ),
     "TunnelRegistrationResponse": TunnelRegistrationResponse(
         tunnel_id="tun-1",
@@ -161,6 +169,39 @@ SAMPLES: dict[str, object] = {
         auth_mode="sso",
         webhook_path="/hook",
         websocket_enabled=False,
+    ),
+    # 1.3: EndpointSpec is the full TunnelSpec. Every new field set, to pin
+    # their names and order on the wire.
+    "EndpointSpec.v1_3": EndpointSpec(
+        id=3,
+        label="prox",
+        service_url="https://192.168.1.10:8006",
+        zone="t00t.us",
+        auth_mode="sso",
+        websocket_enabled=True,
+        verify_ssl=True,
+        forward_host=True,
+        upstream_basic_auth="admin:s3cret",
+        apex=False,
+        options={"k": "v"},
+        response_timeout=120,
+        managed_by="hle-agent",
+    ),
+    # -- tunnel_spec.py ---------------------------------------------------
+    # What `hle daemon install tunnel` stamps into a unit file under "tunnel".
+    "TunnelSpec": TunnelSpec(label="ha", service_url="http://localhost:8123"),
+    "TunnelSpec.full": TunnelSpec(
+        label="prox",
+        service_url="https://192.168.1.10:8006",
+        zone="t00t.us",
+        auth_mode="none",
+        websocket_enabled=False,
+        verify_ssl=True,
+        forward_host=True,
+        upstream_basic_auth="admin:s3cret",
+        apex=False,
+        options={"k": "v"},
+        response_timeout=60,
     ),
     # A 1.1-shaped hello: the 1.2 fields are left at their None defaults, so
     # this pins that they serialise as explicit nulls rather than vanishing.

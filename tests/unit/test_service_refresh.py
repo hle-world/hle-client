@@ -23,6 +23,7 @@ from hle_client.service_cmd import (
     render_unit,
     spec_comment,
 )
+from hle_common.tunnel_spec import TunnelSpec
 
 SPEC = {
     "version": "2608.2",
@@ -134,3 +135,69 @@ class TestRefreshService:
             patch("hle_client.service_cmd.restart_service", return_value=False),
         ):
             assert refresh_service("hle_agent", False) == "failed"
+
+
+# A tunnel stamp as written before TunnelSpec: argv only.
+_OLD_TUNNEL_STAMP = {
+    "version": "2609.1",
+    "label": "ha",
+    "run_args": ["expose", "--service", "http://localhost:8123", "--label", "ha"],
+    "name": None,
+    "run_as": None,
+    "description": "HLE tunnel: ha",
+    "restart": "on-failure",
+    "agent_config": None,
+    "user_mode": True,
+}
+
+
+class TestRefreshTunnelSpecStamps:
+    def _refresh(self, stamp):
+        with (
+            patch("hle_client.service_cmd.service_spec", return_value=stamp),
+            patch("hle_client.service_cmd.current_platform", return_value="linux"),
+            patch("hle_client.service_cmd._systemd_install") as install,
+        ):
+            assert refresh_service("hle-ha.service", True) == "refreshed"
+        return install.call_args.kwargs
+
+    def test_an_old_stamp_replays_its_argv(self):
+        kwargs = self._refresh(_OLD_TUNNEL_STAMP)
+        assert kwargs["run_args"] == _OLD_TUNNEL_STAMP["run_args"]
+        assert kwargs["env"] == {}
+
+    def test_a_new_stamp_is_rebuilt_from_its_tunnel_spec(self):
+        tunnel = TunnelSpec(
+            label="ha",
+            service_url="http://localhost:8123",
+            upstream_basic_auth="u:p",
+            response_timeout=90,
+        )
+        stamp = {
+            **_OLD_TUNNEL_STAMP,
+            # Deliberately stale argv: the spec wins.
+            "run_args": ["expose", "--service", "http://old"],
+            "tunnel": tunnel.model_dump(),
+            "allow": ["a@x.com"],
+        }
+        kwargs = self._refresh(stamp)
+        assert kwargs["run_args"] == [
+            "expose",
+            "--service",
+            "http://localhost:8123",
+            "--label",
+            "ha",
+            "--response-timeout",
+            "90",
+            "--allow",
+            "a@x.com",
+        ]
+        assert kwargs["env"] == {"HLE_UPSTREAM_BASIC_AUTH": "u:p"}
+        # The re-stamp records the argv it was rebuilt to, and keeps the spec.
+        assert kwargs["spec"]["run_args"] == kwargs["run_args"]
+        assert kwargs["spec"]["tunnel"] == tunnel.model_dump()
+
+    def test_an_unusable_tunnel_key_falls_back_to_argv(self):
+        for bad in ({"label": "ha"}, {"label": 5, "service_url": []}, "not a dict"):
+            kwargs = self._refresh({**_OLD_TUNNEL_STAMP, "tunnel": bad})
+            assert kwargs["run_args"] == _OLD_TUNNEL_STAMP["run_args"]

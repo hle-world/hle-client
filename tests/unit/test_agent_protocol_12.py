@@ -19,8 +19,9 @@ from hle_common.agent_protocol import (
 
 
 class TestVersion:
-    def test_is_1_2(self):
-        assert AGENT_PROTOCOL_VERSION == "1.2"
+    def test_is_at_least_1_2(self):
+        # Pinned exactly by the newest protocol's own tests (1.3 at present).
+        assert tuple(int(p) for p in AGENT_PROTOCOL_VERSION.split(".")) >= (1, 2)
 
     def test_update_types_are_registered(self):
         assert AgentMsgType.UPDATE_REQUEST == "update_request"
