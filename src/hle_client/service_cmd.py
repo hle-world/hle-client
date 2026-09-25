@@ -70,9 +70,19 @@ AGENT_LABEL = "agent"
 # back into flags is guesswork that fails silently; reading it back is not.
 _SPEC_MARKER = "hle-spec:"
 
+# The head of the argv a tunnel unit execs.
+TUNNEL_CREATE = ["tunnel", "create"]
+
+# Set in every generated unit, plist and rc script. A service runs whatever
+# argv it was installed with until it is refreshed, and one written by an
+# older client may still use a renamed spelling; the "`hle fp` is now `hle
+# forward`" note then landed in the service log on every start, where nobody
+# who could act on it would read it.
+_QUIET_ENV = ("HLE_NO_DEPRECATION_WARNINGS", "1")
+
 
 def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list[str]] | None:
-    """``(spec, allow)`` from an ``expose ...`` argv, parsed by the real command.
+    """``(spec, allow)`` from an ``expose``/``tunnel create`` argv, parsed by the real command.
 
     None when it cannot be read faithfully: it does not parse, or it carries
     something a TunnelSpec cannot (an ``--api-key`` on the command line). The
@@ -84,12 +94,17 @@ def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list
     from click.core import ParameterSource
 
     # Imported here: cli imports this module.
-    from hle_client.cli import expose
+    from hle_client.cli import expose, tunnel_create
 
-    if run_args[:1] != ["expose"]:
+    command: click.Command
+    if run_args[:1] == ["expose"]:
+        command, rest = expose, run_args[1:]
+    elif run_args[:2] == ["tunnel", "create"]:
+        command, rest = tunnel_create, run_args[2:]
+    else:
         return None
     try:
-        ctx = expose.make_context("expose", list(run_args[1:]))
+        ctx = command.make_context(str(command.name), list(rest))
     except click.exceptions.ClickException:
         return None
     except click.exceptions.Exit:
@@ -101,10 +116,13 @@ def _tunnel_spec_from_legacy_argv(run_args: list[str]) -> tuple[TunnelSpec, list
     if params.pop("api_key", None):
         return None
     allow = [str(a) for a in params.pop("allow", None) or ()]
+    if command is tunnel_create:
+        first, second = params.pop("first"), params.pop("second")
+        url, label = (second, first) if second is not None else (first, None)
+    else:
+        url, label = params.pop("service"), params.pop("service_label")
     try:
-        spec = spec_from_params(
-            service_url=params.pop("service"), label=params.pop("service_label"), **params
-        )
+        spec = spec_from_params(service_url=url, label=label, **params)
     except (UsageError, ValueError):
         return None
     return spec, allow
@@ -202,7 +220,13 @@ def launchd_label(label: str, name: str | None = None) -> str:
 
 
 def build_expose_args(spec: TunnelSpec, *, allow: tuple[str, ...] | list[str] = ()) -> list[str]:
-    """Build the ``expose`` argv for a service definition, from a ``TunnelSpec``.
+    """Build the ``tunnel create`` argv for a service definition, from a ``TunnelSpec``.
+
+    Emits the current grammar, ``tunnel create [LABEL] URL ...``. Units used
+    to exec ``expose --service URL --label L``, which kept the legacy name
+    load-bearing: every generated unit depended on it. ``expose`` still parses
+    (it is what ``tunnel create`` runs), and ``daemon refresh`` rewrites old
+    units to this form.
 
     Secrets are never part of argv — anyone on the machine can read a process
     list, and the unit file's ExecStart line with it. ``upstream_basic_auth``
@@ -211,15 +235,16 @@ def build_expose_args(spec: TunnelSpec, *, allow: tuple[str, ...] | list[str] = 
     read at runtime from the running user's config or ``HLE_API_KEY``.
 
     Raises ``ValueError`` for a webhook spec: webhooks run through
-    ``tunnel webhook``, which ``expose`` is not.
+    ``tunnel webhook``, which ``tunnel create`` is not.
     """
     if spec.webhook_path:
-        raise ValueError("a webhook spec cannot be run as `hle expose`")
+        raise ValueError("a webhook spec cannot be run as `hle tunnel create`")
     if not spec.service_url:
         raise ValueError("a tunnel needs a service_url")
-    args = ["expose", "--service", spec.service_url]
+    args = ["tunnel", "create"]
     if spec.label:
-        args += ["--label", spec.label]
+        args.append(spec.label)
+    args.append(spec.service_url)
     if spec.zone:
         args += ["--zone", spec.zone]
     if spec.apex:
@@ -276,12 +301,13 @@ def build_fp_args(
     relay_host: str | None = None,
     relay_port: int | None = None,
 ) -> list[str]:
-    """Build the ``fp`` argv (no secrets) for the service definition.
+    """Build the ``forward AGENT TARGET`` argv (no secrets) for the service definition.
 
+    ``fp --agent A --to T`` before; ``daemon refresh`` rewrites those units.
     The API key is read at runtime from the running user's config or
     ``HLE_API_KEY``, never written into the unit.
     """
-    args = ["fp", "--agent", agent, "--to", target]
+    args = ["forward", agent, target]
     if bind_port:
         args += ["--port", str(bind_port)]
     if bind_host:
@@ -440,6 +466,7 @@ def render_unit(
     # path at runtime finds the wrong one whenever those differ.
     if agent_config:
         lines.append(f"Environment=HLE_AGENT_CONFIG={agent_config}")
+    lines.append(f"Environment={_QUIET_ENV[0]}={_QUIET_ENV[1]}")
     # Values argv must not carry (secrets). The unit file is written 0600
     # whenever there are any, see _write_service_file.
     for key, value in sorted((env or {}).items()):
@@ -765,7 +792,7 @@ def render_launchd_plist(
     # The token file by absolute path. launchd hands a daemon its own
     # environment, so deriving the path from HOME at runtime can resolve
     # somewhere the enrolling user never wrote to.
-    plist_env = dict(sorted((env or {}).items()))
+    plist_env = {_QUIET_ENV[0]: _QUIET_ENV[1], **dict(sorted((env or {}).items()))}
     if agent_config:
         plist_env = {"HLE_AGENT_CONFIG": agent_config, **plist_env}
     if plist_env:
@@ -1030,6 +1057,7 @@ def render_rc_script(
         f'command_args="{daemon_flags} -P ${{pidfile}} -p /var/run/${{name}}.child.pid '
         f"-o ${{logfile}} /usr/bin/env HOME=${{{svc}_home}} "
         f"HLE_AGENT_CONFIG=${{{svc}_config}} "
+        f"{_QUIET_ENV[0]}={_QUIET_ENV[1]} "
         f'${{hle_command}} {args}"',
         'procname="/usr/sbin/daemon"',
         "",
@@ -1319,12 +1347,14 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
     extra_stamp: dict[str, Any] = {}
     tunnel = stamped_tunnel_spec(spec)
     allow: list[str] = [str(a) for a in spec.get("allow") or ()]
-    if tunnel is None and list(spec["run_args"])[:1] == ["expose"]:
+    stamped_args = [str(a) for a in spec["run_args"]]
+    if tunnel is None and (stamped_args[:1] == ["expose"] or stamped_args[:2] == TUNNEL_CREATE):
         # A tunnel stamped before TunnelSpec: argv only. Read it back through
         # the real `expose` parser so it is rebuilt like a new install — which
         # is what moves a secret written into argv out of ExecStart and the
-        # process list and into an owner-only environment.
-        migrated = _tunnel_spec_from_legacy_argv([str(a) for a in spec["run_args"]])
+        # process list and into an owner-only environment, and what moves the
+        # exec line from `expose` to `tunnel create`.
+        migrated = _tunnel_spec_from_legacy_argv(stamped_args)
         if migrated is None:
             logger.warning(
                 "Service %s: could not read its expose arguments back; replaying them unchanged",
@@ -1339,8 +1369,11 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
         run_args = build_expose_args(tunnel, allow=allow)
         env = expose_env(tunnel)
     else:
-        # Agent and forward stamps carry only argv, which is replayed as it was.
-        run_args = [str(a) for a in spec["run_args"]]
+        # Agent and forward stamps carry only argv, which is replayed — with a
+        # forward's legacy `fp` head renamed. `forward` is the same command
+        # object, so every argv `fp` accepted parses identically; rebuilding it
+        # instead would have to reproduce repeated --to/--port pairs exactly.
+        run_args = ["forward", *stamped_args[1:]] if stamped_args[:1] == ["fp"] else stamped_args
     name = spec.get("name")
     user_mode = bool(spec.get("user_mode"))
     stamped = {**spec, **extra_stamp, "version": __version__, "run_args": run_args}
