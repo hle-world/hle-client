@@ -38,7 +38,7 @@ from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 import click
 
 from hle_client import __version__, config
-from hle_client.aliases import LegacyModeCommand, ModeGroup
+from hle_client.aliases import AliasedGroup, LegacyModeCommand, ModeGroup
 from hle_client.errors import HleError, UsageError
 from hle_client.richcompat import Console, Table
 from hle_client.tunnel_options import spec_from_params, tunnel_options, validate_label_and_apex
@@ -609,7 +609,7 @@ def _systemd_install(
                     "as well would run two copies on one credential — they take every tunnel "
                     "off each other about once a second.\n"
                     "Remove the existing one first:\n"
-                    f"  hle daemon uninstall{'' if user_mode else ' --user'} --label {label}\n"
+                    f"  hle daemon delete {label}{'' if user_mode else ' --user'}\n"
                     "or keep it and skip this install."
                 ),
             )
@@ -714,7 +714,7 @@ def _systemd_list(*, user_mode: bool | None) -> None:
         console.print(
             "[dim]Two copies of one service run on the same credentials and fight over "
             "every tunnel. Remove whichever you did not mean to keep:\n"
-            "  hle daemon uninstall --user --label <label>   (or without --user)[/dim]"
+            "  hle daemon delete <label> --user   (or without --user)[/dim]"
         )
 
 
@@ -1465,23 +1465,70 @@ def refresh_service(name: str, user_mode: bool) -> str:
     return "refreshed"
 
 
-def _resolve_label(label: str | None, agent_mode: bool, *, extra_hint: str = "") -> str:
-    """Resolve the label for uninstall/status/restart: --agent implies the agent label.
+def _label_from_service_name(target: str) -> tuple[str, str | None]:
+    """``(label, explicit name)`` for a NAME argument.
 
-    ``extra_hint`` names any other way out that the calling command offers, so the
-    error doesn't hide the flag that is usually the right answer.
+    NAME is normally the label (``ha``, ``agent``). ``hle daemon list`` prints
+    unit names, though, and people paste what they were shown — so a systemd
+    unit or launchd label is accepted too and read back to its label, with
+    the name kept so the exact file is the one acted on.
     """
+    for prefix, suffix in (("hle-", ".service"), (f"{_LAUNCHD_LABEL_PREFIX}.", ".plist")):
+        stem = target.removesuffix(suffix)
+        if stem.startswith(prefix) and (target.endswith(suffix) or prefix != "hle-"):
+            return stem[len(prefix) :], target
+    return target, None
+
+
+def _resolve_target(
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    *,
+    extra_hint: str = "",
+) -> tuple[str, str | None]:
+    """``(label, name)`` for delete/logs/status/restart/refresh.
+
+    NAME is the positional form; ``--label``, ``--agent`` and ``--name`` are
+    the old spellings, hidden but still read, because units, scripts and
+    support answers carry them. ``extra_hint`` names any other way out that the
+    calling command offers, so the error doesn't hide the flag that is usually
+    the right answer.
+    """
+    if target is not None:
+        from_target, target_name = _label_from_service_name(target)
+        if label is not None and label != from_target:
+            raise UsageError(f"NAME {target!r} and --label {label!r} disagree; pass one.")
+        if agent_mode and from_target != AGENT_LABEL:
+            raise UsageError(f"NAME {target!r} and --agent disagree; pass one.")
+        return from_target, name or target_name
     if label:
-        return label
+        return label, name
     if agent_mode:
-        return AGENT_LABEL
+        return AGENT_LABEL, name
     raise UsageError(
-        f"--label is required (or pass --agent for the agent service{extra_hint}).",
+        f"NAME is required: the service's label, e.g. `agent` or `ha`{extra_hint}.",
         hint="hle daemon list shows what is installed.",
     )
 
 
-@click.group()
+def _target_options(f: F) -> F:
+    """NAME, plus the flag spellings it replaced (hidden, still honoured)."""
+    f = click.option("--name", default=None, hidden=True, help="Explicit unit/plist name")(f)
+    f = click.option("--label", default=None, hidden=True, help="Service label")(f)
+    f = click.option(
+        "--agent",
+        "agent_mode",
+        is_flag=True,
+        default=False,
+        hidden=True,
+        help="Target the agent service",
+    )(f)
+    return click.argument("target", metavar="NAME", required=False)(f)
+
+
+@click.group(cls=AliasedGroup, hidden_aliases={"uninstall": "delete"})
 def service() -> None:
     """Install and manage background services (systemd/launchd/rc.d).
 
@@ -1490,7 +1537,7 @@ def service() -> None:
       hle daemon install tunnel ha http://localhost:8123
       hle daemon install agent
       hle daemon list
-      hle daemon logs --agent
+      hle daemon logs agent
     """
 
 
@@ -1649,7 +1696,7 @@ def install(
         console.print(
             f"[yellow]No agent token at {agent_config}.[/yellow] "
             "The service will start and immediately exit until you run "
-            "[cyan]hle agent enroll <token>[/cyan]."
+            "[cyan]hle auth login --agent-token <token>[/cyan]."
         )
 
     spec: dict[str, Any] = {
@@ -1751,30 +1798,37 @@ def install_forward(ctx: click.Context, /, agent_name: str, target: str, **kwarg
     ctx.invoke(install, fp_mode=True, agent_name=agent_name, fp_target=target, **kwargs)
 
 
-@service.command("uninstall")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@service.command("delete")
+@_target_options
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
 @click.option(
     "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
 )
 def uninstall(
-    agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    user_mode: bool,
+    system_mode: bool,
 ) -> None:
-    """Stop, disable, and remove a background service."""
+    """Stop, disable, and remove a background service.
+
+    \b
+    Examples:
+      hle daemon delete ha
+      hle daemon delete agent --user
+    """
     from hle_client.ops import daemon as ops_daemon
 
     _require_supported()
-    label = _resolve_label(label, agent_mode)
+    label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     asyncio.run(ops_daemon.uninstall(label, name=name, user_mode=user_mode))
 
 
 @service.command("logs")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
 @click.option(
     "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
@@ -1782,6 +1836,7 @@ def uninstall(
 @click.option("-n", "--lines", default=50, show_default=True, help="How many lines to show")
 @click.option("-f", "--follow", is_flag=True, default=False, help="Keep printing new lines")
 def logs(
+    target: str | None,
     agent_mode: bool,
     label: str | None,
     name: str | None,
@@ -1799,12 +1854,12 @@ def logs(
 
     \b
     Examples:
-      hle daemon logs --agent
-      hle daemon logs --label ha -n 200
-      hle daemon logs --agent -f
+      hle daemon logs agent
+      hle daemon logs ha -n 200
+      hle daemon logs agent -f
     """
     plat = _require_supported()
-    label = _resolve_label(label, agent_mode)
+    label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
 
     if plat == "linux":
@@ -1837,41 +1892,56 @@ def logs(
 
 
 @service.command("status")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Target a per-user service")
 @click.option(
     "--system", "system_mode", is_flag=True, default=False, help="Target a system service"
 )
 def status(
-    agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    user_mode: bool,
+    system_mode: bool,
 ) -> None:
-    """Show status for a background service."""
+    """Show status for a background service.
+
+    \b
+    Examples:
+      hle daemon status agent
+      hle daemon status ha --user
+    """
     from hle_client.ops import daemon as ops_daemon
 
     _require_supported()
-    label = _resolve_label(label, agent_mode)
+    label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     asyncio.run(ops_daemon.status(label, name=name, user_mode=user_mode))
 
     # A service manager reports on a process, not on whether it works. An agent
     # with no token exits immediately and is restarted forever, so "running as
     # pid 87998" is true, reassuring, and useless. Say the part it cannot know.
-    if agent_mode and config.load_credentials().agent_token is None:
+    if label == AGENT_LABEL and config.load_credentials().agent_token is None:
         console.print(
             "\n[yellow]No agent token is configured[/yellow] — if the service is "
             "running it is restarting in a loop."
         )
-        console.print("Fix with: [cyan]hle agent enroll <token>[/cyan], then restart it.")
+        console.print(
+            "Fix with: [cyan]hle auth login --agent-token <token>[/cyan], then restart it."
+        )
 
 
 @service.command("restart")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--all", "restart_all", is_flag=True, default=False, help="Restart every hle service")
-def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: bool) -> None:
+def restart(
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    restart_all: bool,
+) -> None:
     """Restart a background service, or all of them with --all.
 
     Exists because there was no way to do this through the CLI: the docs told
@@ -1899,7 +1969,9 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
             raise HleError(f"Could not restart {', '.join(failed)}.")
         return
 
-    label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
+    label, name = _resolve_target(
+        target, agent_mode, label, name, extra_hint=", or --all for every service"
+    )
     svc = ops_daemon.service_name(label, name)
     if asyncio.run(ops_daemon.restart(svc)):
         console.print(f"[green]Restarted[/green] {svc}")
@@ -1908,11 +1980,15 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
 
 
 @service.command("refresh")
-@click.option("--agent", "agent_mode", is_flag=True, default=False, help="Target the agent service")
-@click.option("--label", default=None, help="Service label")
-@click.option("--name", default=None, help="Explicit unit/plist name")
+@_target_options
 @click.option("--all", "refresh_all", is_flag=True, default=False, help="Refresh every hle service")
-def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: bool) -> None:
+def refresh(
+    target: str | None,
+    agent_mode: bool,
+    label: str | None,
+    name: str | None,
+    refresh_all: bool,
+) -> None:
     """Rebuild a service file against the installed client, then start it.
 
     For after an upgrade, or after anything that moved the client on disk. A
@@ -1952,7 +2028,9 @@ def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: 
             raise HleError(f"Could not refresh {', '.join(failed)}.")
         return
 
-    label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
+    label, name = _resolve_target(
+        target, agent_mode, label, name, extra_hint=", or --all for every service"
+    )
     svc = ops_daemon.service_name(label, name)
     unit_scope = installed_scope(svc)
     if unit_scope is None:

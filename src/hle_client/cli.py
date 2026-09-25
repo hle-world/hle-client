@@ -323,7 +323,11 @@ def auth() -> None:
 @click.option(
     "--agent-token",
     default=None,
-    help="Agent enrollment token to save instead (same as 'hle agent enroll').",
+    is_flag=False,
+    # Bare `--agent-token` prompts for it, so the token need not be typed
+    # into shell history — what `agent enroll` with no argument did.
+    flag_value="",
+    help="Agent enrollment token to save instead. Alone, prompts for it.",
 )
 @click.pass_context
 def login(ctx: click.Context, api_key: str | None, agent_token: str | None = None) -> None:
@@ -332,17 +336,17 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
     One place to put a credential, whichever kind you were given. An agent
     enrollment token used to have its own verb in its own group, so "where do
     I put this?" had two answers depending on which string you were holding.
+    `hle agent enroll TOKEN` still works; it is this command.
 
     \b
     Examples:
       hle auth login                        Paste an API key from the dashboard
       hle auth login --api-key hle_...      Non-interactive
       hle auth login --agent-token hlea_... Enrol this machine as an agent
+      hle auth login --agent-token          Same, pasting the token at a prompt
     """
     if agent_token is not None:
-        config.save_agent_token(agent_token)
-        console.print("[green]Agent token saved[/green] to ~/.config/hle/agent.toml")
-        console.print("[dim]Start it with: hle agent run  (or: hle daemon install agent)[/dim]")
+        _save_agent_token(ctx, agent_token or None)
         return
 
     if api_key is None:
@@ -356,6 +360,21 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
 
     config.save_api_key(api_key)
     console.print("[green]Saved[/green] to ~/.config/hle/config.toml")
+
+
+def _save_agent_token(ctx: click.Context, token: str | None) -> None:
+    """Validate and save an agent enrollment token, prompting when none was given."""
+    if token is None:
+        console.print(
+            "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
+        )
+        token = str(prompt(ctx, "Agent token", hide_input=True))
+
+    ops_agents.enroll(token)
+    console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
+    console.print(
+        "Start the agent with: [cyan]hle agent run[/cyan]  (or: hle daemon install agent)"
+    )
 
 
 def _mask(value: str) -> str:
@@ -547,20 +566,15 @@ def agent() -> None:
     """Run a multi-tunnel agent controlled from the dashboard."""
 
 
-@agent.command()
+# The old spelling of `hle auth login --agent-token`. Hidden, not aliased
+# through the group's table: it takes the token as an argument where login
+# takes it as an option, so it cannot simply resolve to the same command.
+@agent.command(hidden=True)
 @click.argument("token", required=False)
 @click.pass_context
 def enroll(ctx: click.Context, token: str | None) -> None:
-    """Save an agent enrollment token (created in the dashboard)."""
-    if token is None:
-        console.print(
-            "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
-        )
-        token = str(prompt(ctx, "Agent token", hide_input=True))
-
-    ops_agents.enroll(token)
-    console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
-    console.print("Start the agent with: [cyan]hle agent run[/cyan]")
+    """Save an agent enrollment token. Now: hle auth login --agent-token."""
+    _save_agent_token(ctx, token)
 
 
 @agent.command()
@@ -622,7 +636,7 @@ def agent_status(ctx: click.Context) -> None:
         console.print("Agent token source: [cyan]~/.config/hle/agent.toml[/cyan]")
         console.print(f"Token: [dim]{masked}[/dim]")
     else:
-        console.print("[dim]No agent token configured. Run 'hle agent enroll'.[/dim]")
+        console.print("[dim]No agent token configured. Run 'hle auth login --agent-token'.[/dim]")
 
 
 @agent.command("list")
@@ -671,7 +685,7 @@ def agent_list(ctx: click.Context, api_key: str | None, as_json: bool) -> None:
         console.print("[dim]No agents yet.[/dim]")
         console.print(
             "[dim]Create one at https://hle.world/dashboard → Agents, "
-            "then run 'hle agent enroll <token>'.[/dim]"
+            "then run 'hle auth login --agent-token <token>'.[/dim]"
         )
         return
 

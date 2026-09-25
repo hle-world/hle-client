@@ -67,8 +67,11 @@ hle status
 ## CLI Usage
 
 The CLI has one shape: `hle <noun> <verb>`. The nouns are `tunnel`, `agent`,
-`daemon`, `forward` and `auth`. Older spellings (`hle expose`, `hle config`,
-`hle service`, `hle fp`) still work but are not listed in `--help`.
+`daemon`, `forward` and `auth`, and the verbs are the same wherever they
+apply: `list`, `get`, `create`, `set`, `delete`. Older spellings (`hle expose`,
+`hle config`, `hle service`, `hle fp`, and verbs such as `access add`,
+`pin status`, `share revoke`, `auth-mode --set`, `daemon uninstall --label`,
+`agent enroll`) still work but are not listed in `--help`.
 
 Every command that reads a resource accepts `-o json`.
 
@@ -143,20 +146,20 @@ hle tunnel get ha                     # Full status for one tunnel (auth, rules,
 hle tunnel delete ha                  # Remove a tunnel's record
 ```
 
-#### `hle tunnel auth-mode`
+#### `hle tunnel set`
 
 ```bash
-hle tunnel auth-mode ha --set sso     # SSO gate on
-hle tunnel auth-mode ha --set none    # Tunnel becomes public
+hle tunnel set ha --auth sso          # SSO gate on
+hle tunnel set ha --auth none         # Tunnel becomes public
 ```
 
 #### `hle tunnel access` — SSO email allow-list
 
 ```bash
 hle tunnel access list ha                                # List rules
-hle tunnel access add ha friend@example.com              # Allow an email
-hle tunnel access add ha dev@co.com --provider github    # Require GitHub SSO
-hle tunnel access remove ha 42                           # Remove rule by ID
+hle tunnel access create ha friend@example.com           # Allow an email
+hle tunnel access create ha dev@co.com --provider github # Require GitHub SSO
+hle tunnel access delete ha 42                           # Remove rule by ID
 hle tunnel access replace ha google:alice@x.com github:bob@y.com   # Declarative — adds + prunes
 hle tunnel access replace ha --clear                     # Remove all rules
 ```
@@ -168,16 +171,16 @@ hle tunnel access replace ha --clear                     # Remove all rules
 
 ```bash
 hle tunnel pin set ha          # Set a PIN (prompts for 4-8 digits)
-hle tunnel pin status ha       # Check PIN status
-hle tunnel pin remove ha       # Remove PIN
+hle tunnel pin get ha          # Check PIN status
+hle tunnel pin delete ha       # Remove PIN
 ```
 
 #### `hle tunnel basic-auth`
 
 ```bash
 hle tunnel basic-auth set ha          # Prompts for username + password (min 8 chars)
-hle tunnel basic-auth status ha       # Check Basic Auth status
-hle tunnel basic-auth remove ha       # Remove Basic Auth
+hle tunnel basic-auth get ha          # Check Basic Auth status
+hle tunnel basic-auth delete ha       # Remove Basic Auth
 ```
 
 #### `hle tunnel share` — temporary share links
@@ -186,9 +189,9 @@ hle tunnel basic-auth remove ha       # Remove Basic Auth
 hle tunnel share create ha                        # 24h link (default)
 hle tunnel share create ha --duration 1h          # 1-hour link
 hle tunnel share create ha --max-uses 5           # Limited uses
-hle tunnel share create ha --label "demo"         # Label for reference
+hle tunnel share create ha --name "demo"          # Name it for reference
 hle tunnel share list ha                          # List share links
-hle tunnel share revoke ha 42                     # Revoke a link
+hle tunnel share delete ha 42                     # Revoke a link
 ```
 
 ### `hle agent`
@@ -199,7 +202,7 @@ this machine. Endpoints added or removed in the dashboard take effect without
 a restart.
 
 ```bash
-hle agent enroll                    # Paste the token at the prompt
+hle auth login --agent-token        # Paste the token at the prompt
 hle agent run                       # Run in the foreground
 hle agent status                    # Is a token configured here?
 hle agent list                      # Agents on your account, and whether they are online
@@ -249,11 +252,11 @@ sudo hle daemon install agent
 hle daemon install forward rpi 22 --port 9922 --user
 
 hle daemon list                     # Installed hle services, in both scopes
-hle daemon status --label tv        # One service's status
-hle daemon logs --agent             # Its log (-f to follow, -n 200 for more)
-hle daemon restart --label tv       # Restart one, or --all
+hle daemon status tv                # One service's status
+hle daemon logs agent               # Its log (-f to follow, -n 200 for more)
+hle daemon restart tv               # Restart one, or --all
 hle daemon refresh --all            # Rebuild service files after an upgrade
-hle daemon uninstall --label tv     # Stop, disable, remove
+hle daemon delete tv                # Stop, disable, remove
 ```
 
 ### `hle update`
