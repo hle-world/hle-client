@@ -121,6 +121,10 @@ class TestAgentUnits:
         unit = self._systemd(tmp_path, monkeypatch, self._spec("on-failure"))
         assert "Restart=always" in unit
         assert f"ExecStart={self.CURRENT} agent run" in unit
+        # In [Unit], where systemd reads it: a swap + rollback + retry burst
+        # must not trip the start limit and leave the agent dead.
+        unit_section = unit.split("[Service]")[0]
+        assert "StartLimitIntervalSec=0" in unit_section
         stamped = service_cmd.parse_service_spec(unit)
         assert stamped is not None and stamped["restart"] == "always"
 
@@ -132,6 +136,7 @@ class TestAgentUnits:
         service_cmd._install_from_spec(spec, plat="linux", start=False)
         unit = (tmp_path / service_cmd.unit_name("ha", None)).read_text()
         assert "Restart=on-failure" in unit
+        assert "StartLimitIntervalSec" not in unit
 
     def test_launchd_keeps_alive_from_current(self, tmp_path, monkeypatch):
         monkeypatch.setattr(service_cmd, "_launchd_dir", lambda user_mode: tmp_path)

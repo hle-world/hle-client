@@ -310,6 +310,11 @@ def render_unit(
         f"Description={description or f'HLE tunnel: {label}'}",
         "After=network-online.target",
         "Wants=network-online.target",
+        # Always-restart units (the agent, forwards) must never be given up
+        # on: a self-update is swap + exit, and a failed one adds rollback +
+        # exit. With the default start limit a few of those close together
+        # leave the unit dead until someone runs systemctl reset-failed.
+        *(["StartLimitIntervalSec=0"] if restart == "always" else []),
         "",
         "[Service]",
         "Type=simple",
