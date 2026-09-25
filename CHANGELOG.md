@@ -1,5 +1,55 @@
 # Changelog
 
+## v2609.8 — 2026-09-25
+
+### Added
+
+- **The agent reports how it's installed and what it's running on.** The
+  hello sent to the relay now includes install method (venv, pipx, uv,
+  brew, pip, or Docker), platform, Python version, and service manager
+  (systemd, launchd, or none detected). This is groundwork for a future
+  remote-update flow — the relay can't yet ask an agent to update itself,
+  but it can now tell which agents would even be able to.
+- **A clean way for the relay to hand an agent off to its successor.**
+  A new close code lets the relay tell a running agent "stop, a
+  replacement has taken over" without treating it as an error and without
+  the agent reconnecting and taking the tunnel back.
+
+### Changed
+
+- **One consistent set of exit codes across every command:** `1` for a
+  general error, `2` for bad usage, `3` for an auth problem, `4` for
+  "not found", `5` when the relay can't be reached. Errors now always go
+  to stderr instead of sometimes mixing into stdout, and `-o json` reports
+  an error as a single JSON object instead of partial output.
+- **Root-level `--api-key` now works on every command that talks to the
+  server.** Several commands — tunnel access, basic-auth, PIN, share
+  management, and `agent list` — were quietly ignoring it and falling
+  back to the config file or environment variable instead.
+- **`--no-input` now actually prevents every prompt**, including ones that
+  previously slipped through and asked for confirmation anyway; declining
+  a confirmation now consistently exits with `Aborted.` and status code 1.
+- **`agent status` no longer exits with an error just because no token is
+  set** — it exits cleanly and reports the absence instead.
+- **The 401 message is now the same everywhere:** `Invalid or missing API
+  key.` A transport failure now names the underlying error, e.g. `Could
+  not reach the relay server (ConnectError: ...)`, instead of a generic
+  "could not connect" message.
+- **`hle-tui` now requires `hle-client` 2609.8 or newer**, and shows the
+  real public URL for tunnels on a custom zone instead of always
+  assuming `hle.world`.
+- Internally, the CLI, `hle status`, and the TUI now share one service
+  layer for tunnels, access rules, auth, agents, and daemons — the same
+  operation is implemented once, so a field can only be wrong in one
+  place. No user-visible behavior changes from this beyond the fixes
+  and consistency work described above.
+
+### Fixed
+
+- **`hle status` and the TUI dashboard can no longer disagree about
+  whether an agent is online.** Both now read the same status field from
+  the same underlying data.
+
 ## v2609.7 — 2026-09-24
 
 ### Fixed
