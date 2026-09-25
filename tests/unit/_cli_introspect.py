@@ -122,9 +122,12 @@ def alias_lines(root: click.Group, *, root_name: str = "hle") -> list[str]:
 
     def _visit(cmd: click.Command, path: str) -> None:
         aliases = getattr(cmd, "aliases", None)
+        # Quiet aliases (old verbs) are marked; the rest print a stderr note.
+        silent = getattr(cmd, "silent", frozenset())
         if aliases:
             for old, new in sorted(aliases.items()):
-                lines.append(f"{path} : {old} -> {new}")
+                mark = "  hidden" if old in silent else ""
+                lines.append(f"{path} : {old} -> {new}{mark}")
         if isinstance(cmd, click.Group):
             for name, child in cmd.commands.items():
                 _visit(child, f"{path} {name}")

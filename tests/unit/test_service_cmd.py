@@ -31,16 +31,15 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 class TestBuildFpArgs:
     def test_minimal(self):
-        assert build_fp_args(agent="rpi", target="22") == ["fp", "--agent", "rpi", "--to", "22"]
+        """The current grammar, not the legacy `fp --agent A --to T`."""
+        assert build_fp_args(agent="rpi", target="22") == ["forward", "rpi", "22"]
 
     def test_full(self):
         assert build_fp_args(
             agent="rpi", target="localhost:22", bind_port=9922, bind_host="127.0.0.1"
         ) == [
-            "fp",
-            "--agent",
+            "forward",
             "rpi",
-            "--to",
             "localhost:22",
             "--port",
             "9922",
@@ -154,14 +153,9 @@ class TestUnitName:
 
 class TestBuildExposeArgs:
     def test_minimal(self):
+        """The current grammar, not the legacy `expose --service U --label L`."""
         spec = TunnelSpec(service_url="http://localhost:9998", label="tv")
-        assert build_expose_args(spec) == [
-            "expose",
-            "--service",
-            "http://localhost:9998",
-            "--label",
-            "tv",
-        ]
+        assert build_expose_args(spec) == ["tunnel", "create", "tv", "http://localhost:9998"]
 
     def test_all_options(self):
         spec = TunnelSpec(
@@ -190,6 +184,8 @@ class TestBuildExposeArgs:
         args = build_expose_args(spec)
         assert "--apex" in args
         assert "--label" not in args
+        # No label: the URL is the only positional.
+        assert args[:3] == ["tunnel", "create", "http://x"]
 
     def test_no_service_secrets(self):
         # API key must never appear in the generated args.
@@ -432,7 +428,7 @@ class TestRestartWithoutATarget:
         result = self._run("restart")
         assert result.exit_code == 2  # UsageError: a required flag is missing
         out = " ".join(_ANSI.sub("", result.output).split())
-        assert "--label is required" in out
+        assert "NAME is required" in out
         assert "--all" in out
         assert "hle daemon list" in out
 
@@ -440,7 +436,7 @@ class TestRestartWithoutATarget:
         result = self._run("uninstall")
         out = " ".join(_ANSI.sub("", result.output).split())
         # Proves the hint is per-command, and that we got past the platform gate.
-        assert "--label is required" in out
+        assert "NAME is required" in out
         assert "--all" not in out
 
 
@@ -482,7 +478,7 @@ class TestServiceListShowsBothScopes:
         service_cmd._systemd_list(user_mode=None)
         out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
         assert "Installed twice: hle-agent.service" in out
-        assert "hle daemon uninstall --user" in out
+        assert "hle daemon delete <label> --user" in out
 
     def test_distinct_units_are_not_called_a_duplicate(self, monkeypatch, capsys):
         self._fake_systemctl(
@@ -651,13 +647,13 @@ class TestDuplicateScopeInstall:
         out = " ".join(f"{excinfo.value.message} {excinfo.value.hint}".split())
         assert "same agent is already installed system-wide" in out
         assert "same enrollment token" in out
-        assert "hle daemon uninstall --label agent" in out
+        assert "hle daemon delete agent" in out
 
     def test_it_works_in_the_other_direction_too(self, tmp_path, monkeypatch):
         with pytest.raises(HleError) as excinfo:
             self._install(tmp_path, monkeypatch, user_mode=False, existing="user")
         out = " ".join(f"{excinfo.value.message} {excinfo.value.hint}".split())
-        assert "hle daemon uninstall --user --label agent" in out
+        assert "hle daemon delete agent --user" in out
 
     def test_the_same_token_file_read_as_the_same_user_counts(self, tmp_path, monkeypatch):
         """Unreadable tokens, but provably one identity: same file, same user."""

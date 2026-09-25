@@ -365,7 +365,7 @@ def _restart_services(
             needs_root = needs_root or not user_mode
             console.print(f"  [red]failed[/red] {svc} ({scope})")
     if failed:
-        hint = "Check 'hle daemon status --agent' and the service log."
+        hint = "Check 'hle daemon status agent' and the service log."
         if needs_root and os.geteuid() != 0:
             # `sudo hle daemon restart --all` is the obvious next thing to try
             # and it does not work: hle lives in ~/.local/bin, which sudo's

@@ -106,7 +106,7 @@ class AbortedError(HleError):
 
 
 NO_API_KEY = "No API key found. Run 'hle auth login', set HLE_API_KEY, or pass --api-key."
-NO_AGENT_TOKEN = "No agent token. Run 'hle agent enroll' first."
+NO_AGENT_TOKEN = "No agent token. Run 'hle auth login --agent-token' first."
 
 
 def server_detail(exc: Any) -> str | None:

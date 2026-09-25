@@ -116,7 +116,7 @@ async def delete_tunnel(
             reason=f"{subdomain} is connected — stop it before deleting its record.",
             hint=(
                 "Foreground:  Ctrl-C the 'hle tunnel create' that is running it.\n"
-                "As a service: hle daemon list, then hle daemon uninstall --label <label>."
+                "As a service: hle daemon list, then hle daemon delete <label>."
             ),
         )
     try:

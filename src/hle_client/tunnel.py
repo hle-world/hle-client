@@ -25,7 +25,7 @@ import websockets.exceptions
 from hle_client import __version__
 from hle_client import config as hle_config
 from hle_client.identity import hostname, instance_id
-from hle_client.notices import render_notice
+from hle_client.notices import emit_event, render_notice
 from hle_client.proxy import UPSTREAM_ERROR_HEADER, LocalProxy, ProxyConfig
 from hle_common import close_codes
 from hle_common.models import (
@@ -405,6 +405,7 @@ class Tunnel:
     _post_register_done: bool = field(default=False, init=False, repr=False)
     _tunnel_id: str | None = field(default=None, init=False, repr=False)
     _public_url: str | None = field(default=None, init=False, repr=False)
+    _subdomain: str | None = field(default=None, init=False, repr=False)
     _proxy: LocalProxy = field(init=False, repr=False)
     _ws: _ClientConn | None = field(default=None, init=False, repr=False)
     # Values are either a connected _ClientConn (local WS established) or an
@@ -475,12 +476,18 @@ class Tunnel:
                 websockets.exceptions.WebSocketException,
                 ConnectionError,
             ) as exc:
+                # Captured before the retry-after branch below clears it:
+                # whether this session ever went live decides which event a
+                # supervisor sees — a live tunnel dropping, or an attempt failing.
+                was_live = self._session_registered
+                close_code: int | None = None
                 if isinstance(exc, websockets.exceptions.ConnectionClosed) and exc.rcvd is not None:
                     code = exc.rcvd.code
+                    close_code = code
                     if close_codes.is_fatal(code):
-                        raise TunnelFatalError(
-                            self._fatal_close_message(code, exc.rcvd.reason)
-                        ) from exc
+                        message = self._fatal_close_message(code, exc.rcvd.reason)
+                        self._emit("fatal", level="error", message=message, code=code)
+                        raise TunnelFatalError(message) from exc
                     wait = close_codes.retry_after_seconds(code)
                     if wait is not None:
                         # The relay asked for a specific pause. Honour it
@@ -495,6 +502,10 @@ class Tunnel:
                         delay = max(delay, wait)
                         self._session_registered = False
                 logger.warning("Connection lost: %s", exc)
+                if was_live:
+                    self._emit("disconnected", level="warning", message=str(exc), code=close_code)
+                else:
+                    self._emit("error", level="error", message=str(exc), code=close_code)
             except asyncio.CancelledError:
                 # Re-raised after cleanup, not swallowed: the caller that
                 # cancelled us (Ctrl+C, SIGTERM) needs to see the cancel to
@@ -521,6 +532,16 @@ class Tunnel:
             logger.info("Reconnecting in %.1fs ...", delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, self.config.max_reconnect_delay)
+
+    def _emit(self, event: str, **fields: Any) -> None:
+        """One structured event (``--events``) about this tunnel; no-op when off."""
+        emit_event(
+            event,
+            label=self.config.service_label,
+            subdomain=self._subdomain,
+            public_url=self._public_url,
+            **fields,
+        )
 
     def _fatal_close_message(self, code: int, reason: str | None) -> str:
         """What to tell the operator about a close they must not retry.
@@ -663,6 +684,8 @@ class Tunnel:
             ping_timeout=120,
         ) as ws:
             self._ws = ws
+            # Transport up, not yet a tunnel: `registered` follows on TUNNEL_ACK.
+            self._emit("connected", message=f"Connected to relay at {relay_uri}")
 
             # --- Registration handshake ---
             registration = TunnelRegistration(
@@ -711,6 +734,7 @@ class Tunnel:
             ack_data = TunnelRegistrationResponse.model_validate(ack_msg.payload)
             self._tunnel_id = ack_data.tunnel_id
             self._public_url = ack_data.public_url
+            self._subdomain = ack_data.subdomain or None
             self._server_caps = getattr(ack_data, "server_capabilities", []) or []
             # This session worked, whatever ends it — so the reconnect backoff
             # in connect() starts over rather than compounding across the
@@ -721,6 +745,7 @@ class Tunnel:
                 self._tunnel_id,
                 self._public_url,
             )
+            self._emit("registered", level="success", message="Tunnel registered")
 
             # Fire post-registration callback (once) for --add-auth etc.
             if self.on_registered and not self._post_register_done:
@@ -781,7 +806,12 @@ class Tunnel:
         except Exception:
             logger.exception("Malformed NOTICE payload: %s", msg.payload)
             return
-        render_notice(notice)
+        render_notice(
+            notice,
+            label=self.config.service_label,
+            subdomain=self._subdomain,
+            public_url=self._public_url,
+        )
 
     # ------------------------------------------------------------------
     # Diagnostics — server-toggled debug logging and event echo
