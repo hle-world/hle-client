@@ -58,13 +58,15 @@ hle daemon install _flags  [command]  hidden=True  help='Install (and start) a b
     option   --service                    name=service_url type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --label                      name=label type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --zone                       name=zone type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --auth                       name=auth type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --websocket                  name=websocket type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --verify-ssl                 name=verify_ssl type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --forward-host               name=forward_host type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --upstream-basic-auth        name=upstream_basic_auth type=text required=False multiple=False nargs=1 flag=False envvar=HLE_UPSTREAM_BASIC_AUTH default_set=False hidden=False
+    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --user                       name=user_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
@@ -97,13 +99,15 @@ hle daemon install tunnel  [command]  hidden=False  help='Install one always-on 
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument url                          name=url type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --zone                       name=zone type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --auth                       name=auth type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --websocket                  name=websocket type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --verify-ssl                 name=verify_ssl type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --forward-host               name=forward_host type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --upstream-basic-auth        name=upstream_basic_auth type=text required=False multiple=False nargs=1 flag=False envvar=HLE_UPSTREAM_BASIC_AUTH default_set=False hidden=False
+    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --start                      name=start type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --run-as                     name=run_as type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
@@ -151,16 +155,17 @@ hle daemon uninstall  [command]  hidden=False  help='Stop, disable, and remove a
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle expose  [command]  hidden=True  help='Expose a local service to the internet.'
     option   --service                    name=service type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
-    option   --auth                       name=auth type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --label                      name=service_label type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --zone                       name=zone type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
+    option   --zone                       name=zone type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --auth                       name=auth type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --websocket                  name=websocket type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --verify-ssl                 name=verify_ssl type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --upstream-basic-auth        name=upstream_basic_auth type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --forward-host               name=forward_host type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --upstream-basic-auth        name=upstream_basic_auth type=text required=False multiple=False nargs=1 flag=False envvar=HLE_UPSTREAM_BASIC_AUTH default_set=False hidden=False
+    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle forward  [command]  hidden=False  help='Forward TCP ports from a remote agent to this machine.'
@@ -230,15 +235,16 @@ hle tunnel basic-auth status  [command]  hidden=False  help='Show HTTP Basic Aut
 hle tunnel create  [command]  hidden=False  help='Expose a local service to the internet.'
     argument first                        name=first type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument second                       name=second type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
-    option   --auth                       name=auth type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
-    option   --zone                       name=zone type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --zone                       name=zone type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --auth                       name=auth type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --websocket                  name=websocket type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --verify-ssl                 name=verify_ssl type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --upstream-basic-auth        name=upstream_basic_auth type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --forward-host               name=forward_host type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --upstream-basic-auth        name=upstream_basic_auth type=text required=False multiple=False nargs=1 flag=False envvar=HLE_UPSTREAM_BASIC_AUTH default_set=False hidden=False
+    option   --apex                       name=apex type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --option                     name=options type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel delete  [command]  hidden=False  help="Delete a tunnel's record."
@@ -298,6 +304,7 @@ hle tunnel webhook  [command]  hidden=False  help='Forward incoming webhooks to 
     option   --forward-to                 name=forward_to type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --label                      name=service_label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
+    option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle update  [command]  hidden=False  help='Update the HLE client to the latest version (any install method).'
     option   --check                      name=check type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
@@ -311,6 +318,7 @@ hle webhook  [command]  hidden=True  help='Forward incoming webhooks to a local 
     option   --forward-to                 name=forward_to type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --label                      name=service_label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
+    option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 ALIASES
   hle : config -> tunnel

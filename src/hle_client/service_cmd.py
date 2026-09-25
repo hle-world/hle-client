@@ -40,8 +40,16 @@ from hle_client import __version__, config
 from hle_client.aliases import LegacyModeCommand, ModeGroup
 from hle_client.errors import HleError, UsageError
 from hle_client.richcompat import Console, Table
+from hle_client.tunnel_options import spec_from_params, tunnel_options, validate_label_and_apex
+from hle_common.tunnel_spec import TunnelSpec, cli_fields
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+# Where the service environment carries --upstream-basic-auth. Taken from the
+# option's own envvar so the two cannot disagree.
+_UPSTREAM_AUTH_ENV: str = next(
+    meta["envvar"] for name, meta in cli_fields() if name == "upstream_basic_auth"
+)
 
 console = Console()
 
@@ -93,6 +101,27 @@ def parse_service_spec(text: str) -> dict[str, Any] | None:
     return None
 
 
+def stamped_tunnel_spec(stamp: dict[str, Any]) -> TunnelSpec | None:
+    """The ``TunnelSpec`` a tunnel service was installed from, if its stamp has one.
+
+    Tunnel stamps carry the spec under ``"tunnel"`` (as the WireModel dumps
+    it) since TunnelSpec existed. Older stamps, and every agent or forward
+    stamp, have only ``run_args`` — that is None here, not an error.
+    """
+    raw = stamp.get("tunnel")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        spec = TunnelSpec.model_validate(raw)
+    except (ValueError, TypeError):
+        return None
+    # Only what build_expose_args can turn back into argv; anything else is
+    # replayed from run_args rather than failing the refresh.
+    if not spec.service_url or spec.webhook_path:
+        return None
+    return spec
+
+
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
@@ -131,40 +160,52 @@ def launchd_label(label: str, name: str | None = None) -> str:
     return f"{_LAUNCHD_LABEL_PREFIX}.{label}"
 
 
-def build_expose_args(
-    *,
-    service: str,
-    label: str | None,
-    zone: str | None = None,
-    apex: bool = False,
-    auth: str = "sso",
-    websocket: bool = True,
-    verify_ssl: bool = False,
-    forward_host: bool = False,
-    allow: tuple[str, ...] = (),
-    options: tuple[str, ...] = (),
-) -> list[str]:
-    """Build the ``expose`` argv (no secrets) for the service definition."""
-    args = ["expose", "--service", service]
-    if label:
-        args += ["--label", label]
-    if zone:
-        args += ["--zone", zone]
-    if apex:
+def build_expose_args(spec: TunnelSpec, *, allow: tuple[str, ...] | list[str] = ()) -> list[str]:
+    """Build the ``expose`` argv for a service definition, from a ``TunnelSpec``.
+
+    Secrets are never part of argv — anyone on the machine can read a process
+    list, and the unit file's ExecStart line with it. ``upstream_basic_auth``
+    travels in the service environment instead (:func:`expose_env`), where
+    ``--upstream-basic-auth`` picks it up through its envvar. The API key is
+    read at runtime from the running user's config or ``HLE_API_KEY``.
+
+    Raises ``ValueError`` for a webhook spec: webhooks run through
+    ``tunnel webhook``, which ``expose`` is not.
+    """
+    if spec.webhook_path:
+        raise ValueError("a webhook spec cannot be run as `hle expose`")
+    if not spec.service_url:
+        raise ValueError("a tunnel needs a service_url")
+    args = ["expose", "--service", spec.service_url]
+    if spec.label:
+        args += ["--label", spec.label]
+    if spec.zone:
+        args += ["--zone", spec.zone]
+    if spec.apex:
         args.append("--apex")
-    if auth and auth != "sso":
-        args += ["--auth", auth]
-    if not websocket:
+    if spec.auth_mode and spec.auth_mode != "sso":
+        args += ["--auth", spec.auth_mode]
+    if not spec.websocket_enabled:
         args.append("--no-websocket")
-    if verify_ssl:
+    if spec.verify_ssl:
         args.append("--verify-ssl")
-    if forward_host:
+    if spec.forward_host:
         args.append("--forward-host")
+    if spec.response_timeout is not None:
+        args += ["--response-timeout", str(spec.response_timeout)]
     for email in allow:
         args += ["--allow", email]
-    for opt in options:
-        args += ["--option", opt]
+    for key, value in (spec.options or {}).items():
+        args += ["--option", f"{key}={value}"]
     return args
+
+
+def expose_env(spec: TunnelSpec) -> dict[str, str]:
+    """Environment the service needs for the parts of *spec* argv must not carry."""
+    env: dict[str, str] = {}
+    if spec.upstream_basic_auth:
+        env[_UPSTREAM_AUTH_ENV] = spec.upstream_basic_auth
+    return env
 
 
 def build_agent_args(
@@ -289,6 +330,36 @@ def _quote_exec_args(args: list[str]) -> str:
     return " ".join(out)
 
 
+def _systemd_env_escape(value: str) -> str:
+    """Escape a value for a double-quoted ``Environment=`` assignment."""
+    if "\n" in value or "\r" in value:
+        raise UsageError("Service environment values cannot contain newlines.")
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+
+
+def _write_service_file(path: Path, text: str, *, private: bool, mode: int = 0o644) -> None:
+    """Write a unit/plist/rc script; owner-only when it carries a secret.
+
+    A service file is normally world-readable, and ``systemctl cat`` shows it
+    to anyone. One carrying a secret in its environment (and in its hle-spec
+    stamp) is created 0600 — or 0700 for an rc.d script, which must stay
+    executable — before a byte of the secret is written.
+    """
+    if not private:
+        path.write_text(text)
+        if mode != 0o644:
+            path.chmod(mode)
+        return
+    private_mode = 0o700 if mode & 0o111 else 0o600
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, private_mode)
+    try:
+        # An existing file keeps its mode through O_TRUNC; tighten it first.
+        os.fchmod(fd, private_mode)
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+
+
 def render_unit(
     *,
     label: str,
@@ -300,6 +371,7 @@ def render_unit(
     description: str | None = None,
     restart: str = "on-failure",
     spec: dict[str, Any] | None = None,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Render the systemd unit file text. Pure function (unit-testable)."""
     exec_start = f"{hle_path} {_quote_exec_args(run_args)}"
@@ -327,6 +399,10 @@ def render_unit(
     # path at runtime finds the wrong one whenever those differ.
     if agent_config:
         lines.append(f"Environment=HLE_AGENT_CONFIG={agent_config}")
+    # Values argv must not carry (secrets). The unit file is written 0600
+    # whenever there are any, see _write_service_file.
+    for key, value in sorted((env or {}).items()):
+        lines.append(f'Environment="{key}={_systemd_env_escape(value)}"')
     # System units run as root by default; pin an explicit user when asked so
     # the tunnel reads that user's ~/.config/hle/config.toml (API key).
     if not user_mode and run_as_user:
@@ -450,6 +526,7 @@ def _systemd_install(
     restart: str = "on-failure",
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
+    env: dict[str, str] | None = None,
 ) -> None:
     run_as_user = run_as or (None if user_mode else getpass.getuser())
     unit = render_unit(
@@ -457,6 +534,7 @@ def _systemd_install(
         hle_path=find_hle_path(),
         run_args=run_args,
         agent_config=agent_config,
+        env=env,
         user_mode=user_mode,
         run_as_user=run_as_user,
         description=description,
@@ -507,7 +585,7 @@ def _systemd_install(
 
     path = _unit_dir(user_mode) / uname
     try:
-        path.write_text(unit)
+        _write_service_file(path, unit, private=bool(env))
     except PermissionError:
         raise HleError(
             f"Permission denied writing {path}.",
@@ -612,6 +690,7 @@ def render_launchd_plist(
     log_dir: str,
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Render a launchd plist. Pure function (unit-testable).
 
@@ -645,14 +724,17 @@ def render_launchd_plist(
     # The token file by absolute path. launchd hands a daemon its own
     # environment, so deriving the path from HOME at runtime can resolve
     # somewhere the enrolling user never wrote to.
+    plist_env = dict(sorted((env or {}).items()))
     if agent_config:
-        lines += [
-            "    <key>EnvironmentVariables</key>",
-            "    <dict>",
-            "        <key>HLE_AGENT_CONFIG</key>",
-            f"        <string>{_xml_escape(agent_config)}</string>",
-            "    </dict>",
-        ]
+        plist_env = {"HLE_AGENT_CONFIG": agent_config, **plist_env}
+    if plist_env:
+        lines += ["    <key>EnvironmentVariables</key>", "    <dict>"]
+        for key, value in plist_env.items():
+            lines += [
+                f"        <key>{_xml_escape(key)}</key>",
+                f"        <string>{_xml_escape(value)}</string>",
+            ]
+        lines.append("    </dict>")
     lines += [
         "    <key>StandardOutPath</key>",
         f"    <string>{_xml_escape(out_log)}</string>",
@@ -695,6 +777,7 @@ def _launchd_install(
     start: bool,
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
+    env: dict[str, str] | None = None,
 ) -> None:
     # Per-user agents run as the invoking user already; only system daemons
     # need an explicit UserName so the tunnel reads that user's config.
@@ -708,11 +791,12 @@ def _launchd_install(
         run_as_user=run_as_user,
         log_dir=_launchd_log_dir(user_mode),
         agent_config=agent_config,
+        env=env,
         spec=spec,
     )
     path = _launchd_dir(user_mode) / f"{plabel}.plist"
     try:
-        path.write_text(plist)
+        _write_service_file(path, plist, private=bool(env))
     except PermissionError:
         raise HleError(
             f"Permission denied writing {path}.",
@@ -848,6 +932,7 @@ def render_rc_script(
     description: str | None = None,
     restart: bool = True,
     spec: dict[str, Any] | None = None,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Render the rc.d script text. Pure function (unit-testable).
 
@@ -907,6 +992,10 @@ def render_rc_script(
         f'${{hle_command}} {args}"',
         'procname="/usr/sbin/daemon"',
         "",
+        # Values argv must not carry (secrets). Exported rather than passed to
+        # env(1) above, which would put them in daemon(8)'s process arguments;
+        # rc.subr's `su -m` keeps the environment. The script is 0700 then.
+        *(f"export {key}={_rc_quote(value)}" for key, value in sorted((env or {}).items())),
         'run_rc_command "$1"',
         "",
     ]
@@ -1004,6 +1093,7 @@ def _rcd_install(
     restart: bool = True,
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
+    env: dict[str, str] | None = None,
 ) -> None:
     svc = rc_service_name(label, name)
     script = render_rc_script(
@@ -1012,6 +1102,7 @@ def _rcd_install(
         run_args=run_args,
         run_as_user=run_as,
         agent_config=agent_config,
+        env=env,
         name=name,
         description=description,
         restart=restart,
@@ -1020,8 +1111,7 @@ def _rcd_install(
     path = _rcd_path(svc)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(script)
-        path.chmod(0o755)
+        _write_service_file(path, script, private=bool(env), mode=0o755)
     except PermissionError:
         raise HleError(
             f"Permission denied writing {path}.",
@@ -1184,10 +1274,21 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
     refresh at all.
     """
     label = str(spec["label"])
-    run_args = [str(a) for a in spec["run_args"]]
+    env: dict[str, str] = {}
+    tunnel = stamped_tunnel_spec(spec)
+    if tunnel is not None:
+        # Rebuilt from the TunnelSpec rather than replayed, so a refresh after
+        # an upgrade writes the argv this client version would write.
+        allow = [str(a) for a in spec.get("allow") or ()]
+        run_args = build_expose_args(tunnel, allow=allow)
+        env = expose_env(tunnel)
+    else:
+        # Stamps written before TunnelSpec (and every agent/forward stamp)
+        # carry only argv, which is replayed as it was.
+        run_args = [str(a) for a in spec["run_args"]]
     name = spec.get("name")
     user_mode = bool(spec.get("user_mode"))
-    stamped = {**spec, "version": __version__}
+    stamped = {**spec, "version": __version__, "run_args": run_args}
     if run_args[:2] == ["agent", "run"]:
         # A self-update ends the agent on purpose (exit 1) and relies on the
         # manager to start it from `current`; a rollback does the same. Older
@@ -1205,6 +1306,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             restart=stamped.get("restart", "on-failure") != "no",
             agent_config=spec.get("agent_config"),
             spec=stamped,
+            env=env,
         )
     elif plat == "darwin":
         _launchd_install(
@@ -1216,6 +1318,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             start=start,
             agent_config=spec.get("agent_config"),
             spec=stamped,
+            env=env,
         )
     else:
         _systemd_install(
@@ -1229,6 +1332,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             restart=str(stamped.get("restart", "on-failure")),
             agent_config=spec.get("agent_config"),
             spec=stamped,
+            env=env,
         )
 
 
@@ -1374,16 +1478,7 @@ def install_group() -> None:
 )
 @click.option("--service", "service_url", default=None, help="Local service URL")
 @click.option("--label", default=None, help="Service label (also names the unit hle-<label>)")
-@click.option("--zone", default=None, help="Custom zone to publish under")
-@click.option("--apex", is_flag=True, default=False, help="Serve at the bare zone root")
-@click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
-@click.option("--websocket/--no-websocket", default=True, help="Enable WebSocket proxying")
-@click.option("--verify-ssl", is_flag=True, default=False, help="Verify upstream TLS cert")
-@click.option("--forward-host", is_flag=True, default=False, help="Forward the browser Host header")
-@click.option("--allow", multiple=True, metavar="[PROVIDER:]EMAIL", help="SSO allow rule (repeat)")
-@click.option(
-    "--option", "options", multiple=True, metavar="KEY=VALUE", help="Passthrough (repeat)"
-)
+@tunnel_options
 @click.option("--name", default=None, help="Override the unit/plist name")
 @click.option("--user", "user_mode", is_flag=True, default=False, help="Install a per-user service")
 @click.option(
@@ -1402,19 +1497,13 @@ def install(
     relay_port: int | None,
     service_url: str | None,
     label: str | None,
-    zone: str | None,
-    apex: bool,
-    auth: str,
-    websocket: bool,
-    verify_ssl: bool,
-    forward_host: bool,
     allow: tuple[str, ...],
-    options: tuple[str, ...],
     name: str | None,
     user_mode: bool,
     system_mode: bool,
     run_as: str | None,
     start: bool,
+    **tunnel_params: Any,
 ) -> None:
     """Install (and start) a background service — the flag form.
 
@@ -1433,6 +1522,10 @@ def install(
     system service, pass --run-as <user> (defaults to the current user) so the
     service reads that user's config.
 
+    The one exception is --upstream-basic-auth, which the local service needs
+    and nothing else holds: it goes into the service's environment (never its
+    command line), and the service file is then written owner-only.
+
     Scope is auto-detected when neither --user nor --system is given: root
     installs a system service, a normal user installs a per-user one.
     """
@@ -1441,6 +1534,8 @@ def install(
 
     if agent_mode and fp_mode:
         raise UsageError("Pass either --agent or --fp, not both.")
+
+    tunnel: TunnelSpec | None = None
 
     if fp_mode:
         if not agent_name or not fp_target:
@@ -1483,18 +1578,9 @@ def install(
                 "--service and --label are required (or pass --agent to install "
                 "the dashboard-managed agent)."
             )
-        run_args = build_expose_args(
-            service=service_url,
-            label=label,
-            zone=zone,
-            apex=apex,
-            auth=auth,
-            websocket=websocket,
-            verify_ssl=verify_ssl,
-            forward_host=forward_host,
-            allow=allow,
-            options=options,
-        )
+        tunnel = spec_from_params(service_url=service_url, label=label, **tunnel_params)
+        validate_label_and_apex(tunnel)
+        run_args = build_expose_args(tunnel, allow=allow)
         description = f"HLE tunnel: {label}"
         restart = "on-failure"
 
@@ -1511,7 +1597,7 @@ def install(
             "[cyan]hle agent enroll <token>[/cyan]."
         )
 
-    spec = {
+    spec: dict[str, Any] = {
         "version": __version__,
         "label": label,
         "run_args": run_args,
@@ -1522,6 +1608,11 @@ def install(
         "agent_config": agent_config,
         "user_mode": user_mode,
     }
+    if tunnel is not None:
+        # What a refresh rebuilds from. run_args stays alongside it, so a
+        # client older than TunnelSpec can still replay this stamp.
+        spec["tunnel"] = tunnel.model_dump()
+        spec["allow"] = list(allow)
     _install_from_spec(spec, plat=plat, start=start)
 
     if agent_mode:
@@ -1553,14 +1644,7 @@ def _scope_options(f: F) -> F:
 @install_group.command("tunnel")
 @click.argument("label")
 @click.argument("url")
-@click.option("--zone", default=None, help="Custom zone to publish under")
-@click.option("--apex", is_flag=True, default=False, help="Serve at the bare zone root")
-@click.option("--auth", type=click.Choice(["sso", "none"]), default="sso", help="Auth mode")
-@click.option("--websocket/--no-websocket", default=True, help="Enable WebSocket proxying")
-@click.option("--verify-ssl", is_flag=True, default=False, help="Verify upstream TLS cert")
-@click.option("--forward-host", is_flag=True, default=False, help="Forward the browser Host header")
-@click.option("--allow", multiple=True, metavar="[PROVIDER:]EMAIL", help="SSO allow rule (repeat)")
-@click.option("--option", "options", multiple=True, metavar="KEY=VALUE", help="Passthrough")
+@tunnel_options
 @_scope_options
 @click.pass_context
 def install_tunnel(ctx: click.Context, /, label: str, url: str, **kwargs: Any) -> None:

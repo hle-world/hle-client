@@ -22,6 +22,7 @@ from hle_client.service_cmd import (
     resolve_user_mode,
     unit_name,
 )
+from hle_common.tunnel_spec import TunnelSpec
 
 # Rich colours numbers and wraps at the console width, so raw substring
 # assertions on its output fail for reasons the user never sees.
@@ -153,7 +154,8 @@ class TestUnitName:
 
 class TestBuildExposeArgs:
     def test_minimal(self):
-        assert build_expose_args(service="http://localhost:9998", label="tv") == [
+        spec = TunnelSpec(service_url="http://localhost:9998", label="tv")
+        assert build_expose_args(spec) == [
             "expose",
             "--service",
             "http://localhost:9998",
@@ -162,17 +164,18 @@ class TestBuildExposeArgs:
         ]
 
     def test_all_options(self):
-        args = build_expose_args(
-            service="https://192.168.2.200:8006",
+        spec = TunnelSpec(
+            service_url="https://192.168.2.200:8006",
             label="prox",
             zone="pr.t00t.us",
-            auth="none",
-            websocket=False,
+            auth_mode="none",
+            websocket_enabled=False,
             verify_ssl=True,
             forward_host=True,
-            allow=("a@x.com", "github:b@y.com"),
-            options=("k=v",),
+            options={"k": "v"},
+            response_timeout=90,
         )
+        args = build_expose_args(spec, allow=("a@x.com", "github:b@y.com"))
         assert "--zone" in args and "pr.t00t.us" in args
         assert "--auth" in args and "none" in args
         assert "--no-websocket" in args
@@ -180,16 +183,101 @@ class TestBuildExposeArgs:
         assert "--forward-host" in args
         assert args.count("--allow") == 2
         assert "--option" in args and "k=v" in args
+        assert args[args.index("--response-timeout") + 1] == "90"
 
     def test_apex_no_label_flag(self):
-        args = build_expose_args(service="http://x", label=None, zone="t00t.us", apex=True)
+        spec = TunnelSpec(service_url="http://x", label=None, zone="t00t.us", apex=True)
+        args = build_expose_args(spec)
         assert "--apex" in args
         assert "--label" not in args
 
     def test_no_service_secrets(self):
         # API key must never appear in the generated args.
-        args = build_expose_args(service="http://x", label="tv")
+        args = build_expose_args(TunnelSpec(service_url="http://x", label="tv"))
         assert not any("api" in a.lower() or "key" in a.lower() for a in args)
+
+    def test_upstream_basic_auth_goes_to_env_not_argv(self):
+        spec = TunnelSpec(service_url="http://x", label="tv", upstream_basic_auth="u:s3cret")
+        args = build_expose_args(spec)
+        assert not any("s3cret" in a for a in args)
+        assert "--upstream-basic-auth" not in args
+        assert service_cmd.expose_env(spec) == {"HLE_UPSTREAM_BASIC_AUTH": "u:s3cret"}
+
+    def test_no_env_without_secret(self):
+        assert service_cmd.expose_env(TunnelSpec(service_url="http://x", label="tv")) == {}
+
+    def test_webhook_spec_is_refused(self):
+        spec = TunnelSpec(service_url="http://x", label="gh", webhook_path="/hook")
+        with pytest.raises(ValueError, match="webhook"):
+            build_expose_args(spec)
+
+
+class TestSecretServiceFiles:
+    """A unit carrying upstream basic auth is owner-only; others are unchanged."""
+
+    def test_unit_env_line_is_quoted_and_escaped(self):
+        unit = render_unit(
+            label="tv",
+            hle_path="/usr/bin/hle",
+            run_args=["expose", "--service", "http://x", "--label", "tv"],
+            user_mode=True,
+            run_as_user=None,
+            env={"HLE_UPSTREAM_BASIC_AUTH": 'u:p"a%ss\\'},
+        )
+        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH=u:p\\"a%%ss\\\\"' in unit
+
+    def test_unit_env_rejects_newlines(self):
+        with pytest.raises(UsageError):
+            render_unit(
+                label="tv",
+                hle_path="/usr/bin/hle",
+                run_args=["expose"],
+                user_mode=True,
+                run_as_user=None,
+                env={"HLE_UPSTREAM_BASIC_AUTH": "u:p\nExecStart=/bin/sh"},
+            )
+
+    def test_plist_env(self):
+        plist = render_launchd_plist(
+            label="tv",
+            plist_label="world.hle.tv",
+            hle_path="/usr/bin/hle",
+            run_args=["expose"],
+            run_as_user=None,
+            log_dir="/tmp",
+            env={"HLE_UPSTREAM_BASIC_AUTH": "u:<p>"},
+        )
+        assert "<key>HLE_UPSTREAM_BASIC_AUTH</key>" in plist
+        assert "<string>u:&lt;p&gt;</string>" in plist
+
+    def test_rc_script_exports_env_outside_command_args(self):
+        script = service_cmd.render_rc_script(
+            label="tv",
+            hle_path="/usr/local/bin/hle",
+            run_args=["expose"],
+            env={"HLE_UPSTREAM_BASIC_AUTH": "u:it's"},
+        )
+        assert "export HLE_UPSTREAM_BASIC_AUTH='u:it'\\''s'" in script
+        command_args = next(ln for ln in script.splitlines() if ln.startswith("command_args="))
+        assert "HLE_UPSTREAM_BASIC_AUTH" not in command_args
+
+    def test_private_write_is_owner_only(self, tmp_path):
+        path = tmp_path / "hle-tv.service"
+        path.write_text("old")
+        path.chmod(0o644)
+        service_cmd._write_service_file(path, "secret", private=True)
+        assert path.read_text() == "secret"
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_private_rc_script_stays_executable(self, tmp_path):
+        path = tmp_path / "hle_tv"
+        service_cmd._write_service_file(path, "#!/bin/sh", private=True, mode=0o755)
+        assert path.stat().st_mode & 0o777 == 0o700
+
+    def test_public_rc_script_mode(self, tmp_path):
+        path = tmp_path / "hle_tv"
+        service_cmd._write_service_file(path, "#!/bin/sh", private=False, mode=0o755)
+        assert path.stat().st_mode & 0o777 == 0o755
 
 
 class TestRenderUnit:
