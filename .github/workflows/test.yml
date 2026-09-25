@@ -71,7 +71,12 @@ jobs:
             [ -d "$plugin" ] || continue
             [ -f "${plugin}pyproject.toml" ] || continue
             echo "::group::$(basename "$plugin")"
-            uv pip install --system -e "${plugin}[dev]"
+            # A plugin pins the client release it was written for, which may
+            # be the one this tree is about to become. Override that one
+            # constraint so the plugin is tested against the checked-out
+            # client installed above, not against whatever PyPI resolves.
+            printf 'hle-client\n' > /tmp/client-override.txt
+            uv pip install --system --override /tmp/client-override.txt -e "${plugin}[dev]"
             (cd "$plugin" && ruff check src/ tests/ && ruff format --check src/ tests/)
             (cd "$plugin" && pytest tests/ -q)
             echo "::endgroup::"

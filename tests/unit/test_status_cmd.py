@@ -9,9 +9,11 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from hle_client.cli import main
+from hle_client.ops.models import Agent
 
 
 def _state(agents: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """What ``collect`` hands the renderer, built from the relay's raw payload."""
     return {
         "version": "0.0.0",
         "credentials": {
@@ -22,7 +24,7 @@ def _state(agents: list[dict[str, Any]] | None) -> dict[str, Any]:
         },
         "daemons": [],
         "tunnels": [],
-        "agents": agents,
+        "agents": None if agents is None else [Agent.from_api(a) for a in agents],
     }
 
 

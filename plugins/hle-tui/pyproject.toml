@@ -24,7 +24,7 @@ classifiers = [
 # The point of shipping this separately: textual and its dependencies land only
 # on machines that asked for a dashboard, never on the router running a tunnel.
 dependencies = [
-    "hle-client>=2609.5",
+    "hle-client>=2609.8,<2700",
     "textual>=0.80",
 ]
 
