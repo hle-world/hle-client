@@ -535,6 +535,16 @@ class Tunnel:
     def public_url(self) -> str | None:
         return self._public_url
 
+    @property
+    def active_ws_streams(self) -> int:
+        """Browser WebSocket streams currently proxied through this tunnel.
+
+        Open local sockets and streams still being opened both count: a
+        restart drops either. The agent reads this before accepting a
+        self-update with ``drain_policy == "wait"``.
+        """
+        return len(self._ws_streams)
+
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------

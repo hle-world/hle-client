@@ -684,6 +684,12 @@ def run(token: str | None, relay_host: str, relay_port: int) -> None:
     # argument over. Say what happened and exit non-zero.
     if client.fatal_error:
         raise HleError("Agent stopped by the relay.", hint=client.fatal_error)
+    # A self-update (or its rollback) ends the process on purpose so the
+    # service manager relaunches whatever `current` now points at. Non-zero,
+    # because Restart=on-failure would not bring it back from a clean exit.
+    if client.exit_code:
+        console.print("[yellow]Agent restarting to change version.[/yellow]")
+        sys.exit(client.exit_code)
 
 
 @agent.command("status")

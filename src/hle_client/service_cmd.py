@@ -97,7 +97,17 @@ def parse_service_spec(text: str) -> dict[str, Any] | None:
 # Shared helpers
 # --------------------------------------------------------------------------- #
 def find_hle_path() -> str:
-    """Resolve an absolute path to the ``hle`` executable for the service."""
+    """Resolve an absolute path to the ``hle`` executable for the service.
+
+    With the installer's versioned layout that is ``current/bin/hle``, not the
+    venv the command happens to run from: a self-update or ``hle update``
+    repoints ``current``, and the unit must follow it on the next start.
+    """
+    from hle_client.agent_update import versioned_exec_path
+
+    versioned = versioned_exec_path()
+    if versioned is not None:
+        return str(versioned)
     found = shutil.which("hle")
     if found:
         return found
@@ -300,6 +310,11 @@ def render_unit(
         f"Description={description or f'HLE tunnel: {label}'}",
         "After=network-online.target",
         "Wants=network-online.target",
+        # Always-restart units (the agent, forwards) must never be given up
+        # on: a self-update is swap + exit, and a failed one adds rollback +
+        # exit. With the default start limit a few of those close together
+        # leave the unit dead until someone runs systemctl reset-failed.
+        *(["StartLimitIntervalSec=0"] if restart == "always" else []),
         "",
         "[Service]",
         "Type=simple",
@@ -1173,6 +1188,11 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
     name = spec.get("name")
     user_mode = bool(spec.get("user_mode"))
     stamped = {**spec, "version": __version__}
+    if run_args[:2] == ["agent", "run"]:
+        # A self-update ends the agent on purpose (exit 1) and relies on the
+        # manager to start it from `current`; a rollback does the same. Older
+        # specs may carry on-failure, so a refresh upgrades them.
+        stamped["restart"] = "always"
     if plat == "freebsd":
         _rcd_reject_user_mode(user_mode)
         _rcd_install(
@@ -1182,7 +1202,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             run_as=spec.get("run_as"),
             start=start,
             description=spec.get("description"),
-            restart=spec.get("restart", "on-failure") != "no",
+            restart=stamped.get("restart", "on-failure") != "no",
             agent_config=spec.get("agent_config"),
             spec=stamped,
         )
@@ -1206,7 +1226,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             run_as=spec.get("run_as"),
             start=start,
             description=spec.get("description"),
-            restart=str(spec.get("restart", "on-failure")),
+            restart=str(stamped.get("restart", "on-failure")),
             agent_config=spec.get("agent_config"),
             spec=stamped,
         )
