@@ -1,5 +1,9 @@
 # Changelog
 
+## v2609.9 — 2026-09-25
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2609.8 — 2026-09-25
 
 ### Added
