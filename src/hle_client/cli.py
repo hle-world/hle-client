@@ -21,12 +21,12 @@ from hle_client.context import api, out, prompt, resolve_api_key
 from hle_client.credentials import normalize_credential_env
 from hle_client.errors import (
     NO_AGENT_TOKEN,
-    ApiError,
     AuthError,
     HleError,
     UsageError,
 )
 from hle_client.fp_cmd import fp as fp_command
+from hle_client.ops import agents as ops_agents
 from hle_client.output import OUTPUT_FORMATS, TABLE, Output
 from hle_client.richcompat import Console
 from hle_client.service_cmd import service as service_group
@@ -127,16 +127,12 @@ def main(
     )
 
 
-_VALID_AUTH_PROVIDERS = {"any", "google", "github", "hle"}
-
-
 def _parse_auth_spec(spec: str) -> tuple[str, str]:
     """Parse ``[provider:]email`` into ``(provider, email)``."""
-    if ":" in spec:
-        prefix, _, rest = spec.partition(":")
-        if prefix in _VALID_AUTH_PROVIDERS:
-            return prefix, rest
-    return "any", spec
+    from hle_client.ops.access import parse_spec
+
+    rule = parse_spec(spec)
+    return rule.provider, rule.email
 
 
 # ---------------------------------------------------------------------------
@@ -656,12 +652,7 @@ def enroll(ctx: click.Context, token: str | None) -> None:
         )
         token = str(prompt(ctx, "Agent token", hide_input=True))
 
-    if not token.startswith(config.AGENT_TOKEN_PREFIX):
-        raise HleError(
-            f"Invalid agent token. Expected one starting with '{config.AGENT_TOKEN_PREFIX}'."
-        )
-
-    config.save_agent_token(token)
+    ops_agents.enroll(token)
     console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
     console.print("Start the agent with: [cyan]hle agent run[/cyan]")
 
@@ -758,20 +749,10 @@ def agent_list(ctx: click.Context, api_key: str | None, as_json: bool) -> None:
             )
         raise AuthError("No API key. Run 'hle auth login' first.", hint=hint)
 
-    async def _fetch() -> list[dict[str, Any]]:
-        return await api(ctx, api_key).list_agents()
-
-    try:
-        agents = asyncio.run(_fetch())
-    except Exception as exc:
-        err = ApiError.from_exception(exc)
-        if err.status == 404:
-            # The endpoint 404s (rather than 403s) when the feature flag is off.
-            raise HleError("Agents are not enabled on this server.") from None
-        raise err from None
+    agents = asyncio.run(ops_agents.list_agents(api(ctx, api_key)))
 
     if as_json:
-        console.print(_json.dumps(agents, indent=2))
+        console.print(_json.dumps([a.raw for a in agents], indent=2))
         return
 
     if not agents:
@@ -788,17 +769,15 @@ def agent_list(ctx: click.Context, api_key: str | None, as_json: bool) -> None:
     table.add_column("Endpoints", justify="right")
     table.add_column("Version", style="dim")
     table.add_column("Last seen", style="dim")
-    for a in sorted(agents, key=lambda a: str(a.get("name", ""))):
-        online = a.get("online", False)
-        state = "[green]online[/green]" if online else "[dim]offline[/dim]"
-        if not a.get("is_active", True):
-            state = "[yellow]disabled[/yellow]"
+    styles = {"online": "green", "offline": "dim", "disabled": "yellow"}
+    for a in sorted(agents, key=lambda a: a.name):
+        style = styles[a.state]
         table.add_row(
-            str(a.get("name", "?")),
-            state,
-            str(a.get("endpoint_count", 0)),
-            a.get("agent_version") or "-",
-            _humanize_last_seen(a.get("last_seen_at")),
+            a.name,
+            f"[{style}]{a.state}[/{style}]",
+            str(a.endpoints),
+            a.version or "-",
+            _humanize_last_seen(a.last_seen),
         )
     console.print(table)
 

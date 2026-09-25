@@ -16,6 +16,7 @@ Windows is not supported (use Task Scheduler / NSSM manually).
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import json
 import os
@@ -1603,16 +1604,12 @@ def uninstall(
     agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
 ) -> None:
     """Stop, disable, and remove a background service."""
-    plat = _require_supported()
+    from hle_client.ops import daemon as ops_daemon
+
+    _require_supported()
     label = _resolve_label(label, agent_mode)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
-    if plat == "freebsd":
-        _rcd_reject_user_mode(user_mode)
-        _rcd_uninstall(label=label, name=name)
-    elif plat == "darwin":
-        _launchd_uninstall(label=label, name=name, user_mode=user_mode)
-    else:
-        _systemd_uninstall(label=label, name=name, user_mode=user_mode)
+    asyncio.run(ops_daemon.uninstall(label, name=name, user_mode=user_mode))
 
 
 @service.command("logs")
@@ -1692,16 +1689,12 @@ def status(
     agent_mode: bool, label: str | None, name: str | None, user_mode: bool, system_mode: bool
 ) -> None:
     """Show status for a background service."""
-    plat = _require_supported()
+    from hle_client.ops import daemon as ops_daemon
+
+    _require_supported()
     label = _resolve_label(label, agent_mode)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
-    if plat == "freebsd":
-        _rcd_reject_user_mode(user_mode)
-        _rcd_status(label=label, name=name)
-    elif plat == "darwin":
-        _launchd_status(label=label, name=name, user_mode=user_mode)
-    else:
-        _systemd_status(label=label, name=name, user_mode=user_mode)
+    asyncio.run(ops_daemon.status(label, name=name, user_mode=user_mode))
 
     # A service manager reports on a process, not on whether it works. An agent
     # with no token exits immediately and is restarted forever, so "running as
@@ -1726,35 +1719,30 @@ def restart(agent_mode: bool, label: str | None, name: str | None, restart_all: 
     people to reach for systemctl or service(8) directly, which differs per
     platform and is the sort of detail a tool should absorb.
     """
+    from hle_client.ops import daemon as ops_daemon
+
     _require_supported()
     if restart_all:
-        services = installed_services()
-        if not services:
+        daemons = asyncio.run(ops_daemon.list_daemons())
+        if not daemons:
             console.print("No hle services installed.")
             return
         failed: list[str] = []
-        for svc, user_mode in services:
-            scope = "user" if user_mode else "system"
-            if restart_service(svc, user_mode):
-                console.print(f"{svc} ({scope}): [green]restarted[/green]")
+        for d in daemons:
+            if asyncio.run(ops_daemon.restart(d.name, d.user_mode)):
+                console.print(f"{d.name} ({d.scope}): [green]restarted[/green]")
             else:
                 # Named by scope, because a host can carry both and "failed"
                 # against a bare unit name does not say which one.
-                console.print(f"{svc} ({scope}): [red]failed[/red]")
-                failed.append(f"{svc} ({scope})")
+                console.print(f"{d.name} ({d.scope}): [red]failed[/red]")
+                failed.append(f"{d.name} ({d.scope})")
         if failed:
             raise HleError(f"Could not restart {', '.join(failed)}.")
         return
 
-    plat = current_platform()
     label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
-    if plat == "freebsd":
-        svc = rc_service_name(label, name)
-    elif plat == "darwin":
-        svc = launchd_label(label, name)
-    else:
-        svc = unit_name(label, name)
-    if restart_service(svc):
+    svc = ops_daemon.service_name(label, name)
+    if asyncio.run(ops_daemon.restart(svc)):
         console.print(f"[green]Restarted[/green] {svc}")
     else:
         raise HleError(f"Could not restart {svc}")
@@ -1776,49 +1764,44 @@ def refresh(agent_mode: bool, label: str | None, name: str | None, refresh_all: 
     upgraded some other way — a package manager, a rebuilt venv, a restored
     backup — and the service is still pointing at the old one.
     """
+    from hle_client.ops import daemon as ops_daemon
+
     _require_supported()
     if refresh_all:
-        services = installed_services()
-        if not services:
+        daemons = asyncio.run(ops_daemon.list_daemons())
+        if not daemons:
             console.print("No hle services installed.")
             return
         failed: list[str] = []
-        for svc, user_mode in services:
-            scope = "user" if user_mode else "system"
-            outcome = refresh_service(svc, user_mode)
+        for d in daemons:
+            outcome = asyncio.run(ops_daemon.refresh(d.name, d.user_mode))
             if outcome == "refreshed":
-                console.print(f"{svc} ({scope}): [green]rebuilt and started[/green]")
+                console.print(f"{d.name} ({d.scope}): [green]rebuilt and started[/green]")
             elif outcome == "restarted":
                 # No recorded spec, so there was nothing to rebuild from. Say
                 # so: the user may be looking at exactly the stale file this
                 # command exists to replace, and a plain restart will not fix
                 # it. Reinstalling is then the honest next step.
                 console.print(
-                    f"{svc} ({scope}): [yellow]restarted only[/yellow] "
+                    f"{d.name} ({d.scope}): [yellow]restarted only[/yellow] "
                     "— installed before this client recorded how, so it cannot be rebuilt"
                 )
             else:
-                console.print(f"{svc} ({scope}): [red]failed[/red]")
-                failed.append(svc)
+                console.print(f"{d.name} ({d.scope}): [red]failed[/red]")
+                failed.append(d.name)
         if failed:
             raise HleError(f"Could not refresh {', '.join(failed)}.")
         return
 
-    plat = current_platform()
     label = _resolve_label(label, agent_mode, extra_hint=", or --all for every service")
-    if plat == "freebsd":
-        svc = rc_service_name(label, name)
-    elif plat == "darwin":
-        svc = launchd_label(label, name)
-    else:
-        svc = unit_name(label, name)
+    svc = ops_daemon.service_name(label, name)
     unit_scope = installed_scope(svc)
     if unit_scope is None:
         raise HleError(
             f"{svc} is not installed in either scope.",
             hint="hle daemon list shows what is installed.",
         )
-    outcome = refresh_service(svc, unit_scope)
+    outcome = asyncio.run(ops_daemon.refresh(svc, unit_scope))
     if outcome == "refreshed":
         console.print(f"[green]Rebuilt and started[/green] {svc}")
     elif outcome == "restarted":
