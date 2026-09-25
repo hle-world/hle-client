@@ -140,6 +140,54 @@ def current_exec_path(home: Path | None = None) -> Path:
     return home / CURRENT_LINK / "bin" / "hle"
 
 
+def _home_from_prefix(prefix: Path) -> Path | None:
+    """The layout root a venv at *prefix* sits in, if it looks like one of ours."""
+    try:
+        resolved = prefix.resolve()
+    except OSError:
+        return None
+    if resolved.parent.name == VERSIONS_DIR:
+        return resolved.parent.parent
+    if resolved.name == FLAT_VENV_DIR:
+        return resolved.parent
+    return None
+
+
+def layout_home(prefix: str | None = None, home: Path | None = None) -> Path | None:
+    """The versioned layout this process runs from, or None.
+
+    Only when the running interpreter (``sys.prefix``) belongs to that layout:
+    a pipx install on a machine that also has a stale installer layout must
+    keep using the pipx copy.
+
+    The root is looked for both at ``HLE_HOME`` and next to the running venv,
+    because ``sudo hle daemon install`` runs with root's ``HOME`` while the
+    layout lives in the invoking user's.
+    """
+    p = Path(prefix or sys.prefix)
+    candidates = [home or hle_home()]
+    derived = _home_from_prefix(p)
+    if derived is not None and derived not in candidates:
+        candidates.append(derived)
+    for h in candidates:
+        if versioned_layout_present(h) and installer_owns(str(p), h):
+            return h
+    return None
+
+
+def versioned_exec_path(prefix: str | None = None, home: Path | None = None) -> Path | None:
+    """``current/bin/hle`` when this process runs from the versioned layout.
+
+    What a service unit should name in ExecStart so a swap of ``current``
+    changes the version it runs.
+    """
+    h = layout_home(prefix, home)
+    if h is None:
+        return None
+    exe = current_exec_path(h)
+    return exe if exe.exists() else None
+
+
 # --------------------------------------------------------------------------- #
 # Support matrix
 # --------------------------------------------------------------------------- #
@@ -396,12 +444,12 @@ class VersionedUpdater:
         home: Path,
         *,
         python: str | None = None,
-        run: Runner = _run,
+        run: Runner | None = None,
         pip_timeout: float = 600.0,
     ) -> None:
         self.home = home
         self.python = python or sys.executable
-        self._run = run
+        self._run = run or _run
         self._pip_timeout = pip_timeout
 
     # -- paths ---------------------------------------------------------------
@@ -590,7 +638,7 @@ class ToolUpdater:
         tool: str,
         home: Path,
         *,
-        run: Runner = _run,
+        run: Runner | None = None,
         fetch: Callable[[str, float], int] | None = None,
         hle_path: str | None = None,
         install_timeout: float = 600.0,
@@ -599,7 +647,7 @@ class ToolUpdater:
             raise ValueError(f"not a tool updater: {tool}")
         self.tool = tool
         self.home = home
-        self._run = run
+        self._run = run or _run
         self._fetch = fetch or _http_status
         self._hle_path = hle_path or str(Path(sys.executable).with_name("hle"))
         self._install_timeout = install_timeout
@@ -686,7 +734,7 @@ def _http_status(url: str, timeout: float) -> int:
 
 
 def make_updater(
-    support: UpdateSupport, home: Path, *, run: Runner = _run
+    support: UpdateSupport, home: Path, *, run: Runner | None = None
 ) -> VersionedUpdater | ToolUpdater:
     """The updater for a supported install; raises for an unsupported one."""
     if not support.supported:
