@@ -39,15 +39,17 @@ def resolver(
     startup refresh has something realistic to refuse in every test. Lookups are
     matched with any trailing dot removed, so a mapping key need not know
     whether the guard resolved the relative or absolute spelling. ``calls``
-    records every name actually resolved, dot and all.
+    records every name the guard resolved for a *check*, dot and all; the
+    background API-address refresh is left out, because when it runs relative
+    to a check is up to the event loop and would make ordering assertions race.
     """
 
     async def resolve(host: str) -> list[str]:
-        if calls is not None:
-            calls.append(host)
         key = host.rstrip(".")
         if key.startswith("kubernetes.default.svc."):
             return [KUBE_API]
+        if calls is not None:
+            calls.append(host)
         if mapping is not None and key in mapping:
             return mapping[key]
         if default is None:
