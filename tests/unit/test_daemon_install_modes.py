@@ -113,6 +113,7 @@ class TestLogs:
     def test_it_runs_journalctl_for_the_unit(self):
         with (
             patch("hle_client.service_cmd._require_supported", return_value="linux"),
+            patch("hle_client.service_cmd.current_platform", return_value="linux"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=False),
             patch(
                 "hle_client.ops.daemon.log_tail", new_callable=AsyncMock, return_value=""
@@ -126,6 +127,7 @@ class TestLogs:
     def test_the_user_scope_asks_the_user_journal(self):
         with (
             patch("hle_client.service_cmd._require_supported", return_value="linux"),
+            patch("hle_client.service_cmd.current_platform", return_value="linux"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=True),
             patch(
                 "hle_client.ops.daemon.log_tail", new_callable=AsyncMock, return_value=""
@@ -148,6 +150,8 @@ class TestLogs:
         """Rather than an empty screen that reads like "no problems"."""
         with (
             patch("hle_client.service_cmd._require_supported", return_value="darwin"),
+            # log_path() asks the real platform; on Linux CI it would pick journalctl.
+            patch("hle_client.service_cmd.current_platform", return_value="darwin"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=True),
             patch("hle_client.service_cmd.service_file", return_value=None),
             patch("hle_client.service_cmd._launchd_log_dir", return_value=str(tmp_path)),
