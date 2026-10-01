@@ -632,8 +632,8 @@ class Tunnel:
         from hle_client.api import ApiClient, ApiClientConfig
 
         try:
-            client = ApiClient(ApiClientConfig(api_key=api_key))
-            discovery = await client.discover_relay()
+            async with ApiClient(ApiClientConfig(api_key=api_key)) as client:
+                discovery = await client.discover_relay()
         except Exception:
             discovery = None
 
