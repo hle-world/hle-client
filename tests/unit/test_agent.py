@@ -529,7 +529,7 @@ class TestHelloContent:
         {"type": "welcome", "agent_public_id": "pub-1", "base_domain": "hle.world"}
     )
 
-    async def _hello_sent(self, monkeypatch, supported: bool = False) -> dict:
+    async def _hello_sent(self, monkeypatch, supported: bool = False, home=None) -> dict:
         import hle_client.agent as agent_mod
         from hle_client.agent_update import UpdateSupport
 
@@ -542,7 +542,12 @@ class TestHelloContent:
             if supported
             else UpdateSupport(False, str(method), f"unsupported:{method}")
         )
-        client = AgentClient("hlea_test", tunnel_factory=FakeTunnel, support_probe=lambda: support)
+        client = AgentClient(
+            "hlea_test",
+            tunnel_factory=FakeTunnel,
+            support_probe=lambda: support,
+            home=home,
+        )
 
         async def no_discovery(_ws) -> None:
             return None
@@ -551,7 +556,7 @@ class TestHelloContent:
         await client._connect_once()
         return json.loads(ws.sent[0])
 
-    async def test_a_self_updatable_install_advertises_the_capability(self, monkeypatch):
+    async def test_a_self_updatable_install_advertises_the_capability(self, monkeypatch, tmp_path):
         import hle_client.agent as agent_mod
 
         monkeypatch.setattr(agent_mod, "detect_install_method", lambda: "venv")
@@ -559,7 +564,7 @@ class TestHelloContent:
         # The capability follows can_self_update(), not the bare method: a venv
         # the installer does not own gets `install_method: venv` and no
         # capability, because nothing would relaunch it from `current`.
-        hello = await self._hello_sent(monkeypatch, supported=True)
+        hello = await self._hello_sent(monkeypatch, supported=True, home=tmp_path)
         assert hello["type"] == "hello"
         assert "update:venv" in hello["capabilities"]
         assert "firepuncher" in hello["capabilities"]
@@ -570,19 +575,19 @@ class TestHelloContent:
         assert hello["successor_of"] is None
         assert hello["successor_nonce"] is None
 
-    async def test_a_brew_install_says_so_but_claims_no_capability(self, monkeypatch):
+    async def test_a_brew_install_says_so_but_claims_no_capability(self, monkeypatch, tmp_path):
         import hle_client.agent as agent_mod
 
         monkeypatch.setattr(agent_mod, "detect_install_method", lambda: "brew")
-        hello = await self._hello_sent(monkeypatch)
+        hello = await self._hello_sent(monkeypatch, home=tmp_path)
         assert hello["install_method"] == "brew"
         assert not [c for c in hello["capabilities"] if c.startswith("update:")]
 
-    async def test_an_unknown_install_sends_null_not_a_guess(self, monkeypatch):
+    async def test_an_unknown_install_sends_null_not_a_guess(self, monkeypatch, tmp_path):
         import hle_client.agent as agent_mod
 
         monkeypatch.setattr(agent_mod, "detect_install_method", lambda: None)
-        hello = await self._hello_sent(monkeypatch)
+        hello = await self._hello_sent(monkeypatch, home=tmp_path)
         assert hello["install_method"] is None
         assert not [c for c in hello["capabilities"] if c.startswith("update:")]
 

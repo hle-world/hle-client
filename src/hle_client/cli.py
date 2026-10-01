@@ -678,15 +678,35 @@ def run(
 
 
 @agent.command("status")
+@click.option(
+    "--ready",
+    is_flag=True,
+    default=False,
+    help="Exit 0 only if the running agent is connected (for readiness probes).",
+)
 @click.pass_context
-def agent_status(ctx: click.Context) -> None:
+def agent_status(ctx: click.Context, ready: bool) -> None:
     """Show whether an agent token is configured.
 
     Exits 0 either way, like `auth status`: "no token" is an answer, not a
     failure, and a script that needs to branch on it reads `-o json`. (It
     briefly exited 1 for the installer's benefit; the installer checks the
     service instead, and the two status commands disagreeing was worse.)
+
+    With `--ready` the meaning inverts: it exits 0 only while the agent
+    process recorded a live control connection, and exits 1 with a one-line
+    reason otherwise. A chart readinessProbe runs this from a separate
+    process, so liveness is proven by the recorded pid, not by this one.
     """
+    if ready:
+        from hle_client import agent_state
+        from hle_client.agent_update import hle_home
+
+        ok, reason = agent_state.is_ready(hle_home())
+        if not ok:
+            click.echo(f"not ready: {reason}", err=True)
+            raise SystemExit(1)
+        return
     creds = config.load_credentials()
     o = out(ctx)
     o.data({"agent_token": bool(creds.agent_token), "source": creds.agent_token_source})
