@@ -26,7 +26,7 @@ import websockets.exceptions
 if TYPE_CHECKING:
     from pathlib import Path
 
-from hle_client import __version__, agent_update, config
+from hle_client import __version__, agent_update, config, k8s_targets
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.identity import hostname, instance_id
@@ -95,10 +95,16 @@ def detect_service_manager(env: dict[str, str] | None = None) -> str | None:
 def detect_install_method() -> str | None:
     """Classify this install for the hello, never raising.
 
-    The classifier lives in the update command; it is imported lazily so an
-    agent process does not pay for click at import time, and any failure
-    degrades to "unknown" rather than stopping the agent from connecting.
+    ``HLE_INSTALL_METHOD`` overrides the classifier when set: a Kubernetes pod
+    runs from a venv the chart owns, and ``kubernetes`` has to be reported (and
+    the self-update capability withheld) rather than the location it happens to
+    sit in. Otherwise the classifier lives in the update command; it is imported
+    lazily so an agent process does not pay for click at import time, and any
+    failure degrades to "unknown" rather than stopping the agent from connecting.
     """
+    override = os.environ.get(k8s_targets.INSTALL_METHOD_ENV)
+    if override:
+        return override
     if os.path.exists("/.dockerenv"):
         return "docker"
     try:
@@ -173,6 +179,7 @@ class AgentClient:
         support_probe: Callable[[], agent_update.UpdateSupport] | None = None,
         updater_factory: UpdaterFactory | None = None,
         health_timeout: float | None = None,
+        target_guard: k8s_targets.KubernetesTargetGuard | None = None,
     ) -> None:
         self._token = token
         self._relay_host = relay_host
@@ -219,6 +226,12 @@ class AgentClient:
         self._forward_rules: list[ForwardRule] = default_rules()
         # In-flight preflight probes, held so they aren't garbage-collected.
         self._preflight_tasks: set[asyncio.Task[None]] = set()
+        # In a cluster, an endpoint target has to pass the guard before its
+        # tunnel starts. Injected by tests; built from the environment when
+        # KUBERNETES_SERVICE_HOST (or HLE_INSTALL_METHOD=kubernetes) says so.
+        self._target_guard = target_guard
+        if self._target_guard is None and k8s_targets.in_kubernetes():
+            self._target_guard = k8s_targets.KubernetesTargetGuard.from_env()
 
     # -- public API ----------------------------------------------------------
 
@@ -797,13 +810,25 @@ class AgentClient:
         for label, spec in desired.items():
             current = self._endpoints.get(label)
             if current is None:
-                self._start_endpoint(spec)
+                await self._start_endpoint(spec)
             elif current.spec.reconcile_key() != spec.reconcile_key():
                 logger.info("Endpoint %s changed — restarting", label)
                 await self._stop_endpoint(label)
-                self._start_endpoint(spec)
+                await self._start_endpoint(spec)
 
-    def _start_endpoint(self, spec: EndpointSpec) -> None:
+    async def _start_endpoint(self, spec: EndpointSpec) -> None:
+        # In a cluster, the relay does not get to name any target it likes: a
+        # compromised dashboard could otherwise publish the API server, metadata
+        # or a node. The check resolves names too, so it awaits.
+        if self._target_guard is not None:
+            decision = await self._target_guard.check(spec.service_url)
+            if not decision.allowed:
+                reason = f"refused: {decision.reason}"
+                if self._failed.get(spec.label) != reason:
+                    logger.warning("Endpoint %s not started: %s", spec.label, reason)
+                    emit_event("error", level="error", label=spec.label, message=reason)
+                self._failed[spec.label] = reason
+                return
         # Data-plane credential: an explicit key from the welcome if the server
         # sent one, otherwise the agent's own token (the server accepts hlea_
         # tokens for tunnel registration). One enrollment, one secret.

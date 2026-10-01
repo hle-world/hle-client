@@ -330,6 +330,27 @@ API key resolution order:
 2. `HLE_API_KEY` environment variable
 3. `~/.config/hle/config.toml`
 
+### Kubernetes agents
+
+An agent running inside a cluster only tunnels to Kubernetes Services; a raw
+URL could otherwise publish the API server, the cloud metadata service or a
+node. The agent targets `<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc` and
+`<svc>.<ns>.svc.<cluster-domain>` names, and refuses the Kubernetes API,
+link-local/cloud-metadata addresses, loopback and any node address, whatever
+the settings say.
+
+These settings are read from the environment, with safe defaults:
+
+- `KUBERNETES_SERVICE_HOST` — its presence marks the process as in-cluster.
+- `HLE_INSTALL_METHOD` — set to `kubernetes` to declare a cluster agent where
+  the variable above is absent; it also overrides how the install is
+  classified for the dashboard.
+- `HLE_CLUSTER_DOMAIN` — the cluster DNS domain (default `cluster.local`).
+- `HLE_ALLOW_RAW_URLS` — `true` to also allow raw URLs (IP literals and
+  non-cluster hostnames). The always-refused targets above stay refused.
+- `HLE_NODE_IP` — the node's address, from the downward API; honoured when set.
+
+
 ## Development
 
 ```bash
