@@ -13,7 +13,7 @@ from hle_common.protocol import (
 
 class TestProtocolVersion:
     def test_protocol_version_exists(self):
-        assert PROTOCOL_VERSION == "1.5"
+        assert PROTOCOL_VERSION == "1.6"
 
     def test_protocol_version_is_string(self):
         assert isinstance(PROTOCOL_VERSION, str)
@@ -56,6 +56,7 @@ class TestMessageType:
             "notice",
             "log_config",
             "diagnostic",
+            "fragment",
         }
         actual = {member.value for member in MessageType}
         assert actual == expected

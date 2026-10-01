@@ -45,6 +45,7 @@ from hle_common.fp_protocol import (
     FpReady,
     FpWelcome,
 )
+from hle_common.fragmentation import Fragment
 from hle_common.models import (
     DiagnosticEvent,
     HttpResponseChunk,
@@ -82,6 +83,14 @@ SAMPLES: dict[str, object] = {
         tunnel_id="tun-1",
         request_id="req-1",
         payload={"nested": {"a": 1}, "list": [1, 2], "null": None},
+    ),
+    # 1.6 envelope fragmentation. The frame's exact prefix is what receivers
+    # test for (is_fragment_frame), so the whole frame is pinned, not only
+    # the payload.
+    "Fragment": Fragment(frag_id="7", seq=1, final=True, data='"payload":{"a":1}}'),
+    "ProtocolMessage.fragment": ProtocolMessage(
+        type=MessageType.FRAGMENT,
+        payload=Fragment(frag_id="7", seq=0, final=False, data='{"type":"ping",').model_dump(),
     ),
     "ErrorPayload": ErrorPayload(code="bad", message="went wrong", request_id="req-1"),
     "NoticePayload": NoticePayload(
