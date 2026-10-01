@@ -22,7 +22,7 @@ from enum import StrEnum
 
 from hle_common.wire import WireModel
 
-DISCOVERY_PROTOCOL_VERSION = "1.0"
+DISCOVERY_PROTOCOL_VERSION = "1.1"
 
 
 class DiscoveryMsgType(StrEnum):
@@ -50,6 +50,20 @@ class DiscoveredService(WireModel):
     # Set when the agent can tell this is already exposed, so the UI can show
     # "already exposed" instead of offering a duplicate.
     already_exposed: bool = False
+    # -- 1.1 ---------------------------------------------------------------
+    # All optional. Old agents omit them, old servers ignore them.
+    # The provider's own name for the port (a k8s Service port name, a compose
+    # service, ...), when the address is ambiguous.
+    port_name: str | None = None
+    # Application protocol hint (e.g. "http", "https", "grpc"), for the UI to
+    # suggest the right scheme instead of inferring from the port number.
+    app_protocol: str | None = None
+    # How many backends are ready behind it, when the provider can tell. None
+    # means "unknown", which is not the same as zero.
+    ready_endpoints: int | None = None
+    # What the agent can tell already points at this service, e.g.
+    # ``hletunnel:ns/name`` or ``ingress:ns/name``. None when unknown.
+    exposed_by: str | None = None
 
     def suggested_label(self) -> str:
         """A tunnel label guess: DNS-safe, derived from the service name."""

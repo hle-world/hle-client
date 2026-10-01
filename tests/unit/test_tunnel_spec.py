@@ -58,6 +58,9 @@ _NEW_1_3_FIELDS = {
     "response_timeout",
     "managed_by",
 }
+# 1.4 appends one more nullable key to EndpointSpec, after the 1.3 set.
+_NEW_1_4_FIELDS = {"target"}
+_NEW_ENDPOINT_FIELDS = _NEW_1_3_FIELDS | _NEW_1_4_FIELDS
 
 _FULL = TunnelSpec(
     label="prox",
@@ -304,7 +307,8 @@ class TestSpecFromParams:
 
 class TestAgentProtocol13:
     def test_version(self):
-        assert AGENT_PROTOCOL_VERSION == "1.3"
+        # Pinned exactly by the newest protocol's own tests (1.4 at present).
+        assert tuple(int(p) for p in AGENT_PROTOCOL_VERSION.split(".")) >= (1, 3)
 
     def test_endpoint_spec_is_a_tunnel_spec(self):
         ep = EndpointSpec(id=1, label="a", service_url="http://x")
@@ -321,7 +325,7 @@ class TestAgentProtocol13:
             "webhook_path",
             "websocket_enabled",
         ]
-        assert set(keys[7:]) == _NEW_1_3_FIELDS
+        assert set(keys[7:]) == _NEW_ENDPOINT_FIELDS
 
     def test_label_and_service_url_still_required(self):
         with pytest.raises(ValueError):
@@ -339,14 +343,14 @@ class TestAgentProtocol13:
         new = json.loads(_BASELINE["EndpointSpec"])
         old = json.loads(_ENDPOINT_1_2)
         assert {k: v for k, v in new.items() if k in old} == old
-        assert set(new) - set(old) == _NEW_1_3_FIELDS
-        assert all(new[k] is None for k in _NEW_1_3_FIELDS)
+        assert set(new) - set(old) == _NEW_ENDPOINT_FIELDS
+        assert all(new[k] is None for k in _NEW_ENDPOINT_FIELDS)
 
     @pytest.mark.parametrize("name", ["AgentWelcome", "AgentStateSync"])
     def test_nested_endpoints_only_gain_null_keys(self, name: str):
         for ep in json.loads(_BASELINE[name])["endpoints"]:
-            assert set(ep) == _ENDPOINT_1_2_FIELDS | _NEW_1_3_FIELDS
-            assert all(ep[k] is None for k in _NEW_1_3_FIELDS)
+            assert set(ep) == _ENDPOINT_1_2_FIELDS | _NEW_ENDPOINT_FIELDS
+            assert all(ep[k] is None for k in _NEW_ENDPOINT_FIELDS)
 
     def test_1_3_endpoint_projects_down_for_a_1_2_agent(self):
         """A 1.2 agent keeps the fields it declares and drops the rest."""
