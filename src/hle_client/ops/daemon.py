@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import plistlib
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from hle_client import service_cmd
+from hle_client.errors import HleError
 from hle_client.ops.models import Daemon
 
 
@@ -136,3 +139,102 @@ async def refresh(name: str, user_mode: bool) -> str:
     from) or ``"failed"``.
     """
     return await asyncio.to_thread(service_cmd.refresh_service, name, user_mode)
+
+
+def _launchd_log_path(name: str, user_mode: bool) -> Path:
+    """The file a launchd service was told to write to, plist first.
+
+    The path is read out of the plist the installer wrote, not rebuilt, so a
+    service installed by an older client is still found.
+    """
+    plist = service_cmd.service_file(name, user_mode)
+    if plist is not None:
+        try:
+            with plist.open("rb") as fh:
+                out = plistlib.load(fh).get("StandardOutPath")
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            out = None
+        if out:
+            return Path(str(out))
+    label = name.removeprefix(f"{service_cmd._LAUNCHD_LABEL_PREFIX}.")
+    return Path(service_cmd._launchd_log_dir(user_mode)) / f"{label}.log"
+
+
+def log_path(name: str, *, user_mode: bool = False) -> Path | None:
+    """Where a service manager keeps its log; ``None`` when it is journald.
+
+    systemd has no file to point at, so the caller asks journalctl instead.
+    launchd reads the path out of the plist, rc.d uses the convention the
+    installer writes into the script.
+    """
+    plat = service_cmd.current_platform()
+    if plat == "linux":
+        return None
+    if plat == "darwin":
+        return _launchd_log_path(name, user_mode)
+    return Path("/var/log") / f"{name}.log"
+
+
+def _tail_file(path: Path, lines: int) -> str:
+    # Read the end, not the whole file: a service that has logged for months
+    # would otherwise be read in full every two seconds by a dashboard.
+    with path.open("rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        fh.seek(max(0, size - 256 * 1024))
+        text = fh.read().decode(errors="replace")
+    return "\n".join(text.splitlines()[-lines:])
+
+
+async def _journalctl_tail(name: str, lines: int, user_mode: bool) -> str:
+    argv = [
+        "journalctl",
+        *(["--user"] if user_mode else []),
+        "-u",
+        name,
+        "-n",
+        str(lines),
+        "--no-pager",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        raise HleError("journalctl not found.") from None
+    out, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise HleError(
+            err.decode(errors="replace").strip() or f"journalctl exited {proc.returncode}."
+        )
+    return "\n".join(out.decode(errors="replace").splitlines()[-lines:])
+
+
+async def log_tail(
+    name: str,
+    lines: int = 200,
+    *,
+    user_mode: bool = False,
+    hint: str | None = None,
+) -> str:
+    """The last ``lines`` of a service's log, journalctl or file.
+
+    The one reader behind ``hle daemon logs`` and the TUI's log pane. On
+    systemd the manager's own journal is asked; elsewhere the file the
+    installer pointed the service at is read from the end. Raises
+    :class:`HleError` when there is nothing to read.
+    """
+    path = log_path(name, user_mode=user_mode)
+    if path is None:
+        return await _journalctl_tail(name, lines, user_mode)
+    if not path.exists():
+        raise HleError(
+            f"No log file at {path}",
+            hint=hint or "The service may never have started. Try: hle daemon status",
+        )
+    try:
+        return await asyncio.to_thread(_tail_file, path, lines)
+    except OSError as exc:
+        raise HleError(f"Could not read {path}: {exc.strerror or exc}") from None
