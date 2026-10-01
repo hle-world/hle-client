@@ -1240,6 +1240,18 @@ class TestTunnelReconnectBackoff:
         # And it does not immediately fall back to a one-second retry.
         assert slept[1] >= 60.0
 
+    async def test_a_handover_stops_quietly_without_reconnecting(self):
+        """4011: a successor took this tunnel over as arranged.
+
+        Nothing is wrong, so it must not be reported as fatal — but the data
+        plane must also honour ``should_reconnect`` and stop, or it would take
+        the label straight back off the process that is meant to serve it.
+        """
+        tunnel = _tunnel(service_label="mimos-ssh")
+        slept = await self._delays(tunnel, [self._closed(4011)])
+        assert slept == []
+        assert tunnel._running is False
+
     async def test_the_registration_says_which_process_it_comes_from(self):
         """Without this the relay cannot tell a reconnect from a second machine."""
         # Read the binding the tunnel actually uses, not a fresh import: the

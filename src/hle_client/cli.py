@@ -622,6 +622,10 @@ def enroll(ctx: click.Context, token: str | None) -> None:
 )
 @click.option("--relay-host", default="hle.world", help="Relay host")
 @click.option("--relay-port", default=443, type=int, help="Relay port")
+# Stage B internals. The incumbent passes these to the canary it spawns; a
+# human never types them, so they stay out of --help.
+@click.option("--successor-of", "successor_of", default=None, hidden=True)
+@click.option("--successor-nonce", "successor_nonce", default=None, hidden=True)
 @events_option
 @click.pass_context
 def run(
@@ -629,6 +633,8 @@ def run(
     token: str | None,
     relay_host: str,
     relay_port: int,
+    successor_of: str | None,
+    successor_nonce: str | None,
     events: str | None = None,
 ) -> None:
     """Run the agent: connect, fetch endpoints from the dashboard, and reconcile."""
@@ -637,9 +643,20 @@ def run(
     if not token:
         raise AuthError(NO_AGENT_TOKEN)
 
-    client = AgentClient(token, relay_host=relay_host, relay_port=relay_port)
-    human.print(f"[green]Agent running[/green] — control: {client.control_uri}")
-    human.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
+    client = AgentClient(
+        token,
+        relay_host=relay_host,
+        relay_port=relay_port,
+        successor_of=successor_of,
+        successor_nonce=successor_nonce,
+    )
+    if successor_of is not None:
+        human.print(
+            "[green]Agent canary[/green] — proving the new version before handover. Ctrl+C to stop."
+        )
+    else:
+        human.print(f"[green]Agent running[/green] — control: {client.control_uri}")
+        human.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
     try:
         shutdown.run(client.run())
     except KeyboardInterrupt:
