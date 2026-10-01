@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock, patch
 
@@ -114,6 +115,113 @@ class TestApiClientMethods:
             pytest.raises(httpx.HTTPStatusError),
         ):
             await client.delete_access_rule("app-x7k", 999)
+
+
+class TestSharedSession:
+    """One ``httpx.AsyncClient`` per ``ApiClient``, reused by every call.
+
+    A CLI command makes several calls on one client (``context.api``) and the
+    dashboard polls one client every 10s; each call used to open and close its
+    own connection.
+    """
+
+    @pytest.fixture
+    def client(self) -> ApiClient:
+        return ApiClient(ApiClientConfig(api_key="hle_testkey"))
+
+    def _ok(self, url: str) -> httpx.Response:
+        return httpx.Response(200, json=[], request=httpx.Request("GET", url))
+
+    async def test_nothing_is_opened_until_the_first_request(self, client: ApiClient) -> None:
+        assert client._shared_client is None
+
+    async def test_calls_reuse_one_session(self, client: ApiClient) -> None:
+        get = AsyncMock(return_value=self._ok("https://hle.world/api/tunnels"))
+        with patch("httpx.AsyncClient.get", get):
+            await client.list_tunnels()
+            first = client._shared_client
+            await client.list_agents()
+            second = client._shared_client
+        assert first is not None
+        assert first is second
+        assert get.await_count == 2
+        await client.aclose()
+
+    async def test_each_client_gets_its_own_session(self) -> None:
+        first = ApiClient(ApiClientConfig(api_key="hle_a"))
+        second = ApiClient(ApiClientConfig(api_key="hle_b"))
+        get = AsyncMock(return_value=self._ok("https://hle.world/api/tunnels"))
+        with patch("httpx.AsyncClient.get", get):
+            await first.list_tunnels()
+            await second.list_tunnels()
+        assert first._shared_client is not second._shared_client
+        await first.aclose()
+        await second.aclose()
+
+    async def test_the_context_manager_closes_the_session(self, client: ApiClient) -> None:
+        get = AsyncMock(return_value=self._ok("https://hle.world/api/tunnels"))
+        with patch("httpx.AsyncClient.get", get):
+            async with client as entered:
+                assert entered is client
+                await client.list_tunnels()
+                shared = client._shared_client
+                assert shared is not None
+                assert not shared.is_closed
+        assert shared.is_closed
+        assert client._shared_client is None
+
+    async def test_a_closed_client_reopens_on_next_use(self, client: ApiClient) -> None:
+        get = AsyncMock(return_value=self._ok("https://hle.world/api/tunnels"))
+        with patch("httpx.AsyncClient.get", get):
+            await client.list_tunnels()
+            first = client._shared_client
+            await client.aclose()
+            await client.list_tunnels()
+            second = client._shared_client
+        assert second is not None
+        assert second is not first
+        await client.aclose()
+
+    def test_a_session_from_a_dead_loop_is_not_reused(self, client: ApiClient) -> None:
+        """Two ``asyncio.run`` calls on one client must not share connections."""
+        get = AsyncMock(return_value=self._ok("https://hle.world/api/tunnels"))
+        seen: list[httpx.AsyncClient | None] = []
+
+        async def _once() -> None:
+            await client.list_tunnels()
+            seen.append(client._shared_client)
+
+        with patch("httpx.AsyncClient.get", get):
+            asyncio.run(_once())
+            asyncio.run(_once())
+        assert seen[0] is not None
+        assert seen[1] is not None
+        assert seen[0] is not seen[1]
+
+    async def test_discovery_reuses_the_session_with_its_own_timeout(
+        self, client: ApiClient
+    ) -> None:
+        """Discovery is still a 5s probe; only the session is shared."""
+        response = httpx.Response(
+            200,
+            json={
+                "relay_url": "wss://hle.world/_hle/tunnel",
+                "relay_region": "default",
+                "ttl": 300,
+                "fallback_urls": [],
+                "metadata": {},
+            },
+            request=httpx.Request("GET", "https://hle.world/api/v1/connect"),
+        )
+        get = AsyncMock(return_value=response)
+        with patch("httpx.AsyncClient.get", get):
+            await client.list_tunnels()
+            shared = client._shared_client
+            result = await client.discover_relay()
+        assert result is not None
+        assert get.await_args.kwargs["timeout"] == 5.0
+        assert client._shared_client is shared
+        await client.aclose()
 
 
 class TestRelayDiscoveryFailureIsVisible:
