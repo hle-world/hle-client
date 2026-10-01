@@ -851,3 +851,59 @@ def health_timeout(env: dict[str, str] | None = None) -> float:
         except ValueError:
             pass
     return DEFAULT_HEALTH_TIMEOUT
+
+
+# --------------------------------------------------------------------------- #
+# Stage B: the successor process
+# --------------------------------------------------------------------------- #
+def successor_argv(
+    executable: str,
+    *,
+    successor_of: str,
+    successor_nonce: str,
+    relay_host: str | None = None,
+    relay_port: int | None = None,
+) -> list[str]:
+    """The ``hle agent run`` argv for a canary successor.
+
+    No secret goes on the command line: the caller supplies the successor's
+    environment, with the agent token in ``HLE_AGENT_TOKEN``, exactly the way
+    the incumbent read it.
+    """
+    argv = [
+        executable,
+        "agent",
+        "run",
+        "--successor-of",
+        successor_of,
+        "--successor-nonce",
+        successor_nonce,
+    ]
+    if relay_host:
+        argv += ["--relay-host", relay_host]
+    if relay_port:
+        argv += ["--relay-port", str(relay_port)]
+    return argv
+
+
+def spawn_successor(
+    argv: list[str], *, env: dict[str, str] | None = None
+) -> subprocess.Popen[bytes]:
+    """Start a successor detached from this process's lifetime.
+
+    ``start_new_session`` puts the successor in its own process group: a
+    service manager's stop signal to the incumbent's group does not reach it,
+    and the successor keeps serving while the incumbent unwinds. It is the
+    incumbent-as-supervisor that then owns the successor's lifetime — it
+    forwards SIGTERM/SIGINT (terminate on Windows) and stays alive until the
+    successor exits, so the cgroup/job is never left with an unsupervised
+    agent. stdout/stderr are inherited so journald, launchd and a terminal keep
+    receiving the successor's logs; the supervisor holds them open until the
+    successor exits.
+    """
+    return subprocess.Popen(  # noqa: S603 — argv built internally
+        argv,
+        env=env,
+        start_new_session=True,
+        close_fds=True,
+    )

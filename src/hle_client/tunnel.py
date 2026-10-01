@@ -503,6 +503,23 @@ class Tunnel:
                         message = self._fatal_close_message(code, exc.rcvd.reason)
                         self._emit("fatal", level="error", message=message, code=code)
                         raise TunnelFatalError(message) from exc
+                    if not close_codes.should_reconnect(code):
+                        # HANDOVER: a successor took this tunnel over as
+                        # arranged. Nothing is wrong, so no `fatal` event, but
+                        # reconnecting would take the label straight back off
+                        # the process that is supposed to have it now. Stop
+                        # this tunnel and let whatever closed us carry on.
+                        logger.info(
+                            "Relay handed this tunnel over to its successor (code %s): %s",
+                            code,
+                            exc.rcvd.reason or "no reason given",
+                        )
+                        self._running = False
+                        if was_live:
+                            self._emit(
+                                "disconnected", level="info", message=str(exc), code=close_code
+                            )
+                        continue
                     wait = close_codes.retry_after_seconds(code)
                     if wait is not None:
                         # The relay asked for a specific pause. Honour it

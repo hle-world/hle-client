@@ -29,6 +29,12 @@ from hle_common.wire import WireModel
 # 1.3 makes EndpointSpec the full TunnelSpec (verify_ssl, forward_host,
 # upstream_basic_auth, apex, options, response_timeout, managed_by). All new
 # fields default to null, so 1.2 peers see only keys they ignore.
+#
+# Stage B (canary handover) is layered on the 1.2 handover fields: a client
+# advertises `handover` in its hello capabilities, and the server arms it by
+# putting a `successor_nonce` on the UpdateRequest. A peer that knows neither
+# keeps doing Stage A, because the extra capability is just a list entry and
+# the nonce defaults to null.
 AGENT_PROTOCOL_VERSION = "1.3"
 
 # Install methods whose venv the agent owns outright and can stage a new version
@@ -38,6 +44,13 @@ AGENT_PROTOCOL_VERSION = "1.3"
 SELF_UPDATE_METHODS: frozenset[str] = frozenset({"venv", "pipx", "uv"})
 
 UPDATE_CAPABILITY_PREFIX = "update:"
+
+# Stage B: a hello capability saying this build can take part in a canary
+# handover — spawn a successor for an update, and itself run as one. The
+# server only arms Stage B (by putting `successor_nonce` on the request) for
+# agents that advertise it; without it the update is Stage A (swap and exit,
+# and let the service manager restart) exactly as before.
+HANDOVER_CAPABILITY = "handover"
 
 
 def update_capability(install_method: str | None) -> str | None:
@@ -188,6 +201,12 @@ class UpdateRequest(WireModel):
     # `wait`: hold the swap until the agent's tunnels have no live streams.
     # `force`: swap now and drop whatever is in flight.
     drain_policy: Literal["wait", "force"] = "wait"
+    # Stage B: set when the server will admit a successor for this update. The
+    # incumbent spawns the canary with `--successor-of` + this nonce, the canary
+    # echoes it in its hello, and the server closes the incumbent with close
+    # code HANDOVER once the successor is serving. Absent means Stage A: swap,
+    # exit, and let the service manager relaunch the new version.
+    successor_nonce: str | None = None
 
 
 @dataclass(kw_only=True)

@@ -22,6 +22,8 @@ hle agent run  [command]  hidden=False  help='Run the agent: connect, fetch endp
     option   --token                      name=token type=text required=False multiple=False nargs=1 flag=False envvar=HLE_AGENT_TOKEN default_set=False hidden=False
     option   --relay-host                 name=relay_host type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --relay-port                 name=relay_port type=integer required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --successor-of               name=successor_of type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
+    option   --successor-nonce            name=successor_nonce type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent services  [command]  hidden=False  help='List services this machine can see and could expose.'

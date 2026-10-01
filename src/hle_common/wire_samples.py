@@ -238,6 +238,10 @@ SAMPLES: dict[str, object] = {
     "UpdateRequest.full": UpdateRequest(
         request_id="upd-1", target_version="2609.9", deadline_s=120, drain_policy="force"
     ),
+    # Stage B: the nonce the server issues to arm a canary handover.
+    "UpdateRequest.handover": UpdateRequest(
+        request_id="upd-1", target_version="2609.9", successor_nonce="n0nce"
+    ),
     "UpdateAck.accepted": UpdateAck(request_id="upd-1", accepted=True),
     "UpdateAck.refused": UpdateAck(request_id="upd-1", accepted=False, reason="unsupported:brew"),
     "UpdateProgress": UpdateProgress(
