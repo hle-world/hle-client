@@ -27,6 +27,7 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from hle_client.proxy import upstream_verify
 from hle_common.preflight import PreflightFinding, PreflightFix, PreflightReport, Severity
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,11 @@ def _clip(text: str) -> str:
 
 
 async def _probe(
-    client: httpx.AsyncClient, url: str, *, headers: dict[str, str] | None = None
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    extensions: dict[str, str] | None = None,
 ) -> _Probe:
     """GET once, never raising. GET rather than HEAD deliberately.
 
@@ -111,7 +116,8 @@ async def _probe(
     """
     try:
         resp = await asyncio.wait_for(
-            client.get(url, headers=headers or {}), timeout=REQUEST_TIMEOUT
+            client.get(url, headers=headers or {}, extensions=extensions),
+            timeout=REQUEST_TIMEOUT,
         )
     except Exception as exc:  # noqa: BLE001 — a probe reports, it does not raise
         return _Probe(error=exc)
@@ -483,20 +489,29 @@ def _content_findings(
 
 
 async def _websocket_finding(
-    client: httpx.AsyncClient, url: str, websocket_enabled: bool
+    client: httpx.AsyncClient,
+    url: str,
+    websocket_enabled: bool,
+    *,
+    extensions: dict[str, str] | None = None,
+    host_header: str | None = None,
 ) -> PreflightFinding | None:
     """Does this service want WebSockets it will not be allowed to use?"""
     if websocket_enabled:
         return None
+    headers = {
+        "Connection": "Upgrade",
+        "Upgrade": "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": "cHJlZmxpZ2h0LXByb2JlLTEyMw==",
+    }
+    if host_header:
+        headers["Host"] = host_header
     probe = await _probe(
         client,
         url,
-        headers={
-            "Connection": "Upgrade",
-            "Upgrade": "websocket",
-            "Sec-WebSocket-Version": "13",
-            "Sec-WebSocket-Key": "cHJlZmxpZ2h0LXByb2JlLTEyMw==",
-        },
+        headers=headers,
+        extensions=extensions,
     )
     if probe.response is not None and probe.response.status_code == 101:
         return PreflightFinding(
@@ -523,8 +538,18 @@ async def run_preflight(
     websocket_enabled: bool = True,
     forward_host: bool = False,
     request_id: str = "",
+    sni_hostname: str | None = None,
+    trust_env: bool = True,
+    host_header: str | None = None,
 ) -> PreflightReport:
     """Probe ``service_url`` as this tunnel would, and report what is wrong.
+
+    ``sni_hostname`` overrides the certificate name for a canonicalised target
+    (the guard may hand over a trailing-dot in-cluster FQDN). ``trust_env`` is
+    False on a cluster agent so an environment proxy is never used.
+    ``host_header`` is the authority to send as ``Host`` when ``service_url`` is
+    a canonical FQDN the guard rewrote — the same authority the tunnel presents,
+    so the upstream sees itself rather than the rewritten name.
 
     Never raises and never changes anything. A check that fails to run is a
     reported error, not an exception: "could not check" and "nothing wrong" must
@@ -532,6 +557,8 @@ async def run_preflight(
     """
     loop = asyncio.get_running_loop()
     started = loop.time()
+    extensions = {"sni_hostname": sni_hostname} if sni_hostname else None
+    upstream_headers = {"Host": host_header} if host_header else None
 
     shape = check_url_shape(service_url)
     if any(f.severity == Severity.ERROR for f in shape):
@@ -550,13 +577,18 @@ async def run_preflight(
     try:
         async with asyncio.timeout(TOTAL_BUDGET):
             async with httpx.AsyncClient(
-                verify=verify_ssl,
+                verify=upstream_verify(verify_ssl),
                 follow_redirects=False,
                 timeout=REQUEST_TIMEOUT,
+                trust_env=trust_env,
             ) as client:
                 # Mode 1: Host stripped — what the proxy does by default, so the
-                # upstream sees its own address.
-                upstream = await _probe(client, service_url)
+                # upstream sees its own address. A canonicalised target presents
+                # the original authority the dashboard asked for (as the tunnel
+                # does), never the rewritten FQDN.
+                upstream = await _probe(
+                    client, service_url, headers=upstream_headers, extensions=extensions
+                )
                 findings += _scheme_findings(upstream, service_url)
 
                 if any(f.severity == Severity.ERROR for f in findings):
@@ -576,14 +608,22 @@ async def run_preflight(
                 # Mode 2: Host forwarded — what an app needs to build correct
                 # URLs, and what host-validating services reject.
                 if tunnel_host:
-                    tunnel = await _probe(client, service_url, headers={"Host": tunnel_host})
+                    tunnel = await _probe(
+                        client, service_url, headers={"Host": tunnel_host}, extensions=extensions
+                    )
                     findings += _host_findings(upstream, tunnel, tunnel_host, forward_host)
                     tunnel_redirect = _redirect_finding(tunnel, service_url, "tunnel")
                     if tunnel_redirect is None and tunnel.ok and working_mode is None:
                         working_mode = "tunnel"
 
                 findings += _content_findings(upstream, service_url, tunnel_host)
-                ws = await _websocket_finding(client, service_url, websocket_enabled)
+                ws = await _websocket_finding(
+                    client,
+                    service_url,
+                    websocket_enabled,
+                    extensions=extensions,
+                    host_header=host_header,
+                )
                 if ws is not None:
                     findings.append(ws)
     except TimeoutError:
