@@ -337,7 +337,7 @@ class TestTunnelPane:
                 await settle(pilot)
                 added.assert_awaited_once_with(app.store.api, "ha-x7k", "cy@example.com", "github")
                 assert app.last_cli == (
-                    "hle tunnel access add ha-x7k cy@example.com --provider github"
+                    "hle tunnel access create ha-x7k cy@example.com --provider github"
                 )
                 assert pane.query_one("#td-rule-input", Input).value == ""
 
@@ -361,7 +361,7 @@ class TestTunnelPane:
                 pane.query_one("#td-rule-remove", Button).press()
                 await settle(pilot)
                 removed.assert_awaited_once_with(app.store.api, "ha-x7k", 12)
-                assert app.last_cli == "hle tunnel access remove ha-x7k 12"
+                assert app.last_cli == "hle tunnel access delete ha-x7k 12"
 
     async def test_making_a_tunnel_public_asks_first(self):
         set_mode = AsyncMock(return_value="ha-x7k")
@@ -388,7 +388,7 @@ class TestTunnelPane:
                 await pilot.click("#yes")
                 await settle(pilot)
                 set_mode.assert_awaited_once_with(app.store.api, "ha-x7k", "none")
-                assert app.last_cli == "hle tunnel auth-mode ha-x7k --set none"
+                assert app.last_cli == "hle tunnel set ha-x7k --auth none"
 
     async def test_pin_share_and_basic_auth_go_through_ops_auth(self):
         set_pin = AsyncMock(return_value="ha-x7k")
@@ -439,7 +439,7 @@ class TestTunnelPane:
                 await pilot.click("#yes")
                 await settle(pilot)
                 revoke.assert_awaited_once_with(api, "ha-x7k", 5)
-                assert app.last_cli == "hle tunnel share revoke ha-x7k 5"
+                assert app.last_cli == "hle tunnel share delete ha-x7k 5"
 
     async def test_revoking_a_share_asks_and_declining_keeps_it(self):
         """Irreversible: whoever holds the link would need a new one sent."""
@@ -496,7 +496,7 @@ class TestDaemons:
                 await pilot.click("#yes")
                 await settle(pilot)
                 restart.assert_awaited_once_with("hle-ha.service", False)
-                assert app.last_cli == "hle daemon restart --label ha --system"
+                assert app.last_cli == "hle daemon restart ha"
 
     async def test_restart_is_not_bound_on_the_tunnels_tab(self):
         restart = AsyncMock()
@@ -583,7 +583,7 @@ class TestDaemonLogSource:
             pytest.raises(HleError) as err,
         ):
             await data.daemon_log_tail(DAEMON)
-        assert "hle daemon status --label ha --system" in (err.value.hint or "")
+        assert "hle daemon status ha --system" in (err.value.hint or "")
 
 
 # ---------------------------------------------------------------------------

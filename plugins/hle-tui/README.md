@@ -31,11 +31,11 @@ The tunnel pane covers:
 
 | Section | Actions | Same as |
 |---|---|---|
-| Access rules | add `[provider:]email`, remove the selected rule | `hle tunnel access add/remove` |
-| Gate mode | SSO or public (asks first) | `hle tunnel auth-mode --set` |
-| PIN | set, remove (asks first) | `hle tunnel pin set/remove` |
-| Basic auth | set user and password, remove (asks first) | `hle tunnel basic-auth set/remove` |
-| Share links | create for 1h/24h/7d with a label, list, revoke | `hle tunnel share create/list/revoke` |
+| Access rules | add `[provider:]email`, remove the selected rule | `hle tunnel access create/delete` |
+| Gate mode | SSO or public (asks first) | `hle tunnel set --auth` |
+| PIN | set, remove (asks first) | `hle tunnel pin set/delete` |
+| Basic auth | set user and password, remove (asks first) | `hle tunnel basic-auth set/delete` |
+| Share links | create for 1h/24h/7d with a label, list, revoke | `hle tunnel share create/list/delete` |
 
 A new share link's URL is shown once, and copied to the clipboard where the
 terminal allows it. The relay keeps only a prefix, so that is the only time the
@@ -80,7 +80,7 @@ Errors never close the dashboard. A refused key says so and says what to run;
 
 ```
 hle tui --refresh 30     # poll the relay every 30s (0 disables polling)
-hle tui --api-key hle_…  # otherwise read from HLE_API_KEY or the config file
+hle tui --api-key hle_…  # otherwise read from the root --api-key, then HLE_API_KEY or the config file
 ```
 
 ## Writing another plugin

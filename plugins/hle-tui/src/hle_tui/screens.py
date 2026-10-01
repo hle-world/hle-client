@@ -391,7 +391,7 @@ class TunnelPane(VerticalScroll):
             self.app,
             lambda: ops_auth.remove_pin(self.store.api, sub),
             done=f"PIN removed from {sub}.",
-            cli=data.cli_pin(sub, "remove"),
+            cli=data.cli_pin(sub, "delete"),
         )
         if ok:
             self.reload()
@@ -423,7 +423,7 @@ class TunnelPane(VerticalScroll):
             self.app,
             lambda: ops_auth.remove_basic_auth(self.store.api, sub),
             done=f"Basic auth removed from {sub}.",
-            cli=data.cli_basic_auth(sub, "remove"),
+            cli=data.cli_basic_auth(sub, "delete"),
         )
         if ok:
             self.reload()
