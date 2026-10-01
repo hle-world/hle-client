@@ -15,6 +15,7 @@ import pytest
 from hle_client.discovery import active_providers, scan_all
 from hle_client.discovery.docker import DockerProvider, _dns_names, _usable_ports
 from hle_client.discovery.kubernetes import KubernetesProvider
+from hle_client.discovery_exclusions import excluded_namespaces
 from hle_common.discovery import DiscoveredService
 
 
@@ -296,3 +297,22 @@ class TestKubernetesTls:
         monkeypatch.setattr(k8s, "CA_PATH", tmp_path / "missing.crt")
         # Reported unavailable, so scan() is never reached in that state.
         assert k8s.KubernetesProvider().available() is False
+
+
+class TestDiscoveryExclusions:
+    """Namespace exclusions from the chart, by name and by label."""
+
+    def test_name_exclusions_add_to_the_built_in_skips(self):
+        result = excluded_namespaces({"HLE_DISCOVERY_EXCLUDE_NAMESPACES": "media, monitoring ,,"})
+        assert {"kube-system", "kube-public", "kube-node-lease", "media", "monitoring"} <= result
+
+    def test_default_providers_reads_the_environment(self, monkeypatch):
+        monkeypatch.setenv("HLE_DISCOVERY_EXCLUDE_NAMESPACES", "media")
+        from hle_client.discovery import default_providers
+
+        k8s = next(p for p in default_providers() if p.name == "k8s")
+        assert "media" in k8s._skip_namespaces
+
+    def test_excluded_namespace_names_are_lowercased(self):
+        env = {"HLE_DISCOVERY_EXCLUDE_NAMESPACES": " Media ,apps"}
+        assert "media" in excluded_namespaces(env)

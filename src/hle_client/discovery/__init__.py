@@ -45,12 +45,19 @@ class DiscoveryProvider(Protocol):
 
 
 def default_providers() -> list[DiscoveryProvider]:
-    """All known providers, in preference order. Import errors are non-fatal."""
+    """All known providers, in preference order. Import errors are non-fatal.
+
+    The Kubernetes provider is given the namespace exclusions from the
+    environment, so a cluster agent the chart configured does not advertise
+    infrastructure or excluded namespaces.
+    """
+    from hle_client.discovery_exclusions import excluded_namespaces
+
     providers: list[DiscoveryProvider] = []
     try:
         from hle_client.discovery.kubernetes import KubernetesProvider
 
-        providers.append(KubernetesProvider())
+        providers.append(KubernetesProvider(skip_namespaces=excluded_namespaces()))
     except Exception as exc:  # noqa: BLE001 — a broken provider must not stop the agent
         logger.debug("Kubernetes provider unavailable: %s", exc)
     try:

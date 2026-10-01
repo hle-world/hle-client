@@ -97,6 +97,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
+from hle_client.discovery_exclusions import excluded_namespaces as _excluded_namespaces
+
 logger = logging.getLogger(__name__)
 
 # Env names live here rather than in agent.py so the guard and the hello both
@@ -256,6 +258,7 @@ class KubernetesTargetGuard:
         node_ips: list[str] | None = None,
         pod_namespace: str | None = None,
         resolver: Resolver | None = None,
+        excluded_namespaces: frozenset[str] | None = None,
     ) -> None:
         self._cluster_domain = (cluster_domain or DEFAULT_CLUSTER_DOMAIN).strip(".").lower()
         self._allow_raw_urls = allow_raw_urls
@@ -296,6 +299,13 @@ class KubernetesTargetGuard:
         # starts it instead; either way the resolution runs in the background
         # and never blocks a check.
         self._bootstrap_api_refresh()
+        # Namespaces this agent must not tunnel to, from
+        # HLE_DISCOVERY_EXCLUDE_NAMESPACES and the built-in skips. The same set
+        # the discovery provider omits, so a namespace hidden from the dashboard
+        # is also refused if it is named directly.
+        self._excluded_namespaces = frozenset(
+            n.strip().lower() for n in (excluded_namespaces or ())
+        )
 
     @classmethod
     def from_env(
@@ -318,6 +328,7 @@ class KubernetesTargetGuard:
             node_ips=node_ips,
             pod_namespace=_pod_namespace_from_env(env),
             resolver=resolver,
+            excluded_namespaces=_excluded_namespaces(env),
         )
 
     async def check(self, service_url: str) -> TargetDecision:
@@ -519,6 +530,19 @@ class KubernetesTargetGuard:
     async def _resolve_service(
         self, name: str, fqdn: str, *, allow_raw_fallback: bool = False
     ) -> _Eval:
+        # The exclusion is checked on the canonical FQDN, so every spelling that
+        # canonicalises here (bare name in an excluded pod namespace, ``.svc``,
+        # full cluster domain, trailing dot, any case) is refused alike.
+        # The namespace is the label just before ``.svc.<domain>``; counting
+        # from the end keeps ``pod.svc.ns.svc.<domain>`` (headless pod DNS)
+        # from reading ``svc`` as the namespace.
+        canonical = fqdn.rstrip(".").lower()
+        suffix = f".svc.{self._cluster_domain}"
+        namespace = ""
+        if canonical.endswith(suffix):
+            namespace = canonical[: -len(suffix)].rsplit(".", 1)[-1]
+        if namespace and namespace in self._excluded_namespaces:
+            return _refuse_eval(f"namespace '{namespace}' is excluded")
         addresses = await self._resolve(fqdn)
         if addresses:
             refused = self._first_refused(addresses, name)
