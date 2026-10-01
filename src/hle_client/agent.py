@@ -25,7 +25,7 @@ from typing import Any
 import websockets
 import websockets.exceptions
 
-from hle_client import __version__, agent_state, agent_update, config, k8s_targets
+from hle_client import __version__, agent_logs, agent_state, agent_update, config, k8s_targets
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.fragmenting import FragmentingConnection
@@ -36,10 +36,14 @@ from hle_client.tunnel import Tunnel, TunnelConfig, to_tunnel_config
 from hle_common import close_codes
 from hle_common.agent_protocol import (
     HANDOVER_CAPABILITY,
+    K8S_DECLARED_CAPABILITY,
     AgentHello,
     AgentStateSync,
     AgentStatus,
     AgentWelcome,
+    DeclaredAck,
+    DeclaredEndpoint,
+    DeclaredEndpoints,
     EndpointSpec,
     EndpointStatus,
     UpdateAck,
@@ -197,8 +201,16 @@ class AgentClient:
         successor_of: str | None = None,
         successor_nonce: str | None = None,
         successor_spawner: Callable[..., Any] | None = None,
+        declares_endpoints: bool = False,
+        on_declared_ack: Callable[[DeclaredAck], Any] | None = None,
     ) -> None:
         self._token = token
+        # Opt-in hook for an embedder (the operator) that owns a set of
+        # endpoints itself: see send_declared_endpoints(). The capability is
+        # advertised only once a caller opts in, never by default.
+        self._declares_endpoints = declares_endpoints
+        self._on_declared_ack = on_declared_ack
+        self._declared: DeclaredEndpoints | None = None
         self._relay_host = relay_host
         self._relay_port = relay_port
         self._tunnel_factory = tunnel_factory
@@ -500,6 +512,11 @@ class AgentClient:
             if k8s_targets.firepuncher_enabled():
                 capabilities.append("firepuncher")
             capabilities += [f"discovery:{p.name}" for p in active_providers()]
+            # The agent answers logs_request from its own ring buffer on every
+            # install type.
+            capabilities.append(agent_logs.LOGS_CAPABILITY)
+            if self._declares_endpoints:
+                capabilities.append(K8S_DECLARED_CAPABILITY)
             # `update:<method>` is advertised only for installs the agent can
             # stage a new version into itself. The method is sent regardless so
             # the dashboard can tell a brew user what to run.
@@ -646,6 +663,14 @@ class AgentClient:
                 # control channel has to keep handling state_sync and fp frames
                 # meanwhile. Blocking here would stall tunnel reconciliation.
                 self._spawn_preflight(msg, ws)
+        elif mtype == "logs_request":
+            if ws is not None:
+                try:
+                    await ws.send(agent_logs.build_response(msg).model_dump_json())
+                except ValueError:
+                    logger.debug("Malformed logs_request ignored")
+        elif mtype == "declared_ack":
+            await self._handle_declared_ack(msg)
         elif mtype == "pong":
             pass
         elif mtype == "update_request":
@@ -658,6 +683,45 @@ class AgentClient:
             logger.info("Ignoring %s from the relay: not a request", mtype)
         else:
             logger.debug("Unhandled agent control message: %s", mtype)
+
+    # -- declared endpoints (hook for an embedding operator) ------------------
+
+    async def send_declared_endpoints(
+        self, endpoints: list[DeclaredEndpoint], revision: int
+    ) -> bool:
+        """Declare the full set of endpoints the caller owns.
+
+        The latest declaration is remembered and re-sent after every
+        (re)welcome. Calling this opts the agent in to the ``k8s:declared``
+        capability from the next hello on (pass ``declares_endpoints=True`` to
+        the constructor to have it in the first hello). Returns True when the
+        frame went out now, False when it is only queued for the next welcome.
+        """
+        self._declares_endpoints = True
+        self._declared = DeclaredEndpoints(endpoints=list(endpoints), revision=revision)
+        return await self._send_declared()
+
+    async def _send_declared(self) -> bool:
+        ws, declared = self._ws, self._declared
+        if ws is None or declared is None:
+            return False
+        try:
+            await ws.send(declared.model_dump_json())
+        except Exception:  # noqa: BLE001 — a dropped socket resends on the next welcome
+            logger.debug("declared_endpoints not sent; will resend on reconnect")
+            return False
+        return True
+
+    async def _handle_declared_ack(self, msg: dict[str, Any]) -> None:
+        if self._on_declared_ack is None:
+            return
+        try:
+            ack = DeclaredAck.model_validate(msg)
+            result = self._on_declared_ack(ack)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:  # noqa: BLE001 — a bad callback must not kill the control loop
+            logger.exception("declared_ack handler failed")
 
     # -- firepuncher frame ordering ------------------------------------------
 
@@ -1204,6 +1268,9 @@ class AgentClient:
             pending, self._pending_result = self._pending_result, None
             with contextlib.suppress(Exception):
                 await ws.send(pending.model_dump_json())
+        # A declaration made earlier (or before this reconnect) is the truth
+        # the server must hold again; self._ws is already this session's.
+        await self._send_declared()
 
     async def _confirm_canary_health(self, ws: Any, poll: float = 0.5) -> None:
         """A successor must bring every endpoint up, or exit without a fuss.

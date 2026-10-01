@@ -81,13 +81,46 @@ class KubernetesProvider:
             resp = await client.get(f"{base}/api/v1/services", headers=headers)
             resp.raise_for_status()
             payload = resp.json()
+            ready = await self._ready_by_service(client, base, headers)
 
         services: list[DiscoveredService] = []
         for item in payload.get("items", []):
-            services.extend(self._to_services(item))
+            services.extend(self._to_services(item, ready))
         return services
 
-    def _to_services(self, item: dict) -> list[DiscoveredService]:
+    async def _ready_by_service(
+        self, client: httpx.AsyncClient, base: str, headers: dict[str, str]
+    ) -> dict[tuple[str, str], list[tuple[str, int]]] | None:
+        """Ready backend counts per Service: ``(ns, name) -> [(port name, n)]``.
+
+        Uses the core ``endpoints`` list the chart's ClusterRole already grants.
+        Best effort: any failure (RBAC trimmed, API hiccup) yields None, which
+        leaves ``ready_endpoints`` unknown rather than failing the scan.
+        """
+        try:
+            resp = await client.get(f"{base}/api/v1/endpoints", headers=headers)
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+        except (httpx.HTTPError, ValueError):
+            logger.debug("Could not list endpoints; ready_endpoints left unknown")
+            return None
+        out: dict[tuple[str, str], list[tuple[str, int]]] = {}
+        for ep in items:
+            meta = ep.get("metadata") or {}
+            counts = out.setdefault(
+                (meta.get("namespace") or "default", meta.get("name") or ""), []
+            )
+            for subset in ep.get("subsets") or []:
+                n = len(subset.get("addresses") or [])
+                for p in subset.get("ports") or []:
+                    counts.append((str(p.get("name") or ""), n))
+        return out
+
+    def _to_services(
+        self,
+        item: dict,
+        ready: dict[tuple[str, str], list[tuple[str, int]]] | None = None,
+    ) -> list[DiscoveredService]:
         meta = item.get("metadata") or {}
         spec = item.get("spec") or {}
         namespace = meta.get("namespace") or "default"
@@ -109,7 +142,8 @@ class KubernetesProvider:
         for port in spec.get("ports") or []:
             if port.get("protocol", "TCP") != "TCP":
                 continue
-            port_name = str(port.get("name") or "").lower()
+            raw_name = str(port.get("name") or "")
+            port_name = raw_name.lower()
             if port_name in _SKIP_PORT_NAMES:
                 continue
             number = port.get("port")
@@ -119,6 +153,13 @@ class KubernetesProvider:
             # In-cluster DNS: reachable from the agent's pod regardless of node.
             fqdn = f"{name}.{namespace}.svc.cluster.local"
             scheme = "https" if number == 443 or port_name in ("https", "tls") else "http"
+            ready_endpoints: int | None = None
+            if ready is not None:
+                # No Endpoints object (or no subsets) means zero ready backends.
+                ready_endpoints = sum(
+                    n for pname, n in ready.get((namespace, name), []) if pname == raw_name
+                )
+            app_protocol = port.get("appProtocol")
             out.append(
                 DiscoveredService(
                     provider=self.name,
@@ -128,6 +169,9 @@ class KubernetesProvider:
                     ports=[number],
                     namespace=namespace,
                     labels=labels,
+                    port_name=raw_name or None,
+                    app_protocol=str(app_protocol).lower() if app_protocol else None,
+                    ready_endpoints=ready_endpoints,
                 )
             )
         return out
