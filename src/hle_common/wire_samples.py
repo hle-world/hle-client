@@ -13,12 +13,22 @@ only shows up when the optional fields are populated.
 from __future__ import annotations
 
 from hle_common.agent_protocol import (
+    K8S_DECLARED_CAPABILITY,
+    K8S_SERVICES_CAPABILITY,
+    LOGS_CAPABILITY,
     AgentHello,
     AgentStateSync,
     AgentStatus,
     AgentWelcome,
+    DeclaredAck,
+    DeclaredAckEntry,
+    DeclaredEndpoint,
+    DeclaredEndpoints,
     EndpointSpec,
     EndpointStatus,
+    K8sServiceTarget,
+    LogsRequest,
+    LogsResponse,
     UpdateAck,
     UpdateProgress,
     UpdateRequest,
@@ -282,6 +292,85 @@ SAMPLES: dict[str, object] = {
         error=None,
     ),
     "DiscoveryRefresh": DiscoveryRefresh(),
+    # -- agent protocol 1.4 + discovery 1.1 ------------------------------
+    # Kept as one contiguous block so these additions stay easy to rebase.
+    "K8sServiceTarget": K8sServiceTarget(namespace="media", name="jellyfin", port=8096),
+    "K8sServiceTarget.named_port": K8sServiceTarget(
+        namespace="media", name="jellyfin", port="http", scheme="https"
+    ),
+    "EndpointSpec.v1_4": EndpointSpec(
+        id=4,
+        label="jellyfin",
+        service_url="http://jellyfin.media.svc.cluster.local:8096",
+        target=K8sServiceTarget(namespace="media", name="jellyfin", port=8096),
+    ),
+    "DeclaredEndpoint.target": DeclaredEndpoint(
+        label="jellyfin",
+        target=K8sServiceTarget(namespace="media", name="jellyfin", port=8096),
+        source_ref="hletunnel:media/jellyfin",
+        auth_mode="sso",
+        sync_policy="strict",
+    ),
+    "DeclaredEndpoint.service_url": DeclaredEndpoint(
+        label="legacy",
+        service_url="http://legacy.media.svc.cluster.local:80",
+        source_ref="ingress:media/legacy",
+        sync_policy="initial",
+    ),
+    # Credentials never travel in a declaration; the agent names a local Secret.
+    "DeclaredEndpoint.secret": DeclaredEndpoint(
+        label="db",
+        target=K8sServiceTarget(namespace="media", name="db", port="postgres"),
+        upstream_basic_auth_secret="media/db-auth#password",
+        source_ref="hletunnel:media/db",
+        sync_policy="initial",
+    ),
+    "DeclaredEndpoints": DeclaredEndpoints(
+        revision=7,
+        endpoints=[
+            DeclaredEndpoint(
+                label="jellyfin",
+                target=K8sServiceTarget(namespace="media", name="jellyfin", port=8096),
+                source_ref="hletunnel:media/jellyfin",
+            )
+        ],
+    ),
+    "DeclaredAck": DeclaredAck(
+        revision=7,
+        endpoints=[
+            DeclaredAckEntry(label="jellyfin", status="accepted"),
+            DeclaredAckEntry(
+                label="taken", status="conflict", message="label is managed in the dashboard"
+            ),
+        ],
+    ),
+    "LogsRequest": LogsRequest(request_id="log-1", lines=500),
+    "LogsResponse": LogsResponse(
+        request_id="log-1", lines=["connected", "GET / 200"], truncated=True
+    ),
+    "AgentHello.v1_4": AgentHello(
+        token="hlea_x",
+        agent_version="2609.10",
+        capabilities=[
+            K8S_SERVICES_CAPABILITY,
+            K8S_DECLARED_CAPABILITY,
+            LOGS_CAPABILITY,
+            "update:venv",
+        ],
+        handover_group="hle/hle-operator",
+    ),
+    "DiscoveredService.v1_1": DiscoveredService(
+        provider="k8s",
+        id="media/jellyfin:8096",
+        name="jellyfin",
+        address="http://jellyfin.media.svc.cluster.local:8096",
+        ports=[8096],
+        namespace="media",
+        port_name="http",
+        app_protocol="http",
+        ready_endpoints=2,
+        exposed_by="hletunnel:media/jellyfin",
+    ),
     # -- preflight.py -----------------------------------------------------
     "PreflightFix": PreflightFix(
         field="service_url", value="https://192.168.1.1", label="Use https://192.168.1.1"
