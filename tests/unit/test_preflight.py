@@ -199,6 +199,12 @@ class TestHostHandling:
         assert any("hle.world" in h for h in upstream.seen_hosts)
         assert any("127.0.0.1" in h for h in upstream.seen_hosts)
 
+    def test_an_explicit_host_header_overrides_the_url_host(self, upstream):
+        """A canonicalised target presents the original authority, not the FQDN."""
+        run(upstream, host_header="web:8000")
+        assert "web:8000" in upstream.seen_hosts
+        assert not any(h.startswith("127.0.0.1") for h in upstream.seen_hosts)
+
     def test_host_rejection_is_only_informational_by_default(self, upstream):
         """The proxy strips Host by default, so this doesn't bite unless asked."""
         upstream.mode = "rejects_tunnel_host"

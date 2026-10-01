@@ -23,7 +23,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hle_client.netinfo import describe_local_networks, is_local
 from hle_common.fp_protocol import (
@@ -39,6 +39,9 @@ from hle_common.fp_protocol import (
     FpReady,
     is_allowed,
 )
+
+if TYPE_CHECKING:
+    from hle_client.k8s_targets import KubernetesTargetGuard
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +69,46 @@ class FpAgentSide:
     ``send`` is how we write a JSON frame back toward the client (through the
     agent's control connection). ``rules`` is the allowlist; an empty list means
     nothing is forwardable, which is the safe reading of "not configured".
+
+    ``enabled`` and ``target_guard`` carry the Kubernetes policy. Outside a
+    cluster ``enabled`` is True and ``target_guard`` is None, so the relay rules
+    are the only check, exactly as before. In a cluster the agent sets
+    ``enabled`` from ``HLE_FIREPUNCHER_ENABLED`` (off by default) and passes its
+    endpoint guard so a forward cannot reach the API server, metadata or a node
+    that the relay's own rules would otherwise allow.
     """
 
     send: Sender
     rules: list[ForwardRule] = field(default_factory=list)
+    enabled: bool = True
+    target_guard: KubernetesTargetGuard | None = None
     _streams: dict[str, _Stream] = field(default_factory=dict)
+    # Stream ids whose open is still in flight (resolving the guard, dialling).
+    # Counted with ``_streams`` so the cap covers both pending and active opens;
+    # without it a burst of concurrent opens all passes the check before any of
+    # them registers.
+    _pending_opens: set[str] = field(default_factory=set)
 
     async def handle(self, msg: dict[str, Any]) -> None:
         """Dispatch one firepuncher frame. Never raises — errors go on the wire."""
         mtype = msg.get("type")
         try:
             if mtype == FpMsgType.OPEN:
-                await self._on_open(FpOpen.model_validate(msg))
+                open_req = FpOpen.model_validate(msg)
+                # Reserve a slot synchronously, before the first await: this runs
+                # as the first step of the spawned open task, so concurrent opens
+                # see each other's reservations.
+                refusal = self._reserve_open(open_req.stream_id)
+                if refusal is not None:
+                    logger.warning(
+                        "Firepuncher refused stream_id=%s: %s", open_req.stream_id, refusal
+                    )
+                    await self._fail(open_req.stream_id, FpErrorCode.INTERNAL, refusal)
+                    return
+                try:
+                    await self._on_open(open_req)
+                finally:
+                    self._pending_opens.discard(open_req.stream_id)
             elif mtype == FpMsgType.DATA:
                 await self._on_data(FpData.model_validate(msg))
             elif mtype == FpMsgType.CLOSE:
@@ -89,6 +120,24 @@ class FpAgentSide:
             sid = msg.get("stream_id")
             if isinstance(sid, str):
                 await self._fail(sid, FpErrorCode.INTERNAL, str(exc))
+
+    def _reserve_open(self, stream_id: str) -> str | None:
+        """Claim a stream slot for an open that has not registered yet.
+
+        Returns None when the slot is claimed, or the reason it could not be.
+        A repeated open for a stream id that is already pending or active is
+        refused rather than treated as a retry: letting it through opened a
+        second socket for the same id, which the dictionary then overwrote —
+        orphaning the first connection and letting repeated opens slip past the
+        cap. The existing stream is left untouched. Returns a reason rather than
+        a bool so the caller can say which limit was hit.
+        """
+        if stream_id in self._pending_opens or stream_id in self._streams:
+            return "stream id already open"
+        if len(self._streams) + len(self._pending_opens) >= MAX_STREAMS:
+            return "too many open streams"
+        self._pending_opens.add(stream_id)
+        return None
 
     async def close_all(self) -> None:
         for sid in list(self._streams):
@@ -127,8 +176,20 @@ class FpAgentSide:
         return rendered
 
     async def _on_open(self, msg: FpOpen) -> None:
-        if len(self._streams) >= MAX_STREAMS:
-            await self._fail(msg.stream_id, FpErrorCode.INTERNAL, "too many open streams")
+        # In a cluster firepuncher is off unless the operator turned it on: the
+        # relay's default rules include loopback and link-local, which inside a
+        # pod are the agent itself and the cloud metadata service.
+        if not self.enabled:
+            logger.warning(
+                "Firepuncher refused %s:%s — disabled on kubernetes agents",
+                msg.target_host,
+                msg.target_port,
+            )
+            await self._fail(
+                msg.stream_id,
+                FpErrorCode.NOT_ALLOWED,
+                "firepuncher is disabled on kubernetes agents",
+            )
             return
 
         # The allowlist check is the whole point: the relay already proved the
@@ -150,9 +211,31 @@ class FpAgentSide:
             )
             return
 
+        # In a cluster, the relay rules are not enough: they permit the pod's
+        # own network, and the API server and metadata live there. Resolve the
+        # target once, check it, and dial the exact address that was checked so
+        # a name cannot resolve differently between the two steps.
+        connect_host = msg.target_host
+        if self.target_guard is not None:
+            decision = await self.target_guard.check_host(msg.target_host, msg.target_port)
+            if not decision.allowed:
+                logger.warning(
+                    "Firepuncher refused %s:%s — %s",
+                    msg.target_host,
+                    msg.target_port,
+                    decision.reason,
+                )
+                await self._fail(
+                    msg.stream_id,
+                    FpErrorCode.NOT_ALLOWED,
+                    decision.reason or "target not allowed",
+                )
+                return
+            connect_host = decision.address or msg.target_host
+
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(msg.target_host, msg.target_port),
+                asyncio.open_connection(connect_host, msg.target_port),
                 timeout=DIAL_TIMEOUT,
             )
         except TimeoutError:
