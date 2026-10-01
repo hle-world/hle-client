@@ -43,7 +43,12 @@ from hle_common.wire import WireModel
 # the `k8s:*` and `logs` hello capabilities, and `handover_group`. Additive
 # again: every new field is optional with a null/empty default and the new
 # message types are simply unhandled by older peers.
-AGENT_PROTOCOL_VERSION = "1.4"
+#
+# 1.5 adds envelope fragmentation, shared with the tunnel channel: the
+# `fragmentation` hello capability, `AgentWelcome.capabilities` to echo it, and
+# `fragment` frames carrying slices of any oversized control message (the
+# welcome included). See hle_common.fragmentation.
+AGENT_PROTOCOL_VERSION = "1.5"
 
 # Install methods whose venv the agent owns outright and can stage a new version
 # into. Everything else (brew keg, docker image, system pip, PEP 668 interpreter)
@@ -133,6 +138,10 @@ class AgentMsgType(StrEnum):
     # server -> agent request, then agent -> server response, by `request_id`.
     LOGS_REQUEST = "logs_request"
     LOGS_RESPONSE = "logs_response"
+    # 1.5 — either direction: a slice of an oversized message. Same frame as
+    # the tunnel channel's MessageType.FRAGMENT (hle_common.fragmentation),
+    # sent only to a peer that advertised the `fragmentation` capability.
+    FRAGMENT = "fragment"
 
 
 def _validate_k8s_port(port: int | str) -> None:
@@ -300,6 +309,11 @@ class AgentWelcome(WireModel):
     # Firepuncher allowlist. None means "server said nothing" — the agent keeps
     # its safe default (loopback only) rather than assuming everything is open.
     forward_rules: list[ForwardRule] | None = None
+    # -- 1.5 ---------------------------------------------------------------
+    # Hello capabilities the server supports in return. Today only
+    # `fragmentation` matters: the agent fragments its own large messages only
+    # once the server lists it here.
+    capabilities: list[str] = field(default_factory=list)
 
 
 @dataclass(kw_only=True)

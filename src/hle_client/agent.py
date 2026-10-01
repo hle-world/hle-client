@@ -28,6 +28,7 @@ import websockets.exceptions
 from hle_client import __version__, agent_update, config, k8s_targets
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
+from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event
 from hle_client.proxy import sni_hostname_for
@@ -49,6 +50,7 @@ from hle_common.agent_protocol import (
 )
 from hle_common.discovery import DiscoveryReport
 from hle_common.fp_protocol import ForwardRule, FpMsgType, default_rules
+from hle_common.fragmentation import CAPABILITY_FRAGMENTATION
 from hle_common.preflight import PreflightReport, PreflightRequest
 
 logger = logging.getLogger(__name__)
@@ -456,7 +458,11 @@ class AgentClient:
 
     async def _connect_once(self) -> None:
         logger.info("Connecting agent control to %s", self.control_uri)
-        async with websockets.connect(self.control_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
+        async with websockets.connect(
+            self.control_uri,
+            max_size=WS_MAX_MESSAGE_SIZE,
+            create_connection=FragmentingConnection,
+        ) as ws:
             emit_event("connected", source="agent", message=f"Connected to {self.control_uri}")
             # Advertise what this agent can do so the dashboard only offers
             # features the agent actually supports. Firepuncher is available
@@ -479,6 +485,7 @@ class AgentClient:
                 # all: the successor runs from the newly staged version. Without
                 # the capability the relay keeps issuing Stage A updates.
                 capabilities.append(HANDOVER_CAPABILITY)
+            capabilities.append(CAPABILITY_FRAGMENTATION)
             hello = AgentHello(
                 token=self._token,
                 agent_version=__version__,
@@ -499,6 +506,10 @@ class AgentClient:
 
             raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
             welcome = AgentWelcome.model_validate_json(raw)
+            if CAPABILITY_FRAGMENTATION in welcome.capabilities and isinstance(
+                ws, FragmentingConnection
+            ):
+                ws.enable_fragmentation()
             self._api_key = welcome.api_key
             self._base_domain = welcome.base_domain
             if welcome.forward_rules:

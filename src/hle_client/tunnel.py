@@ -24,6 +24,7 @@ import websockets.exceptions
 
 from hle_client import __version__
 from hle_client import config as hle_config
+from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event, render_notice
 from hle_client.proxy import (
@@ -34,6 +35,11 @@ from hle_client.proxy import (
     upstream_verify,
 )
 from hle_common import close_codes
+from hle_common.fragmentation import (
+    CAPABILITY_FRAGMENTATION,
+    MAX_MESSAGE_SIZE,
+    MessageTooLargeError,
+)
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
     DiagnosticEvent,
@@ -748,6 +754,7 @@ class Tunnel:
             max_size=WS_MAX_MESSAGE_SIZE,
             ping_interval=30,
             ping_timeout=120,
+            create_connection=FragmentingConnection,
         ) as ws:
             self._ws = ws
             # Transport up, not yet a tunnel: `registered` follows on TUNNEL_ACK.
@@ -762,7 +769,7 @@ class Tunnel:
                 protocol_version=PROTOCOL_VERSION,
                 websocket_enabled=self.config.websocket_enabled,
                 auth_mode=self.config.auth_mode,
-                capabilities=[CAPABILITY_CHUNKED_RESPONSE],
+                capabilities=[CAPABILITY_CHUNKED_RESPONSE, CAPABILITY_FRAGMENTATION],
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
                 zone=self.config.zone,
@@ -802,6 +809,10 @@ class Tunnel:
             self._public_url = ack_data.public_url
             self._subdomain = ack_data.subdomain or None
             self._server_caps = getattr(ack_data, "server_capabilities", []) or []
+            if CAPABILITY_FRAGMENTATION in self._server_caps and isinstance(
+                ws, FragmentingConnection
+            ):
+                ws.enable_fragmentation()
             # This session worked, whatever ends it. The timestamp is what
             # lets connect() tell a healthy session from a flap: the backoff
             # only starts over once this session has outlived the flap window.
@@ -1364,8 +1375,14 @@ class Tunnel:
                 # response easily exceeds 1 MB on a populated install. The
                 # relay-side WS accepts up to WS_MAX_MESSAGE_SIZE; mirroring
                 # it here means an oversized frame fails predictably instead
-                # of silently 1006-closing the browser's WebSocket.
-                max_size=WS_MAX_MESSAGE_SIZE,
+                # of silently 1006-closing the browser's WebSocket. With
+                # fragmentation negotiated the relay link has no per-message
+                # cap below the reassembly ceiling, so neither does this one.
+                max_size=(
+                    MAX_MESSAGE_SIZE
+                    if CAPABILITY_FRAGMENTATION in self._server_caps
+                    else WS_MAX_MESSAGE_SIZE
+                ),
                 **connect_kwargs,
             )
         except Exception as exc:
@@ -1550,6 +1567,14 @@ class Tunnel:
                 close_code,
                 close_reason,
             )
+        except MessageTooLargeError as exc:
+            # Too big even to fragment: close this stream, not the tunnel.
+            close_code = exc.close_code
+            close_reason = str(exc)[:_WS_CLOSE_REASON_MAX]
+            exc_type = type(exc).__name__
+            logger.warning("Upstream WS message too large: stream_id=%s %s", stream_id, exc)
+            with contextlib.suppress(Exception):
+                await local_ws.close(code=close_code, reason=close_reason)
         except Exception as exc:
             close_code = 1011
             close_reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
