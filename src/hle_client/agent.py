@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform as _platform
+import re
 import signal
 import sys
 from collections.abc import Callable
@@ -62,6 +63,28 @@ logger = logging.getLogger(__name__)
 # How often the agent reports endpoint status / keepalive to the server.
 STATUS_INTERVAL = 15.0
 WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024
+
+# Names this process's rolling-update group in the hello. Same rule as the server.
+HANDOVER_GROUP_ENV = "HLE_HANDOVER_GROUP"
+_HANDOVER_GROUP_RE = re.compile(r"^[a-z0-9]([a-z0-9._/-]*[a-z0-9])?$")
+_HANDOVER_GROUP_MAX = 128
+
+
+def handover_group_from_env(env: dict[str, str] | None = None) -> str | None:
+    """``HLE_HANDOVER_GROUP`` if set and valid; invalid -> None plus one warning."""
+    value = (os.environ if env is None else env).get(HANDOVER_GROUP_ENV)
+    if not value:
+        return None
+    if len(value) > _HANDOVER_GROUP_MAX or not _HANDOVER_GROUP_RE.match(value):
+        logger.warning(
+            "Ignoring %s: must be at most %d characters of lowercase letters, digits, "
+            "'.', '_', '/' or '-', starting and ending with a letter or digit",
+            HANDOVER_GROUP_ENV,
+            _HANDOVER_GROUP_MAX,
+        )
+        return None
+    return value
+
 
 # Enrollment token persistence lives in hle_client.config. The names are kept
 # here for anything that imported them from this module.
@@ -203,8 +226,14 @@ class AgentClient:
         successor_spawner: Callable[..., Any] | None = None,
         declares_endpoints: bool = False,
         on_declared_ack: Callable[[DeclaredAck], Any] | None = None,
+        spec_resolver: Callable[[EndpointSpec], EndpointSpec] | None = None,
     ) -> None:
         self._token = token
+        # Resolve local references the server must never see (e.g. a credential
+        # held in a local secret store). Applied to every spec before the
+        # reconcile diff; a ValueError marks only that endpoint as failed.
+        self._spec_resolver = spec_resolver
+        self._handover_group = handover_group_from_env()
         # Opt-in hook for an embedder (the operator) that owns a set of
         # endpoints itself: see send_declared_endpoints(). The capability is
         # advertised only once a caller opts in, never by default.
@@ -545,6 +574,7 @@ class AgentClient:
                 # identity that is now its own, so they are dropped.
                 successor_of=self._successor_of if self._canary_probation else None,
                 successor_nonce=self._successor_nonce if self._canary_probation else None,
+                handover_group=self._handover_group,
             )
             await ws.send(hello.model_dump_json())
 
@@ -1462,6 +1492,16 @@ class AgentClient:
             with contextlib.suppress(Exception):
                 await ws.send(report.model_dump_json())
 
+    def endpoint_statuses(self) -> list[EndpointStatus] | None:
+        """Per-endpoint status, or None when this process does not hold the session.
+
+        None means "do not publish": disconnected, on canary probation, or
+        control already handed to a successor.
+        """
+        if self._ws is None or self._canary_probation or self._control_taken or self._handover_done:
+            return None
+        return self._build_status()
+
     def _build_status(self) -> list[EndpointStatus]:
         return [
             EndpointStatus(
@@ -1482,10 +1522,26 @@ class AgentClient:
         """Converge the running tunnel pool to *specs* (idempotent)."""
         desired = {s.label: s for s in specs}
 
+        # Resolve before the diff, so a changed resolved value restarts that
+        # endpoint through the usual reconcile_key comparison. An unresolvable
+        # spec is reported failed and stops running; the message never names
+        # the value.
+        unresolved: set[str] = set()
+        if self._spec_resolver is not None:
+            for label, spec in list(desired.items()):
+                try:
+                    desired[label] = self._spec_resolver(spec)
+                except ValueError as exc:
+                    self._failed[label] = f"unresolved: {exc}"
+                    unresolved.add(label)
+                    del desired[label]
+                    await self._stop_endpoint(label)
+
         # Endpoints that failed to start and are no longer asked for stop
         # being reported.
+        wanted = desired.keys() | unresolved
         for label in list(self._failed):
-            if label not in desired:
+            if label not in wanted:
                 del self._failed[label]
 
         # Remove endpoints no longer desired.
