@@ -112,3 +112,76 @@ class TestDelete:
         with patch("hle_client.api.ApiClient", return_value=client):
             line = await data.delete_tunnel("gone-x7k", _KEY)
         assert "not in the list" in line
+
+
+class TestEquivalentCommandsTeachTheCanonicalVerbs:
+    """The status-bar hint is documentation: it must show the spelling `--help` does.
+
+    Each of these emitted an old verb (`access add`, `auth-mode --set`,
+    `share revoke`, `pin remove`) that still works through a hidden alias but
+    is not what the CLI teaches. A dashboard whose whole point is "everything
+    here can be scripted afterwards" cannot hand out the retired spelling.
+    """
+
+    def test_access_add_is_create(self):
+        assert (
+            data.cli_access_add("ha-x7k", "cy@example.com")
+            == "hle tunnel access create ha-x7k cy@example.com"
+        )
+
+    def test_access_add_carries_the_provider(self):
+        assert (
+            data.cli_access_add("ha-x7k", "github:cy@example.com")
+            == "hle tunnel access create ha-x7k cy@example.com --provider github"
+        )
+
+    def test_access_remove_is_delete(self):
+        assert data.cli_access_remove("ha-x7k", 12) == "hle tunnel access delete ha-x7k 12"
+
+    def test_auth_mode_is_set_auth(self):
+        assert data.cli_auth_mode("ha-x7k", "none") == "hle tunnel set ha-x7k --auth none"
+
+    def test_pin_verbs_are_positional(self):
+        assert data.cli_pin("ha-x7k", "set") == "hle tunnel pin set ha-x7k"
+        assert data.cli_pin("ha-x7k", "delete") == "hle tunnel pin delete ha-x7k"
+
+    def test_basic_auth_verbs_are_canonical(self):
+        assert data.cli_basic_auth("ha-x7k", "set") == "hle tunnel basic-auth set ha-x7k"
+        assert data.cli_basic_auth("ha-x7k", "delete") == "hle tunnel basic-auth delete ha-x7k"
+
+    def test_share_create_names_the_link_with_name(self):
+        assert (
+            data.cli_share_create("ha-x7k", "24h", "for-mum")
+            == "hle tunnel share create ha-x7k --duration 24h --name 'for-mum'"
+        )
+
+    def test_share_create_omits_an_empty_name(self):
+        assert (
+            data.cli_share_create("ha-x7k", "1h", "")
+            == "hle tunnel share create ha-x7k --duration 1h"
+        )
+
+    def test_share_revoke_is_delete(self):
+        assert data.cli_share_revoke("ha-x7k", 5) == "hle tunnel share delete ha-x7k 5"
+
+    def test_daemon_name_is_positional(self):
+        from hle_client.ops.models import Daemon
+
+        daemon = Daemon(name="hle-ha.service", scope="system", kind="tunnel", label="ha")
+        assert data.cli_daemon("restart", daemon) == "hle daemon restart ha"
+        # The scope flag is kept only where the verb accepts it: `restart`
+        # works the scope out itself and has no --user/--system.
+        assert data.cli_daemon("logs", daemon) == "hle daemon logs ha --system"
+        assert data.cli_daemon("status", daemon) == "hle daemon status ha --system"
+
+    def test_an_agent_daemon_uses_its_label_not_a_flag(self):
+        from hle_client.ops.models import Daemon
+
+        daemon = Daemon(name="hle-agent.service", scope="user", kind="agent", label="agent")
+        assert data.cli_daemon("logs", daemon) == "hle daemon logs agent --user"
+
+    def test_a_daemon_without_a_label_falls_back_to_its_name(self):
+        from hle_client.ops.models import Daemon
+
+        daemon = Daemon(name="hle_old", scope="system", kind="unknown", label=None)
+        assert data.cli_daemon("status", daemon) == "hle daemon status hle_old --system"
