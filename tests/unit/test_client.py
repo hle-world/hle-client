@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ssl
+import subprocess
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -76,6 +78,39 @@ def _mock_httpx_response(
     resp.headers = httpx.Headers(headers or {"content-type": "text/plain"})
     resp.content = content
     return resp
+
+
+def _self_signed_cert(directory, host: str = "localhost"):
+    """A self-signed cert (usable as its own CA) for *host*, generated locally.
+
+    Python's stdlib cannot mint certificates and ``cryptography`` is not a test
+    dependency, so openssl is invoked once per test that needs TLS.
+    """
+    key = directory / "key.pem"
+    cert = directory / "cert.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-days",
+            "1",
+            "-subj",
+            f"/CN={host}",
+            "-addext",
+            f"subjectAltName=DNS:{host}",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return cert, key
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +216,101 @@ class TestLocalProxyForwardHttp:
             content=None,
         )
         await proxy.stop()
+
+    async def test_upstream_host_is_presented_as_the_host_header(self):
+        proxy = _proxy("http://web.apps.svc.cluster.local.:8000", upstream_host="web:8000")
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response()
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        await proxy.forward_http(method="GET", path="/", headers={"host": "web.tunnel.hle.world"})
+
+        headers = proxy._http_client.request.call_args.kwargs["headers"]
+        assert headers["host"] == "web:8000"
+        await proxy.stop()
+
+    async def test_forward_host_wins_over_the_preserved_authority(self):
+        proxy = _proxy(
+            "http://web.apps.svc.cluster.local.:8000",
+            upstream_host="web:8000",
+            forward_host=True,
+        )
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response()
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        await proxy.forward_http(method="GET", path="/", headers={"host": "browser.hle.world"})
+
+        headers = proxy._http_client.request.call_args.kwargs["headers"]
+        assert headers["host"] == "browser.hle.world"
+        await proxy.stop()
+
+    async def test_a_canonical_https_target_verifies_the_original_host(self):
+        proxy = _proxy(
+            "https://web.apps.svc.cluster.local.:8443",
+            upstream_host="web:8443",
+            verify_ssl=True,
+        )
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response()
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        await proxy.forward_http(method="GET", path="/", headers={})
+
+        kwargs = proxy._http_client.request.call_args.kwargs
+        # The dotted canonical name is not what the certificate names; the
+        # original host is.
+        assert kwargs["extensions"] == {"sni_hostname": "web"}
+        await proxy.stop()
+
+    async def test_an_ordinary_target_has_no_tls_override(self):
+        proxy = _proxy("https://example.com")
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response()
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        await proxy.forward_http(method="GET", path="/", headers={})
+
+        assert "extensions" not in proxy._http_client.request.call_args.kwargs
+        await proxy.stop()
+
+    async def test_env_proxy_is_disabled_when_trust_env_is_off(self):
+        proxy = _proxy("http://10.0.0.5:8080", trust_env=False)
+        await proxy.start()
+        assert proxy._http_client._trust_env is False
+        await proxy.stop()
+
+    async def test_url_embedded_credentials_reach_the_upstream(self):
+        seen: dict[str, str] = {}
+
+        async def handler(reader, writer):
+            request = await reader.readuntil(b"\r\n\r\n")
+            seen["request"] = request.decode("latin-1")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        proxy = _proxy(
+            f"http://user:pass@localhost.:{port}",
+            upstream_host=f"localhost:{port}",
+        )
+        await proxy.start()
+        try:
+            async with server:
+                status, _, body = await proxy.forward_http(method="GET", path="/", headers={})
+        finally:
+            await proxy.stop()
+
+        assert status == 200, body
+        request = seen["request"].lower()
+        assert "authorization: basic " in request
+        assert f"host: localhost:{port}" in request
 
     async def test_post_with_body(self):
         proxy = _proxy()
@@ -781,6 +911,292 @@ class TestTunnelWsSubprotocolNegotiation:
         ]
         assert len(accept_msgs) == 1
         assert accept_msgs[0].payload["subprotocol"] is None
+
+
+class TestTunnelUpstreamHost:
+    """A canonicalised target keeps the original authority as the WS Host."""
+
+    async def test_the_original_authority_is_kept_in_the_uri(self):
+        tunnel = _tunnel(
+            service_url="http://web.apps.svc.cluster.local.:8000",
+            upstream_host="web:8000",
+        )
+        tunnel._tunnel_id = "t-host"
+
+        mock_relay_ws = AsyncMock()
+        mock_relay_ws.send = AsyncMock()
+        mock_local_ws = AsyncMock()
+        mock_local_ws.subprotocol = None
+
+        captured: dict = {}
+
+        async def fake_connect(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return mock_local_ws
+
+        open_payload = WsStreamOpen(stream_id="s-host", path="/ws", headers={})
+        msg = ProtocolMessage(type=MessageType.WS_OPEN, payload=open_payload.model_dump())
+
+        with patch("hle_client.tunnel.websockets.connect", side_effect=fake_connect):
+            await tunnel._handle_ws_open(mock_relay_ws, msg)
+
+        # The URI (and so the Host header websockets derives) is the original
+        # authority; the TCP destination is the canonical name.
+        assert captured["url"] == "ws://web:8000/ws"
+        assert captured["kwargs"]["host"] == "web.apps.svc.cluster.local."
+        assert captured["kwargs"]["port"] == 8000
+
+
+class TestTunnelWssTls:
+    """wss to a canonical name: real context, original-host SNI, no env proxy."""
+
+    @staticmethod
+    async def _open(tunnel: Tunnel, headers: dict | None = None) -> dict:
+        tunnel._tunnel_id = "t-wss"
+        mock_relay_ws = AsyncMock()
+        mock_relay_ws.send = AsyncMock()
+        mock_local_ws = AsyncMock()
+        mock_local_ws.subprotocol = None
+        captured: dict = {}
+
+        async def fake_connect(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return mock_local_ws
+
+        open_payload = WsStreamOpen(stream_id="s-wss", path="/ws", headers=headers or {})
+        msg = ProtocolMessage(type=MessageType.WS_OPEN, payload=open_payload.model_dump())
+        with patch("hle_client.tunnel.websockets.connect", side_effect=fake_connect):
+            await tunnel._handle_ws_open(mock_relay_ws, msg)
+        return captured
+
+    async def test_verifying_uses_a_context_and_the_original_sni(self):
+        tunnel = _tunnel(
+            service_url="https://web.apps.svc.cluster.local.:8443",
+            upstream_host="web:8443",
+            verify_ssl=True,
+        )
+        captured = await self._open(tunnel)
+
+        assert captured["url"] == "wss://web:8443/ws"
+        assert captured["kwargs"]["host"] == "web.apps.svc.cluster.local."
+        # The certificate names ``web``, not the dotted canonical FQDN.
+        assert captured["kwargs"]["server_hostname"] == "web"
+        assert captured["kwargs"]["ssl"] is not None
+        assert captured["kwargs"]["proxy"] is None
+
+    async def test_not_verifying_uses_an_unverified_context(self):
+        tunnel = _tunnel(
+            service_url="https://web.apps.svc.cluster.local.:8443",
+            upstream_host="web:8443",
+            verify_ssl=False,
+        )
+        captured = await self._open(tunnel)
+
+        context = captured["kwargs"]["ssl"]
+        assert context is not None
+        assert context.check_hostname is False
+        assert context.verify_mode == ssl.CERT_NONE
+
+    async def test_a_plain_ws_target_keeps_the_default_proxy_behaviour(self):
+        tunnel = _tunnel(service_url="ws://127.0.0.1:9000")
+        captured = await self._open(tunnel)
+        assert "proxy" not in captured["kwargs"]
+
+    async def test_env_proxy_is_disabled_when_the_guard_is_active(self):
+        tunnel = _tunnel(service_url="ws://10.0.0.5:9000", trust_env=False)
+        captured = await self._open(tunnel)
+        assert captured["kwargs"]["proxy"] is None
+
+    async def test_url_embedded_credentials_are_kept_in_the_presented_url(self):
+        tunnel = _tunnel(
+            service_url="http://user:pass@web.apps.svc.cluster.local.:8000",
+            upstream_host="web:8000",
+        )
+        captured = await self._open(tunnel, headers={"Origin": "https://x.hle.world"})
+
+        assert captured["url"] == "ws://user:pass@web:8000/ws"
+        # Origin is rewritten to the local service and never carries userinfo.
+        assert captured["kwargs"]["additional_headers"]["Origin"] == "http://web:8000"
+
+    async def test_ws_url_embedded_credentials_are_sent_as_basic_auth(self):
+        import websockets
+
+        seen: dict[str, str | None] = {}
+
+        async def handler(ws):
+            seen["auth"] = ws.request.headers.get("Authorization")
+            await ws.close()
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        tunnel = _tunnel(
+            service_url=f"http://user:pass@localhost.:{port}",
+            upstream_host=f"localhost:{port}",
+        )
+        tunnel._tunnel_id = "t-auth"
+        mock_relay_ws = AsyncMock()
+        mock_relay_ws.send = AsyncMock()
+
+        open_payload = WsStreamOpen(stream_id="s-auth", path="/ws", headers={})
+        msg = ProtocolMessage(type=MessageType.WS_OPEN, payload=open_payload.model_dump())
+        try:
+            await tunnel._handle_ws_open(mock_relay_ws, msg)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        expected = "Basic " + base64.b64encode(b"user:pass").decode()
+        assert seen["auth"] == expected
+
+    async def test_ws_url_with_empty_username_still_sends_basic_auth(self):
+        import websockets
+
+        seen: dict[str, str | None] = {}
+
+        async def handler(ws):
+            seen["auth"] = ws.request.headers.get("Authorization")
+            await ws.close()
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        tunnel = _tunnel(
+            service_url=f"http://:pass@localhost.:{port}",
+            upstream_host=f"localhost:{port}",
+        )
+        tunnel._tunnel_id = "t-auth-empty"
+        mock_relay_ws = AsyncMock()
+        mock_relay_ws.send = AsyncMock()
+
+        open_payload = WsStreamOpen(stream_id="s-auth-empty", path="/ws", headers={})
+        msg = ProtocolMessage(type=MessageType.WS_OPEN, payload=open_payload.model_dump())
+        try:
+            await tunnel._handle_ws_open(mock_relay_ws, msg)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        # An empty username is still userinfo: the password must reach the
+        # upstream as Basic auth, exactly as it does without canonicalisation.
+        expected = "Basic " + base64.b64encode(b":pass").decode()
+        assert seen["auth"] == expected
+
+
+class TestTlsVerificationForCanonicalNames:
+    """A local TLS server proves the SNI override actually verifies."""
+
+    async def test_https_canonical_name_verifies_against_the_original_host(
+        self, tmp_path, monkeypatch
+    ):
+        cert, key = _self_signed_cert(tmp_path)
+        monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+
+        async def handler(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(str(cert), str(key))
+        server = await asyncio.start_server(handler, "127.0.0.1", 0, ssl=server_ctx)
+        port = server.sockets[0].getsockname()[1]
+
+        proxy = _proxy(
+            f"https://localhost.:{port}",
+            upstream_host=f"localhost:{port}",
+            verify_ssl=True,
+        )
+        await proxy.start()
+        try:
+            async with server:
+                status, _, body = await proxy.forward_http(method="GET", path="/", headers={})
+        finally:
+            await proxy.stop()
+
+        assert status == 200, body
+
+    async def test_wss_canonical_name_verifies_against_the_original_host(
+        self, tmp_path, monkeypatch
+    ):
+        import websockets
+
+        cert, key = _self_signed_cert(tmp_path)
+        monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+
+        async def ws_handler(ws):
+            await ws.send("ok")
+            await ws.close()
+
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(str(cert), str(key))
+        ws_server = await websockets.serve(ws_handler, "127.0.0.1", 0, ssl=server_ctx)
+        port = ws_server.sockets[0].getsockname()[1]
+
+        tunnel = _tunnel(
+            service_url=f"https://localhost.:{port}",
+            upstream_host=f"localhost:{port}",
+            verify_ssl=True,
+        )
+        tunnel._tunnel_id = "t-tls"
+        mock_relay_ws = AsyncMock()
+        sent: list[str] = []
+        mock_relay_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        open_payload = WsStreamOpen(stream_id="s-tls", path="/ws", headers={})
+        msg = ProtocolMessage(type=MessageType.WS_OPEN, payload=open_payload.model_dump())
+        try:
+            await tunnel._handle_ws_open(mock_relay_ws, msg)
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
+
+        types = [ProtocolMessage.model_validate_json(raw).type for raw in sent]
+        # A rejected connect sends WS_CLOSE (1011) and never an accept; a
+        # verified one accepts and then closes normally at EOF.
+        assert MessageType.WS_ACCEPT in types
+
+
+class TestUpstreamSslEnv:
+    """A private CA named by SSL_CERT_FILE is trusted even with trust_env=False.
+
+    httpx with ``trust_env=False`` (which a cluster agent sets) verifies against
+    certifi and ignores ``SSL_CERT_FILE``/``SSL_CERT_DIR``; the client builds
+    the context itself so the variables are honoured either way.
+    """
+
+    async def test_trust_env_off_still_honours_ssl_cert_file(self, tmp_path, monkeypatch):
+        cert, key = _self_signed_cert(tmp_path)
+        monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+
+        async def handler(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(str(cert), str(key))
+        server = await asyncio.start_server(handler, "127.0.0.1", 0, ssl=server_ctx)
+        port = server.sockets[0].getsockname()[1]
+
+        proxy = _proxy(
+            f"https://localhost.:{port}",
+            upstream_host=f"localhost:{port}",
+            verify_ssl=True,
+            trust_env=False,
+        )
+        await proxy.start()
+        try:
+            async with server:
+                status, _, body = await proxy.forward_http(method="GET", path="/", headers={})
+        finally:
+            await proxy.stop()
+
+        assert status == 200, body
 
 
 class TestTunnelHandleWsFrame:
