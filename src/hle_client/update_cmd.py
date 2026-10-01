@@ -8,6 +8,7 @@ the matching upgrade. Keeps users from having to remember the install method
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -32,6 +33,21 @@ PIP = "pip"
 BREW = "brew"
 # PEP 668: the interpreter's site-packages belong to the OS package manager.
 EXTERNALLY_MANAGED = "externally-managed"
+# Container/platform-managed installs: the image or chart owns the version, so
+# there is nothing for the CLI to upgrade itself.
+DOCKER = "docker"
+HA_ADDON = "ha-addon"
+KUBERNETES = "kubernetes"
+# An editable install or a source checkout: upgrading in place would fight git.
+EDITABLE = "editable"
+
+# Methods that name themselves through HLE_INSTALL_METHOD. Installers and
+# images set it when the install location alone is ambiguous.
+_OVERRIDABLE = {PIPX, UV, VENV, PIP, BREW, DOCKER, HA_ADDON, KUBERNETES}
+
+
+def _env_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes"}
 
 
 def is_externally_managed(stdlib: str | None = None) -> bool:
@@ -45,21 +61,84 @@ def is_externally_managed(stdlib: str | None = None) -> bool:
     return (Path(stdlib) / "EXTERNALLY-MANAGED").is_file()
 
 
+def is_editable_install(prefix: str) -> bool:
+    """True when ``prefix`` holds an editable (PEP 610) install of the client.
+
+    ``pip install -e`` / ``uv pip install -e`` leave a ``direct_url.json`` next
+    to the dist-info recording ``dir_info.editable: true``. Upgrading such an
+    install replaces the checkout's own files, so the CLI refuses and points at
+    git instead.
+    """
+    root = Path(prefix)
+    patterns = (
+        "lib/python*/site-packages",
+        "lib64/python*/site-packages",
+        "Lib/site-packages",
+    )
+    for site in (d for pat in patterns for d in root.glob(pat)):
+        for info in site.glob(f"{_PACKAGE.replace('-', '_')}-*.dist-info"):
+            try:
+                data = json.loads((info / "direct_url.json").read_text())
+            except (OSError, ValueError):
+                continue
+            if data.get("dir_info", {}).get("editable"):
+                return True
+    return False
+
+
 def detect_install_method(
     prefix: str,
     executable: str,
     *,
     base_prefix: str | None = None,
     stdlib: str | None = None,
+    env: dict[str, str] | None = None,
+    dockerenv: bool = False,
 ) -> str:
     """Classify the environment the running client lives in.
 
     ``prefix`` is ``sys.prefix`` (the venv/environment root); ``executable``
     is ``sys.executable``. ``base_prefix`` and ``stdlib`` default to the
     running interpreter's and exist so tests can describe another one.
+
+    ``env`` and ``dockerenv`` describe the container/platform the client runs
+    in. They are passed explicitly (rather than read here) so the pure path
+    classification stays deterministic for callers and tests that do not care
+    about container detection; ``hle update`` passes the real ones.
     """
     if base_prefix is None:
         base_prefix = sys.base_prefix
+    env = env or {}
+
+    # An explicit marker wins over any inference. Installers set it when the
+    # path is ambiguous (the current images set no marker of their own).
+    override = env.get("HLE_INSTALL_METHOD", "").strip().lower()
+    if override in _OVERRIDABLE:
+        return override
+
+    # The HA add-on container always carries the Supervisor's token.
+    if env.get("SUPERVISOR_TOKEN") or env.get("HASSIO"):
+        return HA_ADDON
+
+    if is_editable_install(prefix):
+        return EDITABLE
+
+    method = _path_method(prefix, executable, base_prefix, stdlib)
+
+    # Generic container markers (/.dockerenv, KUBERNETES_SERVICE_HOST) are only
+    # trusted when the client sits in a bare system pip install, which is how
+    # the hle-docker image ships it. A dev container or pod running a
+    # pipx/uv/venv install keeps its own upgrade path.
+    if method in (PIP, EXTERNALLY_MANAGED):
+        if env.get("KUBERNETES_SERVICE_HOST"):
+            return KUBERNETES
+        if dockerenv or _env_truthy(env.get("HLE_IN_DOCKER")):
+            return DOCKER
+    return method
+
+
+def _path_method(prefix: str, executable: str, base_prefix: str, stdlib: str | None) -> str:
+    """Classify by where the interpreter lives, ignoring container markers."""
     p = prefix.replace("\\", "/")
     if "/pipx/venvs/" in p or "/pipx/venvs" in p:
         return PIPX
@@ -137,7 +216,12 @@ def _installed_version(executable: str) -> str | None:
 @click.pass_context
 def update(ctx: click.Context, check: bool, target_version: str | None, yes: bool) -> None:
     """Update the HLE client to the latest version (any install method)."""
-    method = detect_install_method(sys.prefix, sys.executable)
+    method = detect_install_method(
+        sys.prefix,
+        sys.executable,
+        env=dict(os.environ),
+        dockerenv=Path("/.dockerenv").exists(),
+    )
     console.print(f"Installed: [bold]{__version__}[/bold]  (install method: {method})")
 
     latest = pypi_latest_version()
@@ -172,6 +256,33 @@ def update(ctx: click.Context, check: bool, target_version: str | None, yes: boo
                 f"  pipx upgrade {_PACKAGE}\n"
                 f"  uv tool upgrade {_PACKAGE}"
             ),
+        )
+
+    if method == DOCKER:
+        raise HleError(
+            "This client runs inside the hle-docker image; the image owns its version.",
+            hint=(
+                "Pull the new image and recreate the container:\n"
+                "  docker compose pull && docker compose up -d"
+            ),
+        )
+
+    if method == HA_ADDON:
+        raise HleError(
+            "This client runs inside the Home Assistant add-on; the add-on owns its version.",
+            hint="Update the add-on from Settings → Add-ons.",
+        )
+
+    if method == KUBERNETES:
+        raise HleError(
+            "This client runs in Kubernetes; the hle-operator chart owns its version.",
+            hint="Upgrade the hle-operator chart:\n  helm upgrade",
+        )
+
+    if method == EDITABLE:
+        raise HleError(
+            "This is a development install (editable or a source checkout).",
+            hint="Update it with:\n  git pull",
         )
 
     target_desc = target_version or latest or "latest"
