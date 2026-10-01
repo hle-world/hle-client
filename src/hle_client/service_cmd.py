@@ -1896,26 +1896,37 @@ def logs(
     label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
 
-    if plat == "linux":
-        unit = unit_name(label, name)
-        cmd = ["journalctl", "-u", unit, "-n", str(lines), "--no-pager"]
-        if user_mode:
-            cmd.insert(1, "--user")
-        if follow:
-            cmd.append("-f")
+    from hle_client.ops import daemon as ops_daemon
+
+    unit = ops_daemon.service_name(label, name, plat=plat)
+
+    if not follow:
+        # One reader for both this command and the TUI, so the two cannot
+        # disagree about where a service logs.
+        tail = asyncio.run(ops_daemon.log_tail(unit, lines=lines, user_mode=user_mode))
+        if tail:
+            console.print(tail, markup=False)
+        return
+
+    path = ops_daemon.log_path(unit, user_mode=user_mode)
+    if path is None:
+        cmd = [
+            "journalctl",
+            *(["--user"] if user_mode else []),
+            "-u",
+            unit,
+            "-n",
+            str(lines),
+            "--no-pager",
+            "-f",
+        ]
     else:
-        # Both write a plain file, at the path the installer put in the plist
-        # or the rc script — read it from there rather than guessing.
-        if plat == "darwin":
-            path = Path(_launchd_log_dir(user_mode)) / f"{label}.log"
-        else:
-            path = Path("/var/log") / f"{rc_service_name(label, name)}.log"
         if not path.exists():
             raise HleError(
                 f"No log file at {path}",
                 hint="The service may never have started. Try: hle daemon status",
             )
-        cmd = ["tail", "-n", str(lines), *(["-f"] if follow else []), str(path)]
+        cmd = ["tail", "-n", str(lines), "-f", str(path)]
 
     try:
         subprocess.run(cmd, check=False)  # noqa: S603 — argv built here, no shell

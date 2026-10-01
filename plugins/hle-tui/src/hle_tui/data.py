@@ -7,18 +7,15 @@ once carried its own copy of the relay fetch and of the delete rule). This
 module turns ``ops`` results into rows, holds the latest poll in a
 :class:`StateStore`, and names the ``hle …`` command each edit stands for.
 
-The one exception is the daemon log tail: ``ops.daemon`` has no log reader
-yet, so :func:`daemon_log_tail` finds the log the same way ``hle daemon logs``
-does, read-only, through ``service_cmd``'s public helpers.
+The dashboard's own copy of the daemon log reader is gone: ``ops.daemon``
+owns it now, so the TUI tails the same log ``hle daemon logs`` does.
 """
 
 from __future__ import annotations
 
 import asyncio
-import plistlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
 from hle_client.config import load_api_key
@@ -41,6 +38,7 @@ from hle_client.ops.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     from hle_client.api import ApiClient
 
@@ -485,70 +483,15 @@ CLI_CREATE = "hle tunnel create <label> <service-url>"
 
 
 def daemon_log_path(daemon: Daemon) -> Path | None:
-    """The file a launchd or rc.d service writes to; ``None`` under systemd.
-
-    For launchd the path is read out of the plist the installer wrote, not
-    rebuilt, so a service installed by an older client is still found.
-    """
-    from hle_client import service_cmd
-
-    plat = service_cmd.current_platform()
-    if plat == "linux":
-        return None
-    if plat == "darwin":
-        plist = service_cmd.service_file(daemon.name, daemon.user_mode)
-        if plist is not None:
-            try:
-                with plist.open("rb") as fh:
-                    out = plistlib.load(fh).get("StandardOutPath")
-            except (OSError, plistlib.InvalidFileException, ValueError):
-                out = None
-            if out:
-                return Path(str(out))
-        log_dir = Path.home() / "Library" / "Logs" / "hle" if daemon.user_mode else Path("/var/log")
-        return log_dir / f"{daemon.label or daemon.name}.log"
-    return Path("/var/log") / f"{daemon.name}.log"
-
-
-def _tail_file(path: Path, lines: int) -> str:
-    # Read the end, not the whole file: a service that has logged for months
-    # would otherwise be read in full every two seconds.
-    with path.open("rb") as fh:
-        fh.seek(0, 2)
-        size = fh.tell()
-        fh.seek(max(0, size - 256 * 1024))
-        text = fh.read().decode(errors="replace")
-    return "\n".join(text.splitlines()[-lines:])
+    """The file a launchd or rc.d service writes to; ``None`` under systemd."""
+    return ops_daemon.log_path(daemon.name, user_mode=daemon.user_mode)
 
 
 async def daemon_log_tail(daemon: Daemon, lines: int = LOG_LINES) -> str:
     """The last ``lines`` of a daemon's log. Read-only; raises :class:`HleError`."""
-    path = daemon_log_path(daemon)
-    if path is None:
-        argv = ["journalctl"]
-        if daemon.user_mode:
-            argv.append("--user")
-        argv += ["-u", daemon.name, "-n", str(lines), "--no-pager"]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            raise HleError("journalctl not found.") from None
-        out, err = await proc.communicate()
-        if proc.returncode != 0:
-            raise HleError(
-                err.decode(errors="replace").strip() or f"journalctl exited {proc.returncode}."
-            )
-        return "\n".join(out.decode(errors="replace").splitlines()[-lines:])
-    if not path.exists():
-        raise HleError(
-            f"No log file at {path}",
-            hint=f"The service may never have started. Try: {cli_daemon('status', daemon)}",
-        )
-    try:
-        return await asyncio.to_thread(_tail_file, path, lines)
-    except OSError as exc:
-        raise HleError(f"Could not read {path}: {exc.strerror or exc}") from None
+    return await ops_daemon.log_tail(
+        daemon.name,
+        lines,
+        user_mode=daemon.user_mode,
+        hint=f"The service may never have started. Try: {cli_daemon('status', daemon)}",
+    )

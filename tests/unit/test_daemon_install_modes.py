@@ -11,7 +11,7 @@ about this tool, so it keeps working unchanged.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import click
 import pytest
@@ -114,27 +114,30 @@ class TestLogs:
         with (
             patch("hle_client.service_cmd._require_supported", return_value="linux"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=False),
-            patch("hle_client.service_cmd.subprocess.run") as run,
+            patch(
+                "hle_client.ops.daemon.log_tail", new_callable=AsyncMock, return_value=""
+            ) as tail,
         ):
             result = CliRunner().invoke(main, ["daemon", "logs", "--label", "ha", "-n", "10"])
         assert result.exit_code == 0, result.output
-        cmd = run.call_args.args[0]
-        assert cmd[:2] == ["journalctl", "-u"]
-        assert "hle-ha.service" in cmd
-        assert "10" in cmd
+        assert tail.call_args.args == ("hle-ha.service",)
+        assert tail.call_args.kwargs == {"lines": 10, "user_mode": False}
 
     def test_the_user_scope_asks_the_user_journal(self):
         with (
             patch("hle_client.service_cmd._require_supported", return_value="linux"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=True),
-            patch("hle_client.service_cmd.subprocess.run") as run,
+            patch(
+                "hle_client.ops.daemon.log_tail", new_callable=AsyncMock, return_value=""
+            ) as tail,
         ):
             CliRunner().invoke(main, ["daemon", "logs", "--label", "ha"])
-        assert "--user" in run.call_args.args[0]
+        assert tail.call_args.kwargs["user_mode"] is True
 
     def test_follow_is_passed_on(self):
         with (
             patch("hle_client.service_cmd._require_supported", return_value="linux"),
+            patch("hle_client.service_cmd.current_platform", return_value="linux"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=False),
             patch("hle_client.service_cmd.subprocess.run") as run,
         ):
@@ -146,6 +149,7 @@ class TestLogs:
         with (
             patch("hle_client.service_cmd._require_supported", return_value="darwin"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=True),
+            patch("hle_client.service_cmd.service_file", return_value=None),
             patch("hle_client.service_cmd._launchd_log_dir", return_value=str(tmp_path)),
         ):
             result = CliRunner().invoke(main, ["daemon", "logs", "--label", "ha"])

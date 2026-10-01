@@ -252,11 +252,14 @@ class TestDaemonTargetsArePositional:
         with (
             patch("hle_client.service_cmd._require_supported", return_value="linux"),
             patch("hle_client.service_cmd.resolve_user_mode", return_value=False),
-            patch("hle_client.service_cmd.subprocess.run") as run,
+            patch(
+                "hle_client.ops.daemon.log_tail", new_callable=AsyncMock, return_value=""
+            ) as tail,
         ):
             result = CliRunner().invoke(main, ["daemon", "logs", "ha", "-n", "5"])
         assert result.exit_code == 0, result.output
-        assert "hle-ha.service" in run.call_args.args[0]
+        assert tail.call_args.args == ("hle-ha.service",)
+        assert tail.call_args.kwargs == {"lines": 5, "user_mode": False}
 
     @pytest.mark.parametrize(
         "argv",
