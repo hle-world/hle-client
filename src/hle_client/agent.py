@@ -25,7 +25,7 @@ from typing import Any
 import websockets
 import websockets.exceptions
 
-from hle_client import __version__, agent_update, config, k8s_targets
+from hle_client import __version__, agent_state, agent_update, config, k8s_targets
 from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.identity import hostname, instance_id
@@ -279,6 +279,9 @@ class AgentClient:
         self._target_guard = target_guard
         if self._target_guard is None and k8s_targets.in_kubernetes():
             self._target_guard = k8s_targets.KubernetesTargetGuard.from_env()
+        # True while the on-disk readiness state says this process is connected,
+        # so run() writes only on transitions and never per heartbeat.
+        self._state_connected = False
 
     # -- public API ----------------------------------------------------------
 
@@ -291,6 +294,8 @@ class AgentClient:
         """Run the control connection with reconnection until stopped."""
         self._running = True
         self._arm_watchdog()
+        with contextlib.suppress(OSError):
+            agent_state.clear_if_stale(self._home, own_pid=os.getpid())
         delay = self._reconnect_delay
         # Set only when the loop ends normally. A cancel that lands after
         # HANDOVER (e.g. during _stop_all) skips the supervise call below, so
@@ -452,6 +457,28 @@ class AgentClient:
         self._running = False
         await self._stop_all()
 
+    def _mark_connected(self) -> None:
+        """Record readiness on the first welcome of a session, once."""
+        if self._state_connected:
+            return
+        self._state_connected = True
+        try:
+            agent_state.write_connected(self._home, os.getpid())
+        except OSError as exc:  # noqa: BLE001 — readiness is not load-bearing
+            logger.debug("Could not record connection state: %s", exc)
+
+    def _mark_disconnected(self) -> None:
+        """Record the end of the session, once, so a probe stops passing."""
+        if not self._state_connected:
+            return
+        self._state_connected = False
+        try:
+            # Only our own marker: during a handover the successor has already
+            # written its own, which the incumbent closing must not remove.
+            agent_state.clear(self._home, only_pid=os.getpid())
+        except OSError as exc:  # noqa: BLE001
+            logger.debug("Could not clear connection state: %s", exc)
+
     # -- control connection --------------------------------------------------
 
     async def _connect_once(self) -> None:
@@ -514,6 +541,7 @@ class AgentClient:
             # Marks the session as having worked, so the reconnect backoff in
             # run() starts over rather than compounding across the process life.
             self._registered = True
+            self._mark_connected()
             logger.info(
                 "Agent registered: public_id=%s endpoints=%d",
                 welcome.agent_public_id,
@@ -548,6 +576,10 @@ class AgentClient:
                     await self._handle_message(raw, ws)
             finally:
                 self._ws = None
+                # The control connection is gone, whether it dropped or the
+                # process is shutting down. Mark readiness down before the
+                # endpoint cleanup can take any time.
+                self._mark_disconnected()
                 status_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await status_task

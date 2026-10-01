@@ -205,10 +205,16 @@ a restart.
 hle auth login --agent-token        # Paste the token at the prompt
 hle agent run                       # Run in the foreground
 hle agent status                    # Is a token configured here?
+hle agent status --ready            # Exit 0 only while this agent is connected
 hle agent list                      # Agents on your account, and whether they are online
 hle agent services                  # Services this machine can see and could expose
 hle agent logout                    # Remove the saved token
 ```
+
+`hle agent status --ready` is meant for supervisors: it exits 0 only while the
+running agent has a live control connection (the recorded process must still be
+alive), and exits 1 with a one-line reason otherwise. A Kubernetes
+`readinessProbe` uses it.
 
 For an agent that survives reboots, install it as a service instead:
 `hle daemon install agent`.
@@ -397,6 +403,11 @@ These settings are read from the environment, with safe defaults:
   Falls back to the service-account namespace file; if neither is available a
   bare name is refused.
 - `HLE_FIREPUNCHER_ENABLED` — `true` to allow firepuncher on a cluster agent.
+- `HLE_DISCOVERY_EXCLUDE_NAMESPACES` — comma-separated namespaces to hide from
+  discovery and refuse as endpoint targets, on top of the built-in skips
+  (`kube-system`, `kube-public`, `kube-node-lease`). The check runs on the
+  canonical Service name, so `<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc` and the
+  full cluster-domain form are all refused alike.
 
 **This guard is defence in depth, not the boundary.** It validates at connect
 time, so:

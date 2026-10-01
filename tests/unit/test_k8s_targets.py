@@ -1172,3 +1172,93 @@ class TestApiIpRefresh:
             decision = await g.check(url)
             assert not decision.allowed, url
             assert "kubernetes API" in decision.reason
+
+
+class TestNamespaceExclusions:
+    """A namespace excluded from discovery is also refused as an endpoint."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://ha.media.svc.cluster.local:8123",
+            "http://ha.media.svc.cluster.local.:8123",
+            "http://HA.Media.SVC.Cluster.Local:8123",
+            "http://ha.media.svc:8123",
+            "http://ha.media.svc.:8123",
+            "http://HA.MEDIA.SVC:8123",
+            "http://ha.media:8123",
+            "http://ha.media.:8123",
+            "http://HA.MEDIA:8123",
+        ],
+    )
+    async def test_every_spelling_of_a_service_in_an_excluded_namespace_is_refused(self, url):
+        calls: list[str] = []
+        decision = await check(url, excluded_namespaces=frozenset({"media"}), calls=calls)
+        assert not decision.allowed, url
+        assert "namespace 'media' is excluded" in decision.reason
+        # Refused before the resolver is asked about it.
+        assert calls == []
+
+    @pytest.mark.parametrize("name", ["ha", "HA", "ha."])
+    async def test_a_bare_name_in_an_excluded_pod_namespace_is_refused(self, name):
+        decision = await check(
+            f"http://{name}:8123",
+            pod_namespace="media",
+            excluded_namespaces=frozenset({"media"}),
+        )
+        assert not decision.allowed
+        assert "namespace 'media' is excluded" in decision.reason
+
+    async def test_a_bare_name_in_another_pod_namespace_is_allowed(self):
+        decision = await check(
+            "http://ha",
+            pod_namespace="default",
+            excluded_namespaces=frozenset({"media"}),
+        )
+        assert decision.allowed, decision.reason
+
+    async def test_the_exclusion_is_case_insensitive_on_the_configured_set(self):
+        decision = await check("http://ha.media.svc:8123", excluded_namespaces=frozenset({"Media"}))
+        assert not decision.allowed
+
+    async def test_a_custom_cluster_domain_spelling_is_refused(self):
+        decision = await check(
+            "http://ha.media.svc.corp.example:8123",
+            cluster_domain="corp.example",
+            excluded_namespaces=frozenset({"media"}),
+        )
+        assert not decision.allowed
+
+    async def test_a_service_in_another_namespace_is_still_allowed(self):
+        decision = await check(
+            "http://ha.default.svc.cluster.local:8123",
+            excluded_namespaces=frozenset({"media"}),
+        )
+        assert decision.allowed, decision.reason
+
+    async def test_a_namespace_name_in_the_service_label_does_not_trip_the_check(self):
+        decision = await check(
+            "http://media.default.svc:8123", excluded_namespaces=frozenset({"media"})
+        )
+        assert decision.allowed, decision.reason
+
+    async def test_check_host_refuses_an_excluded_namespace_too(self):
+        g = guard(excluded_namespaces=frozenset({"media"}))
+        decision = await g.check_host("ha.media.svc", 22)
+        assert not decision.allowed
+
+    def test_from_env_reads_the_exclusions(self):
+        g = k8s_targets.KubernetesTargetGuard.from_env(
+            {"HLE_DISCOVERY_EXCLUDE_NAMESPACES": "media,apps"}
+        )
+        assert {"media", "apps"} <= g._excluded_namespaces
+        # The built-in infrastructure skips come along too.
+        assert "kube-system" in g._excluded_namespaces
+
+    async def test_a_headless_pod_name_in_an_excluded_namespace_is_refused(self):
+        decision = await check(
+            "http://pod-0.db.media.svc.cluster.local:5432",
+            excluded_namespaces=frozenset({"media"}),
+        )
+        assert not decision.allowed
+        assert "namespace 'media' is excluded" in decision.reason

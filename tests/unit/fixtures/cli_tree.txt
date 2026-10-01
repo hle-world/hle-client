@@ -31,6 +31,7 @@ hle agent services  [command]  hidden=False  help='List services this machine ca
     option   --json                       name=as_json type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent status  [command]  hidden=False  help='Show whether an agent token is configured.'
+    option   --ready                      name=ready type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle auth  [group]  hidden=False  help='Manage API key authentication.'
     option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
