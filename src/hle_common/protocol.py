@@ -11,7 +11,13 @@ from hle_common.wire import WireModel
 # Protocol version — bump on wire-format changes.
 # Major bump (1.0 → 2.0): breaking change, server must support both during deprecation.
 # Minor bump (1.0 → 1.1): new optional fields/message types, old clients unaffected.
-PROTOCOL_VERSION = "1.5"
+#
+# 1.6 adds envelope fragmentation (MessageType.FRAGMENT, capability
+# "fragmentation"): any envelope too big for one WebSocket message travels as a
+# run of FRAGMENT frames and is reassembled before dispatch. Generic, so no
+# message type ever needs its own chunking for size again.
+# See hle_common.fragmentation.
+PROTOCOL_VERSION = "1.6"
 
 
 class MessageType(StrEnum):
@@ -80,6 +86,12 @@ class MessageType(StrEnum):
     # tripping the unknown-message-type disconnect on older servers.
     LOG_CONFIG = "log_config"
     DIAGNOSTIC = "diagnostic"
+
+    # Envelope fragmentation — added in PROTOCOL_VERSION 1.6, both directions,
+    # on the tunnel and agent channels alike. Carries a slice of another
+    # serialized envelope; only sent to a peer that advertised the
+    # "fragmentation" capability. See hle_common.fragmentation.
+    FRAGMENT = "fragment"
 
 
 @dataclass(kw_only=True)
