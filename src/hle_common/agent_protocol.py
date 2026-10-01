@@ -30,6 +30,13 @@ from hle_common.wire import WireModel
 # 1.3 makes EndpointSpec the full TunnelSpec (verify_ssl, forward_host,
 # upstream_basic_auth, apex, options, response_timeout, managed_by). All new
 # fields default to null, so 1.2 peers see only keys they ignore.
+#
+# Stage B (canary handover) is layered on the 1.2 handover fields: a client
+# advertises `handover` in its hello capabilities, and the server arms it by
+# putting a `successor_nonce` on the UpdateRequest. A peer that knows neither
+# keeps doing Stage A, because the extra capability is just a list entry and
+# the nonce defaults to null.
+#
 # 1.4 adds cluster-owned declarations and log reads: `EndpointSpec.target` (a
 # Kubernetes Service ref, null for everything a 1.3 server sends), the
 # `declared_endpoints` / `declared_ack` frames, `logs_request` / `logs_response`,
@@ -82,6 +89,12 @@ _SECRET_REF_RE = re.compile(
 _SOURCE_REF_RE = re.compile(
     r"^(hletunnel|ingress):[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 )
+# Stage B: a hello capability saying this build can take part in a canary
+# handover — spawn a successor for an update, and itself run as one. The
+# server only arms Stage B (by putting `successor_nonce` on the request) for
+# agents that advertise it; without it the update is Stage A (swap and exit,
+# and let the service manager restart) exactly as before.
+HANDOVER_CAPABILITY = "handover"
 
 
 def update_capability(install_method: str | None) -> str | None:
@@ -328,6 +341,12 @@ class UpdateRequest(WireModel):
     # `wait`: hold the swap until the agent's tunnels have no live streams.
     # `force`: swap now and drop whatever is in flight.
     drain_policy: Literal["wait", "force"] = "wait"
+    # Stage B: set when the server will admit a successor for this update. The
+    # incumbent spawns the canary with `--successor-of` + this nonce, the canary
+    # echoes it in its hello, and the server closes the incumbent with close
+    # code HANDOVER once the successor is serving. Absent means Stage A: swap,
+    # exit, and let the service manager relaunch the new version.
+    successor_nonce: str | None = None
 
 
 @dataclass(kw_only=True)

@@ -431,15 +431,15 @@ async def add_rule(api: ApiClient, subdomain: str, spec: str) -> AccessRule:
 def cli_access_add(subdomain: str, spec: str) -> str:
     rule = ops_access.parse_spec(spec.strip())
     provider = "" if rule.provider == "any" else f" --provider {rule.provider}"
-    return f"hle tunnel access add {subdomain} {rule.email}{provider}"
+    return f"hle tunnel access create {subdomain} {rule.email}{provider}"
 
 
 def cli_access_remove(subdomain: str, rule_id: int) -> str:
-    return f"hle tunnel access remove {subdomain} {rule_id}"
+    return f"hle tunnel access delete {subdomain} {rule_id}"
 
 
 def cli_auth_mode(subdomain: str, mode: str) -> str:
-    return f"hle tunnel auth-mode {subdomain} --set {mode}"
+    return f"hle tunnel set {subdomain} --auth {mode}"
 
 
 def cli_pin(subdomain: str, verb: str) -> str:
@@ -451,26 +451,29 @@ def cli_basic_auth(subdomain: str, verb: str) -> str:
 
 
 def cli_share_create(subdomain: str, duration: str, label: str) -> str:
-    extra = f" --label {label!r}" if label else ""
+    # `--name` is the advertised spelling; `--label` was renamed because it
+    # named the link right next to a LABEL argument that names the tunnel.
+    extra = f" --name {label!r}" if label else ""
     return f"hle tunnel share create {subdomain} --duration {duration}{extra}"
 
 
 def cli_share_revoke(subdomain: str, link_id: int) -> str:
-    return f"hle tunnel share revoke {subdomain} {link_id}"
+    return f"hle tunnel share delete {subdomain} {link_id}"
+
+
+# The daemon verbs that accept a scope flag. `restart` and `refresh` work out
+# the scope themselves, so adding --user/--system there would not even parse.
+_DAEMON_SCOPE_VERBS = frozenset({"delete", "logs", "status"})
 
 
 def _daemon_target(daemon: Daemon) -> str:
-    if daemon.kind == "agent":
-        target = "--agent"
-    elif daemon.label:
-        target = f"--label {daemon.label}"
-    else:
-        target = f"--name {daemon.name}"
-    return f"{target} --{daemon.scope}"
+    """The positional NAME a daemon command takes: its label, else its unit name."""
+    return daemon.label or daemon.name
 
 
 def cli_daemon(verb: str, daemon: Daemon) -> str:
-    return f"hle daemon {verb} {_daemon_target(daemon)}"
+    scope = f" --{daemon.scope}" if verb in _DAEMON_SCOPE_VERBS else ""
+    return f"hle daemon {verb} {_daemon_target(daemon)}{scope}"
 
 
 CLI_CREATE = "hle tunnel create <label> <service-url>"
