@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -326,6 +327,7 @@ class TestTunnelConfig:
         assert cfg.websocket_enabled is True
         assert cfg.reconnect_delay == 1.0
         assert cfg.max_reconnect_delay == 60.0
+        assert cfg.reconnect_reset_after == 10.0
 
     def test_custom_values(self):
         cfg = TunnelConfig(
@@ -1148,8 +1150,9 @@ class TestTunnelReconnectBackoff:
     async def _delays(self, tunnel: Tunnel, outcomes: list) -> list[float]:
         """Run connect() over a scripted sequence, returning each sleep it took.
 
-        ``outcomes`` are per-attempt: an exception to raise, or ``"ok"`` for a
-        session that registers before dropping.
+        ``outcomes`` are per-attempt: an exception to raise, ``"ok"`` for a
+        session that registers and stays up past the flap window, or ``"flap"``
+        for one that registers and drops straight away.
         """
         slept: list[float] = []
         attempts = iter(outcomes)
@@ -1162,7 +1165,14 @@ class TestTunnelReconnectBackoff:
                 return
             if outcome == "ok":
                 tunnel._session_registered = True
+                tunnel._session_registered_at = (
+                    time.monotonic() - tunnel.config.reconnect_reset_after - 1
+                )
                 raise ConnectionError("dropped after a working session")
+            if outcome == "flap":
+                tunnel._session_registered = True
+                tunnel._session_registered_at = time.monotonic()
+                raise ConnectionError("dropped immediately after registering")
             raise outcome
 
         async def _sleep(seconds: float) -> None:
@@ -1197,11 +1207,32 @@ class TestTunnelReconnectBackoff:
                 ConnectionError("blip"),
                 ConnectionError("blip"),
                 ConnectionError("blip"),
-                "ok",  # a session that registered — start over
+                "ok",  # a session that stayed up — start over
                 ConnectionError("blip"),
             ],
         )
         assert slept == [1.0, 2.0, 4.0, 1.0, 2.0]
+
+    async def test_a_flap_does_not_reset_the_backoff(self):
+        """A connect/drop cycle must not hammer the relay at one second a time.
+
+        Resetting on any registration meant a tunnel that registered and died
+        instantly retried at ``reconnect_delay`` forever — exactly the case the
+        backoff exists to stretch out. Only a session that outlives the flap
+        window starts over.
+        """
+        tunnel = _tunnel(max_reconnect_delay=600.0)
+        slept = await self._delays(
+            tunnel,
+            [
+                ConnectionError("blip"),
+                ConnectionError("blip"),
+                ConnectionError("blip"),
+                "flap",  # registered, then dropped straight away
+                ConnectionError("blip"),
+            ],
+        )
+        assert slept == [1.0, 2.0, 4.0, 8.0, 16.0]
 
     async def test_a_duplicate_instance_stops_too(self):
         """The other end of a takeover: this client arrived second and lost.
