@@ -17,7 +17,7 @@ import click
     "--api-key",
     default=None,
     envvar="HLE_API_KEY",
-    help="API key. Falls back to ~/.config/hle/config.toml.",
+    help="API key. Falls back to the root --api-key, then ~/.config/hle/config.toml.",
 )
 @click.option(
     "--refresh",
@@ -26,7 +26,8 @@ import click
     metavar="SECONDS",
     help="How often to re-poll the relay. 0 disables polling.",
 )
-def tui(api_key: str | None, refresh: int) -> None:
+@click.pass_context
+def tui(ctx: click.Context, api_key: str | None, refresh: int) -> None:
     """Interactive dashboard for tunnels, agents and daemons.
 
     \b
@@ -45,4 +46,9 @@ def tui(api_key: str | None, refresh: int) -> None:
             "Reinstall it with: pip install --upgrade hle-tui"
         ) from None
 
-    HleApp(api_key=api_key, refresh_seconds=refresh).run()
+    # Resolve through the root context, so `hle --api-key X tui` reaches the
+    # dashboard the same way it reaches every built-in command. The leaf's own
+    # --api-key still wins; this is the shared fallback.
+    from hle_client.context import resolve_api_key
+
+    HleApp(api_key=resolve_api_key(ctx, api_key), refresh_seconds=refresh).run()
