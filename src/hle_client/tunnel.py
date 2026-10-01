@@ -89,6 +89,14 @@ class TunnelConfig:
     verify_ssl: bool = False
     reconnect_delay: float = 1.0
     max_reconnect_delay: float = 60.0
+    reconnect_reset_after: float = 10.0
+    """Seconds a session must stay up before the reconnect backoff starts over.
+
+    A session that registers and then drops within this window is a flap, not
+    a healthy connection, and deliberately leaves the backoff where it was —
+    resetting it on every connect/drop cycle would hammer the relay. A session
+    that outlives the window resets the next retry to ``reconnect_delay``.
+    """
     upstream_basic_auth: tuple[str, str] | None = None
     """Optional (username, password) injected as Authorization: Basic toward the local service."""
     forward_host: bool = False
@@ -453,9 +461,15 @@ class Tunnel:
             )
         )
         self._server_caps: list[str] = []
-        # Whether the current session ever reached TUNNEL_ACK — the reconnect
-        # backoff resets on that, not on how the session ended.
+        # Whether the current session ever reached TUNNEL_ACK — decides which
+        # event a supervisor sees (a live tunnel dropping vs. an attempt
+        # failing), and, via ``_session_registered_at``, whether the reconnect
+        # backoff starts over.
         self._session_registered = False
+        # When (monotonic) the current session reached TUNNEL_ACK. The
+        # reconnect backoff starts over only once a session has stayed up past
+        # ``reconnect_reset_after``, so a connect/drop flap keeps backing off.
+        self._session_registered_at: float | None = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -468,6 +482,7 @@ class Tunnel:
 
         while self._running:
             self._session_registered = False
+            self._session_registered_at = None
             try:
                 await self._proxy.start()
                 await self._connect_once()
@@ -520,13 +535,18 @@ class Tunnel:
             if not self._running:
                 break
 
-            # Reset on any session that got as far as registering, not just a
-            # clean exit. Initialised once outside the loop, the backoff only
-            # ever grew: a tunnel up for a month across six unrelated blips
-            # then waited a full minute to come back from a routine relay
-            # deploy. Kept in step with the agent's control loop, which
-            # already worked this way.
-            if self._session_registered:
+            # Start over only after a session that outlived the flap window.
+            # Initialised once outside the loop, the backoff only ever grew: a
+            # tunnel up for a month across six unrelated blips then waited a
+            # full minute to come back from a routine relay deploy. But a
+            # connect/drop flap resets nothing — resetting on every registration
+            # would keep retrying at a second, which is what backoff is for.
+            if (
+                self._session_registered
+                and self._session_registered_at is not None
+                and time.monotonic() - self._session_registered_at
+                >= self.config.reconnect_reset_after
+            ):
                 delay = self.config.reconnect_delay
 
             logger.info("Reconnecting in %.1fs ...", delay)
@@ -736,10 +756,11 @@ class Tunnel:
             self._public_url = ack_data.public_url
             self._subdomain = ack_data.subdomain or None
             self._server_caps = getattr(ack_data, "server_capabilities", []) or []
-            # This session worked, whatever ends it — so the reconnect backoff
-            # in connect() starts over rather than compounding across the
-            # process's whole life.
+            # This session worked, whatever ends it. The timestamp is what
+            # lets connect() tell a healthy session from a flap: the backoff
+            # only starts over once this session has outlived the flap window.
             self._session_registered = True
+            self._session_registered_at = time.monotonic()
             logger.info(
                 "Tunnel registered: id=%s  url=%s",
                 self._tunnel_id,
