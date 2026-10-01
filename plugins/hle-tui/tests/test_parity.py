@@ -571,7 +571,7 @@ class TestDaemonLogSource:
     async def test_a_file_is_tailed_to_the_cap(self, tmp_path):
         log = tmp_path / "hle_ha.log"
         log.write_text("\n".join(f"line {i}" for i in range(500)))
-        with patch.object(data, "daemon_log_path", return_value=log):
+        with patch("hle_client.ops.daemon.log_path", return_value=log):
             text = await data.daemon_log_tail(DAEMON)
         lines = text.splitlines()
         assert len(lines) == data.LOG_LINES
@@ -579,7 +579,7 @@ class TestDaemonLogSource:
 
     async def test_a_missing_file_is_an_error_with_a_hint(self, tmp_path):
         with (
-            patch.object(data, "daemon_log_path", return_value=tmp_path / "nope.log"),
+            patch("hle_client.ops.daemon.log_path", return_value=tmp_path / "nope.log"),
             pytest.raises(HleError) as err,
         ):
             await data.daemon_log_tail(DAEMON)
