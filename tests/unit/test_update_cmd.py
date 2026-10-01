@@ -26,6 +26,16 @@ from hle_client.update_cmd import (
 )
 
 
+@pytest.fixture
+def not_editable():
+    """The suite itself runs from an editable install (CI does ``pip install -e``).
+
+    Tests that classify a made-up system prefix must not see the real checkout.
+    """
+    with patch("hle_client.update_cmd.is_editable_install", return_value=False):
+        yield
+
+
 class TestDetectInstallMethod:
     def test_pipx(self):
         prefix = "/root/.local/share/pipx/venvs/hle-client"
@@ -82,15 +92,28 @@ class TestDetectInstallMethod:
         assert is_externally_managed(str(stdlib)) is True
         assert is_externally_managed(str(tmp_path)) is False
 
-    def test_docker_from_dockerenv(self):
+    def test_docker_from_dockerenv(self, not_editable, tmp_path):
         """The hle-docker image pip-installs into the system Python."""
         prefix = "/usr/local"
-        method = detect_install_method(prefix, f"{prefix}/bin/python", env={}, dockerenv=True)
+        method = detect_install_method(
+            prefix,
+            f"{prefix}/bin/python",
+            base_prefix=prefix,
+            stdlib=str(tmp_path / "lib"),
+            env={},
+            dockerenv=True,
+        )
         assert method == DOCKER
 
-    def test_docker_from_hle_in_docker(self):
+    def test_docker_from_hle_in_docker(self, not_editable, tmp_path):
         prefix = "/usr/local"
-        method = detect_install_method(prefix, f"{prefix}/bin/python", env={"HLE_IN_DOCKER": "1"})
+        method = detect_install_method(
+            prefix,
+            f"{prefix}/bin/python",
+            base_prefix=prefix,
+            stdlib=str(tmp_path / "lib"),
+            env={"HLE_IN_DOCKER": "1"},
+        )
         assert method == DOCKER
 
     def test_dev_container_with_pipx_is_not_docker(self):
@@ -116,21 +139,30 @@ class TestDetectInstallMethod:
         method = detect_install_method(prefix, f"{prefix}/bin/python3", env={"HASSIO": "1"})
         assert method == HA_ADDON
 
-    def test_kubernetes_from_service_host(self):
+    def test_kubernetes_from_service_host(self, not_editable, tmp_path):
         prefix = "/usr"
         method = detect_install_method(
-            prefix, f"{prefix}/bin/python3", env={"KUBERNETES_SERVICE_HOST": "10.0.0.1"}
+            prefix,
+            f"{prefix}/bin/python3",
+            base_prefix=prefix,
+            stdlib=str(tmp_path / "lib"),
+            env={"KUBERNETES_SERVICE_HOST": "10.0.0.1"},
         )
         assert method == KUBERNETES
 
-    def test_a_platform_beats_docker(self):
+    def test_a_platform_beats_docker(self, not_editable, tmp_path):
         """An HA add-on and a k8s pod are containers too; name the outer one."""
         env = {"SUPERVISOR_TOKEN": "x", "KUBERNETES_SERVICE_HOST": "10.0.0.1"}
-        method = detect_install_method("/usr", "/usr/bin/python3", env=env, dockerenv=True)
+        probe = {"base_prefix": "/usr", "stdlib": str(tmp_path / "lib")}
+        method = detect_install_method("/usr", "/usr/bin/python3", env=env, dockerenv=True, **probe)
         assert method == HA_ADDON
         assert (
             detect_install_method(
-                "/usr", "/usr/bin/python3", env={"KUBERNETES_SERVICE_HOST": "x"}, dockerenv=True
+                "/usr",
+                "/usr/bin/python3",
+                env={"KUBERNETES_SERVICE_HOST": "x"},
+                dockerenv=True,
+                **probe,
             )
             == KUBERNETES
         )
