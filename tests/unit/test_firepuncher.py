@@ -759,3 +759,221 @@ class TestLocalClient:
 
             writer.close()
             await client.close_all()
+
+
+class _FakeWriter:
+    def write(self, _data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+class _FakeReader:
+    async def read(self, _n: int) -> bytes:
+        return b""
+
+
+class _BlockingReader:
+    """Never returns, so a stream stays open for the duration of a test."""
+
+    async def read(self, _n: int) -> bytes:
+        await asyncio.Event().wait()
+        return b""  # pragma: no cover
+
+
+class TestKubernetesFirepuncher:
+    """In a cluster the relay's rules are not enough: the guard runs too."""
+
+    @staticmethod
+    def _guard(**kw):
+        from hle_client.k8s_targets import KubernetesTargetGuard
+
+        kw.setdefault("pod_namespace", "default")
+        return KubernetesTargetGuard(**kw)
+
+    @pytest.mark.parametrize(
+        "host",
+        ["169.254.169.254", "10.96.0.1", "127.0.0.1"],
+    )
+    async def test_open_to_a_refused_target_is_refused(self, host):
+        from hle_common.fp_protocol import default_rules
+
+        out = Collector()
+        agent = FpAgentSide(
+            send=out,
+            rules=default_rules(),
+            enabled=True,
+            target_guard=self._guard(allow_raw_urls=True, kube_service_host="10.96.0.1"),
+        )
+
+        await agent.handle(FpOpen(stream_id="s1", target_host=host, target_port=80).model_dump())
+
+        err = out.first(FpMsgType.ERROR)
+        assert err is not None
+        assert err["code"] == FpErrorCode.NOT_ALLOWED
+        assert not out.of_type(FpMsgType.READY)
+
+    async def test_disabled_firepuncher_refuses_every_open(self):
+        out = Collector()
+        agent = FpAgentSide(send=out, rules=default_rules(), enabled=False)
+
+        await agent.handle(
+            FpOpen(stream_id="s1", target_host="localhost", target_port=22).model_dump()
+        )
+
+        err = out.first(FpMsgType.ERROR)
+        assert err is not None
+        assert err["code"] == FpErrorCode.NOT_ALLOWED
+        assert "disabled" in err["message"]
+        assert not out.of_type(FpMsgType.READY)
+
+    async def test_the_checked_ip_is_dialled_not_the_name(self, monkeypatch):
+        """Resolving once and dialling that IP closes the rebinding gap."""
+        from hle_client import firepuncher
+
+        dialled: list[tuple[str, int]] = []
+
+        async def fake_open(host, port):
+            dialled.append((host, port))
+            return _FakeReader(), _FakeWriter()
+
+        monkeypatch.setattr(firepuncher.asyncio, "open_connection", fake_open)
+
+        out = Collector()
+        agent = FpAgentSide(
+            send=out,
+            rules=[ForwardRule(host="ha")],
+            enabled=True,
+            target_guard=self._guard(
+                resolver=lambda host: _resolve_to(host, "10.0.0.5"),
+            ),
+        )
+
+        await agent.handle(FpOpen(stream_id="s1", target_host="ha", target_port=8080).model_dump())
+
+        assert dialled == [("10.0.0.5", 8080)]
+        assert out.first(FpMsgType.READY) is not None
+        await agent.close_all()
+
+
+async def _resolve_to(host: str, address: str) -> list[str]:
+    if host.rstrip(".").startswith("kubernetes.default.svc."):
+        return ["10.96.0.1"]
+    return [address]
+
+
+class TestStreamCap:
+    """The cap covers opens that are still in flight, not just registered ones."""
+
+    async def test_concurrent_opens_cannot_exceed_the_cap(self, monkeypatch):
+        from hle_client import firepuncher
+        from hle_client.firepuncher import MAX_STREAMS
+
+        release = asyncio.Event()
+        dialling = 0
+
+        async def slow_open(_host, _port):
+            nonlocal dialling
+            dialling += 1
+            await release.wait()
+            return _FakeReader(), _FakeWriter()
+
+        monkeypatch.setattr(firepuncher.asyncio, "open_connection", slow_open)
+
+        out = Collector()
+        agent = FpAgentSide(send=out, rules=[ForwardRule(host="localhost")])
+        count = MAX_STREAMS + 25
+        tasks = [
+            asyncio.create_task(
+                agent.handle(
+                    FpOpen(stream_id=f"s{i}", target_host="localhost", target_port=1).model_dump()
+                )
+            )
+            for i in range(count)
+        ]
+
+        # Let every open reach the synchronous reservation before any dial can
+        # finish: without it, all of them would pass the cap check.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        errors = out.of_type(FpMsgType.ERROR)
+        assert len(errors) == count - MAX_STREAMS
+        assert all(e["code"] == FpErrorCode.INTERNAL for e in errors)
+        assert dialling <= MAX_STREAMS
+
+        release.set()
+        await asyncio.gather(*tasks)
+        assert dialling == MAX_STREAMS
+        await agent.close_all()
+
+    async def test_a_repeated_stream_id_is_refused_without_a_second_dial(self, monkeypatch):
+        """A repeated id used to open a second socket and orphan the first.
+
+        It also slipped past the cap: ``_reserve_open`` treated the id as
+        already counted, so N opens for one id cost one slot but N dials.
+        """
+        from hle_client import firepuncher
+        from hle_client.firepuncher import MAX_STREAMS
+
+        dialled: list[str] = []
+
+        async def one_open(host, _port):
+            dialled.append(host)
+            return _BlockingReader(), _FakeWriter()
+
+        monkeypatch.setattr(firepuncher.asyncio, "open_connection", one_open)
+
+        out = Collector()
+        agent = FpAgentSide(send=out, rules=[ForwardRule(host="localhost")])
+
+        count = MAX_STREAMS * 2  # 256 opens, all for the same id
+        tasks = [
+            asyncio.create_task(
+                agent.handle(
+                    FpOpen(stream_id="dup", target_host="localhost", target_port=1).model_dump()
+                )
+            )
+            for _ in range(count)
+        ]
+        for _ in range(5):
+            await asyncio.sleep(0)
+        await asyncio.gather(*tasks)
+
+        assert dialled == ["localhost"]  # exactly one dial
+        assert "dup" in agent._streams  # the existing stream is untouched
+        assert len(out.of_type(FpMsgType.READY)) == 1
+        errors = out.of_type(FpMsgType.ERROR)
+        assert len(errors) == count - 1
+        assert all(e["code"] == FpErrorCode.INTERNAL for e in errors)
+        assert not agent._pending_opens
+        await agent.close_all()
+
+    async def test_a_failed_open_releases_its_slot(self, monkeypatch):
+        from hle_client import firepuncher
+        from hle_client.firepuncher import MAX_STREAMS
+
+        async def refused_open(_host, _port):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(firepuncher.asyncio, "open_connection", refused_open)
+
+        out = Collector()
+        agent = FpAgentSide(send=out, rules=[ForwardRule(host="localhost")])
+
+        for i in range(MAX_STREAMS + 5):
+            await agent.handle(
+                FpOpen(stream_id=f"s{i}", target_host="localhost", target_port=1).model_dump()
+            )
+
+        # Every dial failed, so every slot was released and all opens were
+        # attempted rather than refused by the cap.
+        assert len(out.of_type(FpMsgType.ERROR)) == MAX_STREAMS + 5
+        assert not agent._pending_opens

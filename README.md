@@ -335,13 +335,46 @@ API key resolution order:
 An agent running inside a cluster only tunnels to Kubernetes Services; a raw
 URL could otherwise publish the API server, the cloud metadata service or a
 node. The agent targets `<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc` and
-`<svc>.<ns>.svc.<cluster-domain>` names, and refuses the Kubernetes API,
-link-local/cloud-metadata addresses, loopback and any node address, whatever
-the settings say.
+`<svc>.<ns>.svc.<cluster-domain>` names. A bare or two-label name is rewritten
+to its absolute in-cluster FQDN (with a trailing dot, so the pod's DNS search
+domains are never consulted) before it is resolved, so an ordinary public
+domain is never reached through the search path. The agent refuses the
+Kubernetes API by name — including a hostname-form `KUBERNETES_SERVICE_HOST`,
+compared lower-cased, dot-stripped and IDNA-normalised — and by the addresses
+that the API Service name and a hostname-form service host resolve to. That
+resolved address set is seeded from the literals in `KUBERNETES_SERVICE_HOST`
+and `KUBERNETES_PORT_443_TCP_ADDR` when they are IPs, then refreshed in the
+background; the agent waits briefly (bounded) for the first refresh before it
+starts any endpoint, and a failed or partial refresh is retried with a short
+backoff and never clears the by-name refusal (a partial refresh keeps the
+answers that did resolve). The agent also refuses link-local and cloud metadata
+addresses (`169.254.0.0/16`,
+`100.100.100.200`, `192.0.0.192`, `168.63.129.16`, `fd00:ec2::254`), the
+unspecified address and `0.0.0.0/8`, loopback and any node address, whatever
+the settings say. IPv6 addresses that wrap an IPv4 address (`::ffff:0:0/96`,
+6to4, NAT64, Teredo and IPv4-compatible `::a.b.c.d`) are unwrapped and the
+embedded address checked too; an IPv6 literal carrying a zone/scope id
+(`fd00::10%1`) is refused outright. A hostname must be an ASCII `[a-z0-9.-]`
+name: unicode (there is no legitimate use after IDNA) and SRV-style `_…` labels
+are refused. When the guard canonicalises a name, the authority the dashboard
+asked for is kept as the upstream `Host` header, so host-allowlisting services
+are unaffected. TLS connections to a canonicalised name verify the certificate
+against that original host (without the trailing dot canonicalisation added),
+since Python's TLS stack does not strip the dot. Environment proxies are not
+used for in-cluster targets: a cluster Service must never be carried by an
+`HTTP(S)_PROXY`, which cannot reach the canonical name. Upstream TLS
+verification still honours `SSL_CERT_FILE` and `SSL_CERT_DIR` even though proxy
+settings are ignored, so a private in-cluster CA can be trusted. Firepuncher is
+disabled on Kubernetes agents unless `HLE_FIREPUNCHER_ENABLED` is truthy; when
+it is on, every forward target is checked by the same guard and dialled at the
+exact address that was checked.
 
 These settings are read from the environment, with safe defaults:
 
 - `KUBERNETES_SERVICE_HOST` — its presence marks the process as in-cluster.
+- `KUBERNETES_PORT_443_TCP_ADDR` — the API Service's ClusterIP as the kubelet
+  exports it; when it is an IP it seeds the always-refused set, covering the
+  hostname-form `KUBERNETES_SERVICE_HOST` on managed clusters.
 - `HLE_INSTALL_METHOD` — set to `kubernetes` to declare a cluster agent where
   the variable above is absent; it also overrides how the install is
   classified for the dashboard.
@@ -349,6 +382,98 @@ These settings are read from the environment, with safe defaults:
 - `HLE_ALLOW_RAW_URLS` — `true` to also allow raw URLs (IP literals and
   non-cluster hostnames). The always-refused targets above stay refused.
 - `HLE_NODE_IP` — the node's address, from the downward API; honoured when set.
+- `HLE_POD_NAMESPACE` — the pod's namespace, used to expand a bare `<svc>`.
+  Falls back to the service-account namespace file; if neither is available a
+  bare name is refused.
+- `HLE_FIREPUNCHER_ENABLED` — `true` to allow firepuncher on a cluster agent.
+
+**This guard is defence in depth, not the boundary.** It validates at connect
+time, so:
+
+- DNS answers can change later. A name that resolved to an allowed address when
+  the endpoint started can rebind to a refused one, and an `ExternalName`
+  Service follows whatever its target domain says. The transport resolves the
+  in-cluster name again at request time.
+- In-cluster names are only as trustworthy as the cluster's DNS. A malicious
+  or compromised DNS entry can point an allowed Service name at any address.
+- `HLE_NODE_IP` covers the node only when it is set; the API server is covered
+  by name (including the hostname form of `KUBERNETES_SERVICE_HOST`), by the
+  literals in `KUBERNETES_SERVICE_HOST` and `KUBERNETES_PORT_443_TCP_ADDR`
+  when they are IPs, and by the addresses `kubernetes.default.svc.<cluster-domain>`
+  and a hostname-form service host resolve to — not by every address it may be
+  reachable on.
+- On managed clusters `KUBERNETES_SERVICE_HOST` is sometimes a hostname (AKS),
+  not an IP. The guard refuses that hostname by name and resolves it and the
+  API Service name in the background (at most every five minutes, retrying with
+  backoff if DNS is unavailable), adding the answers to the always-refused set.
+  Before the first endpoint starts the agent waits briefly for that first
+  refresh, and the set is seeded from `KUBERNETES_PORT_443_TCP_ADDR` when it is
+  an IP. If cluster DNS is unavailable the by-name and seeded-IP checks still
+  hold, but an address-only route to the API is not covered.
+
+Make the network the real boundary with an egress `NetworkPolicy` that denies
+the agent pod the addresses it must never reach:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hle-agent-egress
+  namespace: hle
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hle-agent
+  policyTypes: [Egress]
+  egress:
+    # DNS. If NodeLocal DNSCache is installed its link-local VIP answers here
+    # too; it is outside the cluster DNS pods, so allow it separately.
+    - to:
+      - namespaceSelector: {}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+      - ipBlock:
+          cidr: 169.254.20.10/32   # NodeLocal DNSCache (when present)
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Service endpoints in this namespace only.
+    - to:
+      - podSelector: {}
+    # The relay over HTTPS. On a managed cluster with a public API endpoint the
+    # API address is outside the cluster CIDRs below; list the real endpoint(s)
+    # from `kubectl get endpoints kubernetes -o wide` (or pin the relay's own
+    # address) so 443 to the API is denied too.
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except:
+            - 169.254.0.0/16        # cloud metadata
+            - 100.100.100.200/32    # Alibaba metadata
+            - 192.0.0.192/32        # Oracle metadata
+            - 168.63.129.16/32      # Azure WireServer
+            - 203.0.113.10/32       # API server endpoint (kubectl get endpoints kubernetes -o wide)
+            - 10.0.0.0/8            # node + API server CIDR (adjust)
+            - 172.16.0.0/12
+            - 192.168.0.0/16
+      ports:
+        - { protocol: TCP, port: 443 }
+```
+
+Adjust the cluster CIDRs and the API endpoint address to your own node, service
+and API ranges. `kubectl get endpoints kubernetes -o wide` and
+`kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes`
+both print the API server's endpoint addresses — the guard does not read
+Endpoints or EndpointSlices, it resolves the
+`kubernetes.default.svc.<cluster-domain>` Service name (and a hostname-form
+`KUBERNETES_SERVICE_HOST`) and refuses the answers, so use those endpoint
+addresses to choose the `except` entries above; the `203.0.113.10/32` line above
+is a placeholder. On clusters that expose the API on a public address that is
+not inside the cluster CIDRs, this explicit except is what keeps 443 to the API
+closed. Denying the metadata, node and API ranges at the network layer holds
+even if the guard is bypassed or its background resolution fails.
 
 
 ## Development

@@ -12,7 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -26,7 +26,13 @@ from hle_client import __version__
 from hle_client import config as hle_config
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event, render_notice
-from hle_client.proxy import UPSTREAM_ERROR_HEADER, LocalProxy, ProxyConfig
+from hle_client.proxy import (
+    UPSTREAM_ERROR_HEADER,
+    LocalProxy,
+    ProxyConfig,
+    sni_hostname_for,
+    upstream_verify,
+)
 from hle_common import close_codes
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
@@ -101,6 +107,23 @@ class TunnelConfig:
     """Optional (username, password) injected as Authorization: Basic toward the local service."""
     forward_host: bool = False
     """Forward the browser's Host header instead of using the target hostname."""
+    upstream_host: str | None = None
+    """Host header to send upstream when the target name was canonicalised.
+
+    In a cluster the guard rewrites ``web`` to ``web.apps.svc.cluster.local.``
+    so the transport cannot consult the pod's search domains. That changes the
+    ``Host`` the upstream sees, which breaks host-allowlisting upstreams; this
+    carries the authority the dashboard originally asked for, so the guard can
+    connect to the canonical name while presenting the original ``Host``.
+    """
+    trust_env: bool = True
+    """Whether upstream HTTP clients may read proxy settings from the environment.
+
+    A Kubernetes agent sets this False: an environment ``HTTP(S)_PROXY`` must
+    never carry an in-cluster target, which the proxy cannot reach by the
+    canonical name and must not publish off the pod's network. WebSocket
+    connects to a canonical name likewise pass ``proxy=None``.
+    """
     managed_by: str | None = None
     """Identifier for the system managing this tunnel (e.g. 'hle-operator')."""
     webhook_path: str | None = None
@@ -131,6 +154,8 @@ def to_tunnel_config(
     relay_host: str | None = None,
     relay_port: int | None = None,
     managed_by: str | None = None,
+    upstream_host: str | None = None,
+    trust_env: bool = True,
 ) -> TunnelConfig:
     """The one mapping from a ``TunnelSpec`` to the runtime ``TunnelConfig``.
 
@@ -160,6 +185,8 @@ def to_tunnel_config(
         websocket_enabled=spec.websocket_enabled,
         verify_ssl=bool(spec.verify_ssl),
         forward_host=bool(spec.forward_host),
+        upstream_host=upstream_host,
+        trust_env=trust_env,
         upstream_basic_auth=parse_basic_auth(spec.upstream_basic_auth),
         apex=bool(spec.apex),
         options=dict(spec.options or {}),
@@ -458,6 +485,8 @@ class Tunnel:
                 verify_ssl=self.config.verify_ssl,
                 upstream_basic_auth=self.config.upstream_basic_auth,
                 forward_host=self.config.forward_host,
+                upstream_host=self.config.upstream_host,
+                trust_env=self.config.trust_env,
             )
         )
         self._server_caps: list[str] = []
@@ -875,15 +904,26 @@ class Tunnel:
         """
         url = self.config.service_url
         verify = self.config.verify_ssl
+        # A canonicalised in-cluster name may carry a trailing dot; verify the
+        # certificate against the original host the dashboard configured.
+        url_host = urlparse(url).hostname or ""
+        if self.config.upstream_host or url_host.endswith("."):
+            sni = sni_hostname_for(url, self.config.upstream_host)
+        else:
+            sni = None
+        extensions = {"sni_hostname": sni} if sni else None
         start = time.monotonic()
         try:
             async with httpx.AsyncClient(
-                verify=verify, follow_redirects=False, timeout=5.0
+                verify=upstream_verify(verify),
+                follow_redirects=False,
+                timeout=5.0,
+                trust_env=self.config.trust_env,
             ) as client:
                 try:
-                    response = await client.head(url)
+                    response = await client.head(url, extensions=extensions)
                 except httpx.HTTPError:
-                    response = await client.get(url)
+                    response = await client.get(url, extensions=extensions)
             elapsed_ms = (time.monotonic() - start) * 1000
             data = _service_check_data(url, verify, elapsed_ms, response=response)
         except Exception as exc:
@@ -1200,8 +1240,33 @@ class Tunnel:
             self._ws_streams[stream_id] = pending_queue
 
         # Build the local WS URL (see _build_local_ws_url for the trailing-
-        # slash handling that keeps strict upstreams like Proxmox happy).
-        local_ws_url = _build_local_ws_url(self.config.service_url, open_req.path)
+        # slash handling that keeps strict upstreams like Proxmox happy). When
+        # the guard canonicalised the target, the URI keeps the authority the
+        # dashboard asked for — including any ``user:pass@`` so URL-embedded
+        # Basic auth is still sent — for the Host header, while the TCP
+        # connection is directed at the canonical name via websockets'
+        # ``host``/``port`` keywords.
+        parsed = urlparse(self.config.service_url)
+        canonical_host = parsed.hostname or ""
+        canonical_port = parsed.port
+        presented_url = self.config.service_url
+        # Origin never carries userinfo; strip it from the authority.
+        origin_netloc = parsed.netloc.rpartition("@")[2]
+        if self.config.upstream_host:
+            userinfo = ""
+            # ``is not None``: an empty username with a password (``:pass@``)
+            # is still userinfo and must be sent as Basic auth, as it is when
+            # the URL is passed through unchanged on a non-canonical target.
+            if parsed.username is not None:
+                userinfo = parsed.username
+                if parsed.password:
+                    userinfo += f":{parsed.password}"
+                userinfo += "@"
+            presented_url = urlunparse(
+                parsed._replace(netloc=f"{userinfo}{self.config.upstream_host}")
+            )
+            origin_netloc = self.config.upstream_host
+        local_ws_url = _build_local_ws_url(presented_url, open_req.path)
 
         # Strip WebSocket handshake and hop-by-hop headers — these belong to
         # the browser↔relay connection, not the client↔local service connection.
@@ -1213,8 +1278,7 @@ class Tunnel:
 
         # Rewrite Origin to match the local service so the upstream server
         # doesn't reject the WebSocket handshake with a CORS 403.
-        parsed = urlparse(self.config.service_url)
-        local_origin = f"{parsed.scheme}://{parsed.netloc}"
+        local_origin = f"{parsed.scheme}://{origin_netloc}"
         for k in list(clean_headers):
             if k.lower() == "origin":
                 clean_headers[k] = local_origin
@@ -1225,14 +1289,39 @@ class Tunnel:
             token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
             clean_headers["authorization"] = f"Basic {token}"
 
-        # Match HTTP proxy TLS behaviour: skip verification when verify_ssl=False
+        # Match HTTP proxy TLS behaviour: verify with a default context when
+        # asked, otherwise an unverified one. A wss:// URI rejects an explicit
+        # ``ssl=None``, so a context must always be supplied.
         import ssl
 
         ws_ssl: ssl.SSLContext | None = None
-        if local_ws_url.startswith("wss://") and not self.config.verify_ssl:
-            ws_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ws_ssl.check_hostname = False
-            ws_ssl.verify_mode = ssl.CERT_NONE
+        if local_ws_url.startswith("wss://"):
+            if self.config.verify_ssl:
+                ws_ssl = ssl.create_default_context()
+            else:
+                ws_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ws_ssl.check_hostname = False
+                ws_ssl.verify_mode = ssl.CERT_NONE
+
+        # Connect to the canonical name but keep the original authority in the
+        # URI (so it is the Host header). The certificate is verified against
+        # the original host the dashboard configured, without the trailing dot
+        # canonicalisation added, since that is what the certificate names.
+        connect_kwargs: dict[str, Any] = {}
+        if self.config.upstream_host and canonical_host:
+            connect_kwargs["host"] = canonical_host
+            if canonical_port is not None:
+                connect_kwargs["port"] = canonical_port
+        if local_ws_url.startswith("wss://"):
+            tls_host = sni_hostname_for(self.config.service_url, self.config.upstream_host)
+            if tls_host:
+                connect_kwargs["server_hostname"] = tls_host
+        if self.config.upstream_host or not self.config.trust_env:
+            # An in-cluster target must not go through an environment proxy: the
+            # proxy cannot reach the canonical name, and passing ``host=``
+            # alongside a proxy raises inside websockets. ``proxy=None`` forces
+            # a direct connection.
+            connect_kwargs["proxy"] = None
 
         # Extract the browser-requested subprotocols so websockets propagates
         # them in the upstream handshake. The header value is a comma-separated
@@ -1260,6 +1349,7 @@ class Tunnel:
                 # it here means an oversized frame fails predictably instead
                 # of silently 1006-closing the browser's WebSocket.
                 max_size=WS_MAX_MESSAGE_SIZE,
+                **connect_kwargs,
             )
         except Exception as exc:
             logger.exception("Failed to open local WS connection to %s", local_ws_url)

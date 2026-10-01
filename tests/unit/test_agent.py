@@ -586,6 +586,18 @@ class TestHelloContent:
         assert hello["install_method"] is None
         assert not [c for c in hello["capabilities"] if c.startswith("update:")]
 
+    async def test_firepuncher_is_not_advertised_on_a_kubernetes_agent(self, monkeypatch):
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+        monkeypatch.delenv("HLE_FIREPUNCHER_ENABLED", raising=False)
+        hello = await self._hello_sent(monkeypatch)
+        assert "firepuncher" not in hello["capabilities"]
+
+    async def test_firepuncher_is_advertised_when_enabled_in_kubernetes(self, monkeypatch):
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+        monkeypatch.setenv("HLE_FIREPUNCHER_ENABLED", "true")
+        hello = await self._hello_sent(monkeypatch)
+        assert "firepuncher" in hello["capabilities"]
+
 
 class TestServiceManagerDetection:
     def test_systemd(self):

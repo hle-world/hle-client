@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import ssl
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -27,6 +29,60 @@ _STRIP_RESPONSE_HEADERS = frozenset(
 # tunnel layer can emit a diagnostic and strip it before the response reaches
 # the browser. The value is the httpx exception class name.
 UPSTREAM_ERROR_HEADER = "x-hle-upstream-error"
+
+
+def sni_hostname_for(connect_url: str, original_authority: str | None = None) -> str | None:
+    """The host to verify a canonicalised target's certificate against.
+
+    The guard may hand a target as an absolute in-cluster FQDN ending in a dot
+    (``web.apps.svc.cluster.local.``) so the pod's DNS search path is never
+    consulted. Python's TLS stack does not strip that dot, so a certificate
+    issued for the name without it fails hostname verification. Prefer the
+    original host the dashboard configured (which is also the preserved ``Host``
+    header) and drop any trailing dot from whichever host is used.
+    """
+    host: str | None = None
+    if original_authority:
+        host = urlparse(f"//{original_authority}").hostname
+    if not host:
+        host = urlparse(connect_url).hostname
+    if not host:
+        return None
+    stripped = host.rstrip(".")
+    return stripped or None
+
+
+def upstream_ssl_context() -> ssl.SSLContext:
+    """A verifying TLS context that honours ``SSL_CERT_FILE`` and ``SSL_CERT_DIR``.
+
+    httpx only reads those variables when ``trust_env`` is True. A cluster agent
+    sets ``trust_env=False`` (so an environment proxy cannot carry a Service),
+    and httpx then falls back to certifi alone — a private in-cluster CA named
+    by ``SSL_CERT_FILE`` stops being trusted for HTTP, even though the
+    WebSocket path (which lets OpenSSL read the variables itself) still works.
+    Build the context here so the same variables are honoured either way.
+    """
+    cafile = os.environ.get("SSL_CERT_FILE")
+    capath = os.environ.get("SSL_CERT_DIR")
+    if cafile or capath:
+        return ssl.create_default_context(cafile=cafile, capath=capath)
+    try:
+        import certifi
+    except ImportError:  # pragma: no cover — httpx depends on certifi
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def upstream_verify(verify_ssl: bool) -> bool | ssl.SSLContext:
+    """What to pass to an upstream httpx client's ``verify=``.
+
+    ``False`` keeps verification off exactly as before. ``True`` builds a
+    context explicitly, so ``SSL_CERT_FILE``/``SSL_CERT_DIR`` are honoured even
+    with ``trust_env=False``.
+    """
+    if not verify_ssl:
+        return False
+    return upstream_ssl_context()
 
 
 def _upstream_error_headers(exc: BaseException) -> dict[str, str | list[str]]:
@@ -71,6 +127,21 @@ class ProxyConfig:
     """Optional (username, password) to inject as Authorization: Basic toward the local service."""
     forward_host: bool = False
     """Forward the browser's Host header instead of using the target hostname."""
+    upstream_host: str | None = None
+    """Host header to send upstream when the target was canonicalised.
+
+    ``target_url`` may be an in-cluster FQDN the guard rewrote from a shorter
+    name; this is the original authority, sent as ``Host`` so host-allowlisting
+    upstreams still recognise themselves.
+    """
+    trust_env: bool = True
+    """Whether httpx may read proxy settings from the environment.
+
+    A Kubernetes agent sets this False: an environment ``HTTP(S)_PROXY`` must
+    never be consulted for an in-cluster target, both because the proxy cannot
+    reach the canonical name and because sending a cluster Service through a
+    proxy leaks it off the pod's network.
+    """
 
 
 class LocalProxy:
@@ -96,7 +167,8 @@ class LocalProxy:
             base_url=self.config.target_url,
             timeout=self.config.timeout,
             follow_redirects=False,
-            verify=self.config.verify_ssl,
+            verify=upstream_verify(self.config.verify_ssl),
+            trust_env=self.config.trust_env,
             limits=httpx.Limits(
                 max_connections=200,
                 max_keepalive_connections=50,
@@ -132,12 +204,41 @@ class LocalProxy:
         skip = _HOP_BY_HOP_HEADERS | (frozenset() if forward_host else frozenset({"host"}))
         result = {k: v for k, v in headers.items() if k.lower() not in skip}
 
+        # The target may be a canonical in-cluster FQDN the guard rewrote from
+        # the name the dashboard asked for. Present the original authority as
+        # Host so a host-allowlisting upstream still sees itself, while the TCP
+        # connection (httpx base_url) goes to the canonical name.
+        if not forward_host and self.config.upstream_host:
+            result["host"] = self.config.upstream_host
+
         if self.config.upstream_basic_auth is not None:
             uname, upass = self.config.upstream_basic_auth
             token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
             result["authorization"] = f"Basic {token}"
 
         return result
+
+    def _tls_extensions(self) -> dict[str, str] | None:
+        """Per-request HTTPS extension overrides for a canonicalised target.
+
+        Only needed when the connection host was rewritten (``upstream_host``)
+        or already carries a trailing dot; otherwise the URL host is the right
+        certificate name and no override is sent.
+        """
+        target_host = urlparse(self.config.target_url).hostname or ""
+        original_host = (
+            urlparse(f"//{self.config.upstream_host}").hostname
+            if self.config.upstream_host
+            else None
+        )
+        if original_host:
+            host = original_host
+        elif target_host.endswith("."):
+            host = target_host
+        else:
+            return None
+        sni = host.rstrip(".")
+        return {"sni_hostname": sni} if sni else None
 
     async def forward_http(
         self,
@@ -187,6 +288,10 @@ class LocalProxy:
             url = f"{path}?{query_string}"
 
         forwarded_headers = self._build_forwarded_headers(headers)
+        tls_extensions = self._tls_extensions()
+        # Only add the extension when there is something to override, so the
+        # common request is byte-for-byte what it always was.
+        extra: dict[str, Any] = {"extensions": tls_extensions} if tls_extensions else {}
 
         try:
             response = await self._http_client.request(
@@ -194,6 +299,7 @@ class LocalProxy:
                 url=url,
                 headers=forwarded_headers,
                 content=body,
+                **extra,
             )
 
             # Sticky Host header auto-detection: on the first request,
@@ -219,6 +325,7 @@ class LocalProxy:
                     url=url,
                     headers=retry_headers,
                     content=body,
+                    **extra,
                 )
                 if retry_resp.status_code != 502:
                     self._detected_forward_host = True
@@ -308,6 +415,8 @@ class LocalProxy:
             url = f"{path}?{query_string}"
 
         forwarded_headers = self._build_forwarded_headers(headers)
+        tls_extensions = self._tls_extensions()
+        extra: dict[str, Any] = {"extensions": tls_extensions} if tls_extensions else {}
 
         chunk_size = int(os.environ.get("HLE_HTTP_CHUNK_SIZE", "524288"))
 
@@ -317,6 +426,7 @@ class LocalProxy:
                 url=url,
                 headers=forwarded_headers,
                 content=body,
+                **extra,
             ) as response:
                 resp_headers = _collect_response_headers(response.headers.raw)
                 yield (response.status_code, resp_headers, None)

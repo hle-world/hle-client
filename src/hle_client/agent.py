@@ -17,7 +17,7 @@ import os
 import platform as _platform
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import websockets
@@ -31,6 +31,7 @@ from hle_client.discovery import active_providers, scan_all
 from hle_client.firepuncher import FpAgentSide
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event
+from hle_client.proxy import sni_hostname_for
 from hle_client.tunnel import Tunnel, TunnelConfig, to_tunnel_config
 from hle_common import close_codes
 from hle_common.agent_protocol import (
@@ -47,7 +48,7 @@ from hle_common.agent_protocol import (
     update_capability,
 )
 from hle_common.discovery import DiscoveryReport
-from hle_common.fp_protocol import ForwardRule, default_rules
+from hle_common.fp_protocol import ForwardRule, FpMsgType, default_rules
 from hle_common.preflight import PreflightReport, PreflightRequest
 
 logger = logging.getLogger(__name__)
@@ -226,6 +227,10 @@ class AgentClient:
         self._forward_rules: list[ForwardRule] = default_rules()
         # In-flight preflight probes, held so they aren't garbage-collected.
         self._preflight_tasks: set[asyncio.Task[None]] = set()
+        # In-flight firepuncher opens, keyed by stream id, so data/close for a
+        # stream can be ordered behind its own open and a slow open cannot block
+        # the control channel.
+        self._fp_open_tasks: dict[str, asyncio.Task[None]] = {}
         # In a cluster, an endpoint target has to pass the guard before its
         # tunnel starts. Injected by tests; built from the environment when
         # KUBERNETES_SERVICE_HOST (or HLE_INSTALL_METHOD=kubernetes) says so.
@@ -360,9 +365,13 @@ class AgentClient:
         async with websockets.connect(self.control_uri, max_size=WS_MAX_MESSAGE_SIZE) as ws:
             emit_event("connected", source="agent", message=f"Connected to {self.control_uri}")
             # Advertise what this agent can do so the dashboard only offers
-            # features the agent actually supports. Firepuncher is always
-            # available; discovery depends on what's detectable here.
-            capabilities = ["firepuncher"]
+            # features the agent actually supports. Firepuncher is available
+            # outside a cluster; inside one it is off unless explicitly enabled,
+            # because its forward rules would otherwise permit the API server
+            # and the metadata service. Discovery depends on what's detectable.
+            capabilities: list[str] = []
+            if k8s_targets.firepuncher_enabled():
+                capabilities.append("firepuncher")
             capabilities += [f"discovery:{p.name}" for p in active_providers()]
             # `update:<method>` is advertised only for installs the agent can
             # stage a new version into itself. The method is sent regardless so
@@ -396,6 +405,8 @@ class AgentClient:
             self._fp = FpAgentSide(
                 send=ws.send,
                 rules=self._forward_rules,
+                enabled=k8s_targets.firepuncher_enabled(),
+                target_guard=self._target_guard,
             )
             # Marks the session as having worked, so the reconnect backoff in
             # run() starts over rather than compounding across the process life.
@@ -411,6 +422,16 @@ class AgentClient:
                 source="agent",
                 message=f"Agent registered with {len(welcome.endpoints)} endpoint(s)",
             )
+            # A hostname-form API host is refused by name immediately, but the
+            # address set it resolves to is filled by a background task. Wait
+            # once, bounded, before the first endpoint can start so an
+            # address-only route to the API is not briefly open. Timing out
+            # does not cancel the refresh, which keeps its own retry schedule.
+            if self._target_guard is not None:
+                with contextlib.suppress(Exception):
+                    await self._target_guard.wait_for_api_refresh(
+                        timeout=k8s_targets.INITIAL_API_REFRESH_TIMEOUT
+                    )
             await self.reconcile(welcome.endpoints)
             # Report the inventory once on connect so the dashboard has
             # something to show immediately, then only on request.
@@ -433,6 +454,7 @@ class AgentClient:
                         await self._health_task
                     self._health_task = None
                 if self._fp is not None:
+                    self._cancel_pending_fp_opens()
                     await self._fp.close_all()
                     self._fp = None
 
@@ -454,7 +476,16 @@ class AgentClient:
             await self.reconcile(sync.endpoints)
         elif isinstance(mtype, str) and mtype.startswith("fp_"):
             if self._fp is not None:
-                await self._fp.handle(msg)
+                if mtype == FpMsgType.OPEN:
+                    # Resolving and dialling a forward target can take seconds
+                    # (the Kubernetes guard resolves first); spawn it so one slow
+                    # target cannot stall every other frame on the control
+                    # channel. Data and close frames for the same stream wait
+                    # for its open below, so per-stream ordering is kept.
+                    self._spawn_fp_open(msg)
+                else:
+                    await self._settle_fp_open(msg)
+                    await self._fp.handle(msg)
         elif mtype == "discovery_refresh":
             if ws is not None:
                 await self._report_discovery(ws)
@@ -476,6 +507,51 @@ class AgentClient:
             logger.info("Ignoring %s from the relay: not a request", mtype)
         else:
             logger.debug("Unhandled agent control message: %s", mtype)
+
+    # -- firepuncher frame ordering ------------------------------------------
+
+    def _spawn_fp_open(self, msg: dict[str, Any]) -> None:
+        """Validate and dial one forward in its own task.
+
+        The guard resolves the target before dialling, and the dial itself has a
+        timeout; awaiting either here would hold the control channel. Frames
+        that follow on the same stream wait behind this task (see
+        :meth:`_settle_fp_open`), so a stream's open still happens before its
+        data and close are handed to the firepuncher.
+        """
+        if self._fp is None:
+            return
+        stream_id = msg.get("stream_id")
+        task = asyncio.create_task(self._fp.handle(msg))
+        if not isinstance(stream_id, str):
+            return
+        self._fp_open_tasks[stream_id] = task
+
+        def _forget(finished: asyncio.Task[None], stream_id: str = stream_id) -> None:
+            if self._fp_open_tasks.get(stream_id) is finished:
+                self._fp_open_tasks.pop(stream_id, None)
+
+        task.add_done_callback(_forget)
+
+    async def _settle_fp_open(self, msg: dict[str, Any]) -> None:
+        """Order a data/close frame behind its stream's in-flight open."""
+        stream_id = msg.get("stream_id")
+        if not isinstance(stream_id, str):
+            return
+        task = self._fp_open_tasks.pop(stream_id, None)
+        if task is None:
+            return
+        if msg.get("type") == FpMsgType.CLOSE:
+            # No point opening a stream the other end has already closed; the
+            # close is delivered to the firepuncher below either way.
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    def _cancel_pending_fp_opens(self) -> None:
+        for task in list(self._fp_open_tasks.values()):
+            task.cancel()
+        self._fp_open_tasks.clear()
 
     # -- self-update ---------------------------------------------------------
 
@@ -731,14 +807,42 @@ class AgentClient:
             logger.warning("Bad preflight request: %s", exc)
             return  # no request_id to answer with
 
+        # In a cluster the guard runs first and a refusal returns before any
+        # network I/O: otherwise a preflight is a port scanner and a metadata
+        # reader that reports status, Location, auth headers and a body excerpt.
+        probe_url = req.service_url
+        sni_hostname: str | None = None
+        host_header: str | None = None
+        if self._target_guard is not None:
+            decision = await self._target_guard.check(req.service_url)
+            if not decision.allowed:
+                logger.warning("Preflight refused for %s: %s", req.service_url, decision.reason)
+                report = PreflightReport(
+                    request_id=req.request_id,
+                    service_url=req.service_url,
+                    error=(decision.reason or "target not allowed")[:200],
+                )
+                with contextlib.suppress(Exception):
+                    await ws.send(report.model_dump_json())
+                return
+            probe_url = decision.url or req.service_url
+            if probe_url != req.service_url:
+                sni_hostname = sni_hostname_for(probe_url, req.service_url)
+                # The tunnel presents the original authority as Host, not the
+                # canonical FQDN the transport dials; the probe must match.
+                host_header = k8s_targets.authority_of(req.service_url)
+
         try:
             report = await run_preflight(
-                req.service_url,
+                probe_url,
                 tunnel_host=req.tunnel_host,
                 verify_ssl=req.verify_ssl,
                 websocket_enabled=req.websocket_enabled,
                 forward_host=req.forward_host,
                 request_id=req.request_id,
+                sni_hostname=sni_hostname,
+                trust_env=self._target_guard is None,
+                host_header=host_header,
             )
         except Exception as exc:  # noqa: BLE001 — never take the agent down for this
             logger.warning("Preflight failed for %s: %s", req.service_url, exc)
@@ -806,20 +910,47 @@ class AgentClient:
             if label not in desired:
                 await self._stop_endpoint(label)
 
-        # Add new endpoints; restart changed ones.
+        # Add new endpoints; restart changed ones. Validation resolves names, so
+        # it is run concurrently: one slow or unresponsive DNS lookup must not
+        # stall every other endpoint behind it. Each check has its own timeout;
+        # the gather is additionally capped so a resolver that ignores
+        # cancellation cannot wedge reconciliation.
+        to_start: list[EndpointSpec] = []
         for label, spec in desired.items():
             current = self._endpoints.get(label)
             if current is None:
-                await self._start_endpoint(spec)
+                to_start.append(spec)
             elif current.spec.reconcile_key() != spec.reconcile_key():
                 logger.info("Endpoint %s changed — restarting", label)
                 await self._stop_endpoint(label)
-                await self._start_endpoint(spec)
+                to_start.append(spec)
+        if not to_start:
+            return
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(self._start_endpoint(spec) for spec in to_start),
+                    return_exceptions=True,
+                ),
+                timeout=k8s_targets.START_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Endpoint validation did not finish within %.0fs", k8s_targets.START_TIMEOUT
+            )
+            return
+        for spec, result in zip(to_start, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("Endpoint %s failed to start: %s", spec.label, result)
 
     async def _start_endpoint(self, spec: EndpointSpec) -> None:
         # In a cluster, the relay does not get to name any target it likes: a
         # compromised dashboard could otherwise publish the API server, metadata
-        # or a node. The check resolves names too, so it awaits.
+        # or a node. The check resolves names too, so it awaits. The tunnel is
+        # given the canonical in-cluster name the guard checked, while the
+        # original spec is what the reconciler compares against.
+        cfg_spec = spec
+        upstream_host: str | None = None
         if self._target_guard is not None:
             decision = await self._target_guard.check(spec.service_url)
             if not decision.allowed:
@@ -829,6 +960,12 @@ class AgentClient:
                     emit_event("error", level="error", label=spec.label, message=reason)
                 self._failed[spec.label] = reason
                 return
+            if decision.url and decision.url != spec.service_url:
+                # Keep the authority the dashboard asked for as the upstream
+                # Host header: canonicalising ``web`` to its FQDN must not
+                # present a Name the upstream's host allow-list rejects.
+                upstream_host = k8s_targets.authority_of(spec.service_url)
+                cfg_spec = replace(spec, service_url=decision.url)
         # Data-plane credential: an explicit key from the welcome if the server
         # sent one, otherwise the agent's own token (the server accepts hlea_
         # tokens for tunnel registration). One enrollment, one secret.
@@ -838,11 +975,16 @@ class AgentClient:
         # agent is what manages these tunnels, whatever the spec says.
         try:
             cfg = to_tunnel_config(
-                spec,
+                cfg_spec,
                 api_key=data_key,
                 relay_host=self._relay_host,
                 relay_port=self._relay_port,
                 managed_by="hle-agent",
+                upstream_host=upstream_host,
+                # A cluster guard is active: env proxies must never carry an
+                # in-cluster target (they cannot reach the canonical name and
+                # would leak it off the pod's network).
+                trust_env=self._target_guard is None,
             )
         except ValueError as exc:
             # One bad endpoint (a malformed basic-auth value, say) must not take
