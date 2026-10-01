@@ -264,7 +264,16 @@ hle daemon delete tv                # Stop, disable, remove
 Update the client to the latest version, regardless of how it was installed
 (pipx, uv tool, the installer's venv, or pip). It detects the install method
 and runs the right upgrade, then offers to restart any installed services.
-Homebrew installs are told to run `brew upgrade hle-client` instead.
+
+Some installs are owned by something outside the client, and `hle update`
+prints how to upgrade those instead of guessing:
+
+- **Homebrew** — `brew upgrade hle-client`
+- **Docker** — pull the new image: `docker compose pull && docker compose up -d`
+- **Home Assistant add-on** — update it from Settings → Add-ons
+- **Kubernetes** — `helm upgrade` the hle-operator chart
+- **Editable / source checkout** — this is a development install; update it with
+  `git pull`
 
 ```bash
 hle update            # upgrade to the latest release
