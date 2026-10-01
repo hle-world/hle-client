@@ -314,6 +314,27 @@ install_with_venv() {
     ensure_local_bin
 }
 
+# Directories link_into_system_path links into, in order. Fixed to the system
+# paths in production; an override is a test seam so the refusal logic can run
+# against a scratch directory instead of the machine's /usr/local/bin.
+SYSTEM_PATH_DIRS="${SYSTEM_PATH_DIRS:-/usr/local/bin /usr/bin}"
+
+# True when $1 is a symlink into a Homebrew prefix or keg. brew puts its own
+# link at /usr/local/bin/hle (or /opt/homebrew/bin/hle) pointing into its
+# Cellar, so it looks exactly like the link the installer would write. Matching
+# either form — absolute `/usr/local/Cellar/...` or the relative `../Cellar/...`
+# brew normally uses — is enough to tell brew's link from ours.
+is_brew_symlink() {
+    [ -L "$1" ] || return 1
+    # Not `target`: sh has no local, and link_into_system_path's $target (the
+    # path to link to) must survive this call.
+    brew_dest=$(readlink "$1" 2>/dev/null) || return 1
+    case "$brew_dest" in
+        */Cellar/*|*/opt/homebrew/*) return 0 ;;
+    esac
+    return 1
+}
+
 # Put hle somewhere already on PATH, rather than trusting a shell rc file.
 #
 # Editing an rc file is a guess about which shell will read it, and on FreeBSD
@@ -325,13 +346,21 @@ link_into_system_path() {
     target="$1"
     # Root only: writing outside $HOME as a normal user is not ours to do.
     [ "$(id -u)" -eq 0 ] || return 0
-    for d in /usr/local/bin /usr/bin; do
+    # SYSTEM_PATH_DIRS is unquoted on purpose: it is a space-separated list.
+    for d in $SYSTEM_PATH_DIRS; do
         case ":$PATH:" in
             *":$d:"*) ;;
             *) continue ;;
         esac
         [ -d "$d" ] && [ -w "$d" ] || continue
-        # Never clobber something we did not put there.
+        # Never clobber something we did not put there. brew's link is a
+        # symlink too, so it has to be recognised before the symlink check
+        # below waves it through.
+        if is_brew_symlink "$d/hle"; then
+            warn "$d/hle is managed by Homebrew — leaving it alone."
+            warn "Upgrade the client with: brew upgrade hle-client"
+            return 0
+        fi
         if [ -e "$d/hle" ] && [ ! -L "$d/hle" ]; then
             warn "$d/hle exists and is not a symlink — leaving it alone."
             return 0
@@ -429,7 +458,7 @@ agent_install_service() {
 
     # Scope is auto-detected by the CLI (root -> system, otherwise per-user)
     # unless the caller pinned it with --user / --system.
-    # shellcheck disable=SC2086 -- SERVICE_SCOPE is intentionally unquoted (may be empty)
+    # shellcheck disable=SC2086  # SERVICE_SCOPE is intentionally unquoted (may be empty)
     if hle service install --agent $SERVICE_SCOPE; then
         return 0
     fi
