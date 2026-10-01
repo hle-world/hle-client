@@ -373,8 +373,10 @@ These settings are read from the environment, with safe defaults:
 
 - `KUBERNETES_SERVICE_HOST` — its presence marks the process as in-cluster.
 - `KUBERNETES_PORT_443_TCP_ADDR` — the API Service's ClusterIP as the kubelet
-  exports it; when it is an IP it seeds the always-refused set, covering the
-  hostname-form `KUBERNETES_SERVICE_HOST` on managed clusters.
+  exports it; when it is an IP it seeds the always-refused set. Some managed
+  clusters set it (and `KUBERNETES_SERVICE_HOST`) to a hostname instead; then
+  the API is covered by name and by the addresses that hostname resolves to,
+  which the agent waits for briefly before its first reconcile.
 - `HLE_INSTALL_METHOD` — set to `kubernetes` to declare a cluster agent where
   the variable above is absent; it also overrides how the install is
   classified for the dashboard.

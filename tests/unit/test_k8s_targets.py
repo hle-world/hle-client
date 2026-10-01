@@ -759,6 +759,27 @@ class TestLookAlikeApiNames:
         assert not decision.allowed, decision.reason
         assert "kubernetes API" in decision.reason
 
+    def test_a_guard_built_outside_a_loop_still_waits_for_the_first_refresh(self):
+        """The CLI builds the agent (and its guard) before any loop runs."""
+        mapping = {
+            "api.aks.example": ["10.240.0.4"],
+            "kubernetes.default.svc.cluster.local": ["10.96.0.1"],
+            "lookalike.default.svc.cluster.local": ["10.240.0.4"],
+        }
+        g = k8s_targets.KubernetesTargetGuard(  # no running loop here
+            kube_service_host="api.aks.example",
+            resolver=resolver(mapping, default=None),
+            pod_namespace=NAMESPACE,
+            allow_raw_urls=True,
+        )
+
+        async def first_reconcile() -> k8s_targets.TargetDecision:
+            await g.wait_for_api_refresh(timeout=5)
+            return await g.check("http://lookalike.default.svc.cluster.local")
+
+        decision = asyncio.run(first_reconcile())
+        assert not decision.allowed, decision.reason
+
     async def test_the_hostname_form_service_host_is_refused_by_itself(self):
         mapping = {
             "api.aks.example": ["203.0.113.9"],

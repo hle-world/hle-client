@@ -428,6 +428,10 @@ class KubernetesTargetGuard:
         retry schedule, so a later check or the next reconcile still sees a
         populated set.
         """
+        # A guard built before the event loop existed (the CLI constructs the
+        # agent first) has no refresh running yet; start it here, or this wait
+        # would return at once and the first reconcile would see an empty set.
+        self._bootstrap_api_refresh()
         task = self._api_refresh_task
         if task is None or task.done():
             return

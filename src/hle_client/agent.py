@@ -15,16 +15,15 @@ import json
 import logging
 import os
 import platform as _platform
+import signal
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import websockets
 import websockets.exceptions
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 from hle_client import __version__, agent_update, config, k8s_targets
 from hle_client.discovery import active_providers, scan_all
@@ -35,6 +34,7 @@ from hle_client.proxy import sni_hostname_for
 from hle_client.tunnel import Tunnel, TunnelConfig, to_tunnel_config
 from hle_common import close_codes
 from hle_common.agent_protocol import (
+    HANDOVER_CAPABILITY,
     AgentHello,
     AgentStateSync,
     AgentStatus,
@@ -147,6 +147,17 @@ def _fatal_agent_message(code: int | None, reason: str) -> str:
     return f"The relay stopped this agent and asked it not to reconnect (code {code}). {reason}"
 
 
+def _signal_process(proc: Any, name: str) -> None:
+    """Forward a signal to *proc*, or terminate it on Windows. Best-effort."""
+    with contextlib.suppress(Exception):
+        if os.name == "nt":
+            proc.terminate()
+            return
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            proc.send_signal(signum)
+
+
 # A tunnel-like object: connect() / disconnect() coroutines + is_connected /
 # public_url properties. Real impl is hle_client.tunnel.Tunnel; tests inject fakes.
 TunnelFactory = Callable[[TunnelConfig], Any]
@@ -181,6 +192,9 @@ class AgentClient:
         updater_factory: UpdaterFactory | None = None,
         health_timeout: float | None = None,
         target_guard: k8s_targets.KubernetesTargetGuard | None = None,
+        successor_of: str | None = None,
+        successor_nonce: str | None = None,
+        successor_spawner: Callable[..., Any] | None = None,
     ) -> None:
         self._token = token
         self._relay_host = relay_host
@@ -201,6 +215,34 @@ class AgentClient:
         self._update_task: asyncio.Task[None] | None = None
         self._health_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._canary_task: asyncio.Task[None] | None = None
+        self._successor_task: asyncio.Task[None] | None = None
+        # Stage B: this process is the canary a running incumbent spawned, and
+        # the fields it announces in its hello so the relay admits it as one.
+        # ``_canary_probation`` is the live marker: while it is set the hello
+        # carries ``successor_of``/``successor_nonce`` and this process must not
+        # start an update of its own. Once every endpoint is up the relay knows
+        # this process, so the fields are dropped and it is an ordinary agent.
+        self._successor_of = successor_of
+        self._successor_nonce = successor_nonce
+        self._canary_probation = successor_of is not None
+        # A handle to the successor the incumbent started (Popen-like: poll()).
+        self._successor_proc: Any = None
+        self._successor_spawner = successor_spawner or agent_update.spawn_successor
+        # True from the moment an incumbent has a successor in flight until it
+        # is handed over or the successor fails. While set, a REPLACED close is
+        # the expected overlap, not a fight to report as fatal.
+        self._update_in_flight = False
+        # Set when the relay closed the control channel with REPLACED during a
+        # handover: the successor owns control now, so this process holds its
+        # tunnels and waits rather than reconnecting.
+        self._control_taken = False
+        # Set once the relay has closed this incumbent with HANDOVER.
+        self._handover_done = False
+        # An update_result that could not be sent because the control channel
+        # was gone (a handover failing after a REPLACED close). Sent on the
+        # next welcome so the dashboard still learns the update failed.
+        self._pending_result: UpdateResult | None = None
         self._boot = agent_update.BootCheck("none")
         self._ws: Any = None
         # Non-zero when the process must end so the service manager relaunches
@@ -250,85 +292,137 @@ class AgentClient:
         self._running = True
         self._arm_watchdog()
         delay = self._reconnect_delay
-        while self._running:
-            self._registered = False
-            try:
-                await self._connect_once()
-            except asyncio.CancelledError:
-                # Explicit shutdown: the `finally` tears the endpoints down,
-                # then the cancel propagates so the caller sees it.
-                self._running = False
-                raise
-            except websockets.exceptions.ConnectionClosed as exc:
-                code = exc.rcvd.code if exc.rcvd is not None else None
-                was_live = self._registered
-                if close_codes.is_fatal(code):
-                    # Reconnecting after one of these cannot help and can do
-                    # real harm: two agents on one token that both keep
-                    # retrying take each other's endpoints in turn, roughly
-                    # once a second, for as long as both are running. The
-                    # `finally` below still stops every endpoint on the way out.
+        # Set only when the loop ends normally. A cancel that lands after
+        # HANDOVER (e.g. during _stop_all) skips the supervise call below, so
+        # the finally must still terminate the successor in that case.
+        reached_supervision = False
+        try:
+            while self._running:
+                self._registered = False
+                try:
+                    await self._connect_once()
+                except asyncio.CancelledError:
+                    # Explicit shutdown: the `finally` tears the endpoints down,
+                    # then the cancel propagates so the caller sees it.
                     self._running = False
-                    reason = (exc.rcvd.reason if exc.rcvd is not None else "") or ""
-                    message = _fatal_agent_message(code, reason)
-                    logger.error("%s", message)
-                    self._fatal_error = message
-                    emit_event("fatal", level="error", source="agent", message=message, code=code)
-                    if self._boot.kind == "watch":
-                        # The updated version was turned away for good. Waiting
-                        # out the timer would only delay the same rollback.
-                        await self._rollback_update(f"relay refused the updated agent: {message}")
-                elif not close_codes.should_reconnect(code):
-                    # HANDOVER: a successor of ours took the identity over, as
-                    # arranged. Not an error — no `_fatal_error`, so the caller
-                    # exits 0 — but reconnecting would take the endpoints back
-                    # off the process that is supposed to have them now.
-                    self._running = False
-                    logger.info("Relay handed this agent over to its successor; exiting")
-                wait = close_codes.retry_after_seconds(code)
-                if wait is not None:
-                    logger.warning("Relay asked this agent to slow down (code %s)", code)
-                    delay = max(delay, wait)
-                    self._registered = False
-                logger.warning("Agent control connection lost: %s", exc)
-                if self._fatal_error is None:
-                    self._emit_lost(was_live, str(exc), code)
-            except Exception as exc:  # noqa: BLE001 — control conn is best-effort
-                logger.warning("Agent control connection lost: %s", exc)
-                self._emit_lost(self._registered, str(exc), None)
-            finally:
-                # Reset on any session that got as far as registering, not just
-                # one that ended cleanly. Relay restarts end the session with an
-                # exception, so keying off a clean exit meant the backoff only
-                # ever grew: a healthy agent that saw three unrelated blips over
-                # a week would then wait 30s to recover from a routine deploy.
-                if self._registered:
-                    delay = self._reconnect_delay
-                # A control blip is not a data-plane outage. The endpoint
-                # tunnels hold their own connections to the relay and reconnect
-                # on their own, so they keep serving while the control channel
-                # comes back. Tearing them down here turned every relay deploy
-                # and every dropped control socket into every tunnel going
-                # down and re-registering. They stop only when the agent does:
-                # a fatal close code, or an explicit shutdown. The welcome on
-                # the next session reconciles against the current endpoint
-                # list, so anything removed meanwhile is stopped then.
+                    raise
+                except websockets.exceptions.ConnectionClosed as exc:
+                    code = exc.rcvd.code if exc.rcvd is not None else None
+                    was_live = self._registered
+                    # During a Stage B handover the successor briefly holds the
+                    # same identity, so the relay may close this incumbent with
+                    # REPLACED rather than HANDOVER. That overlap is the
+                    # arrangement, not two agents fighting: keep every tunnel up
+                    # and wait for the handover to finish, rather than treating
+                    # it as fatal.
+                    replaced_during_update = code == close_codes.REPLACED and self._update_in_flight
+                    if close_codes.is_fatal(code) and not replaced_during_update:
+                        # Reconnecting after one of these cannot help and can do
+                        # real harm: two agents on one token that both keep
+                        # retrying take each other's endpoints in turn, roughly
+                        # once a second, for as long as both are running. The
+                        # `finally` below still stops every endpoint on the way out.
+                        self._running = False
+                        reason = (exc.rcvd.reason if exc.rcvd is not None else "") or ""
+                        message = _fatal_agent_message(code, reason)
+                        logger.error("%s", message)
+                        self._fatal_error = message
+                        emit_event(
+                            "fatal", level="error", source="agent", message=message, code=code
+                        )
+                        if self._boot.kind == "watch":
+                            # The updated version was turned away for good. Waiting
+                            # out the timer would only delay the same rollback.
+                            await self._rollback_update(
+                                f"relay refused the updated agent: {message}"
+                            )
+                    elif replaced_during_update:
+                        # The successor's control connection took the identity
+                        # over while this handover was in flight. The relay talks
+                        # to the successor now, so reconnecting here would only
+                        # fight it. Hold every tunnel and wait: if the successor
+                        # serves, this process becomes its supervisor; if it dies,
+                        # resume.
+                        self._control_taken = True
+                        logger.info(
+                            "Successor's control connection took this identity over; "
+                            "holding tunnels until the handover settles"
+                        )
+                    elif not close_codes.should_reconnect(code):
+                        # HANDOVER: a successor of ours took the identity over, as
+                        # arranged. Stop this process's own tunnels (the `finally`
+                        # below does it) and become a thin supervisor of the child
+                        # rather than exiting, so the service manager's cgroup/job
+                        # stays alive while the successor serves.
+                        self._running = False
+                        self._update_in_flight = False
+                        self._handover_done = True
+                        logger.info("Relay handed this agent over to its successor; supervising it")
+                    wait = close_codes.retry_after_seconds(code)
+                    if wait is not None:
+                        logger.warning("Relay asked this agent to slow down (code %s)", code)
+                        delay = max(delay, wait)
+                        self._registered = False
+                    logger.warning("Agent control connection lost: %s", exc)
+                    if self._fatal_error is None:
+                        self._emit_lost(was_live, str(exc), code)
+                except Exception as exc:  # noqa: BLE001 — control conn is best-effort
+                    logger.warning("Agent control connection lost: %s", exc)
+                    self._emit_lost(self._registered, str(exc), None)
+                finally:
+                    # Reset on any session that got as far as registering, not
+                    # just one that ended cleanly. Relay restarts end the session
+                    # with an exception, so keying off a clean exit meant the
+                    # backoff only ever grew: a healthy agent that saw three
+                    # unrelated blips over a week would then wait 30s to recover
+                    # from a routine deploy.
+                    if self._registered:
+                        delay = self._reconnect_delay
+                    # A control blip is not a data-plane outage. The endpoint
+                    # tunnels hold their own connections to the relay and reconnect
+                    # on their own, so they keep serving while the control channel
+                    # comes back. Tearing them down here turned every relay deploy
+                    # and every dropped control socket into every tunnel going
+                    # down and re-registering. They stop only when the agent does:
+                    # a fatal close code, or an explicit shutdown. The welcome on
+                    # the next session reconciles against the current endpoint
+                    # list, so anything removed meanwhile is stopped then.
+                    if not self._running:
+                        await self._stop_all()
                 if not self._running:
-                    await self._stop_all()
-            if not self._running:
-                break
-            logger.info("Reconnecting agent control in %.1fs ...", delay)
-            # A task so _restart_process() can cut it short; asyncio.wait
-            # does not raise when it is cancelled, but an outer cancel of
-            # run() still propagates.
-            self._backoff = asyncio.ensure_future(asyncio.sleep(delay))
-            try:
-                await asyncio.wait({self._backoff})
-            finally:
-                self._backoff.cancel()
-                self._backoff = None
-            delay = min(delay * 2, self._max_reconnect_delay)
-        self._disarm_watchdog()
+                    break
+                if self._control_taken:
+                    # The successor took control. Wait for it to either prove
+                    # itself (then this process supervises it) or fail (then this
+                    # process reconnects and carries on serving the old version).
+                    await self._wait_for_successor_control()
+                    if self._handover_done:
+                        break
+                    self._control_taken = False
+                    logger.info("Successor did not take over; reconnecting control to resume")
+                logger.info("Reconnecting agent control in %.1fs ...", delay)
+                # A task so _restart_process() can cut it short; asyncio.wait
+                # does not raise when it is cancelled, but an outer cancel of
+                # run() still propagates.
+                self._backoff = asyncio.ensure_future(asyncio.sleep(delay))
+                try:
+                    await asyncio.wait({self._backoff})
+                finally:
+                    self._backoff.cancel()
+                    self._backoff = None
+                delay = min(delay * 2, self._max_reconnect_delay)
+            reached_supervision = self._handover_done
+        finally:
+            # Runs on every exit, including a stop signal cancelling run() while
+            # an update is in flight, during the REPLACED hold, or between
+            # HANDOVER and supervision. The successor is in its own session, so
+            # the stop never reaches it; unless supervision is about to start,
+            # terminate it here or a second agent is left on the same identity.
+            self._disarm_watchdog()
+            if not reached_supervision:
+                await self._terminate_successor()
+        if self._handover_done and self._successor_proc is not None:
+            await self._supervise_successor()
 
     @staticmethod
     def _emit_lost(was_live: bool, message: str, code: int | None) -> None:
@@ -381,6 +475,10 @@ class AgentClient:
             update_cap = update_capability(support.method) if support.supported else None
             if update_cap is not None:
                 capabilities.append(update_cap)
+                # Stage B is only useful to an install that can be swapped at
+                # all: the successor runs from the newly staged version. Without
+                # the capability the relay keeps issuing Stage A updates.
+                capabilities.append(HANDOVER_CAPABILITY)
             hello = AgentHello(
                 token=self._token,
                 agent_version=__version__,
@@ -391,6 +489,11 @@ class AgentClient:
                 platform=_platform.system().lower() or None,
                 python_version=_platform.python_version(),
                 service_manager=detect_service_manager(),
+                # The canary fields are only for the relay to admit this
+                # process. Once it is serving they would be a stale claim on an
+                # identity that is now its own, so they are dropped.
+                successor_of=self._successor_of if self._canary_probation else None,
+                successor_nonce=self._successor_nonce if self._canary_probation else None,
             )
             await ws.send(hello.model_dump_json())
 
@@ -453,6 +556,11 @@ class AgentClient:
                     with contextlib.suppress(asyncio.CancelledError):
                         await self._health_task
                     self._health_task = None
+                if self._canary_task is not None:
+                    self._canary_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._canary_task
+                    self._canary_task = None
                 if self._fp is not None:
                     self._cancel_pending_fp_opens()
                     await self._fp.close_all()
@@ -525,6 +633,11 @@ class AgentClient:
         task = asyncio.create_task(self._fp.handle(msg))
         if not isinstance(stream_id, str):
             return
+        if stream_id in self._fp_open_tasks:
+            # A duplicate open for a stream whose first open is still pending:
+            # the firepuncher refuses it, and the first open's task must stay
+            # registered so a close can still cancel it.
+            return
         self._fp_open_tasks[stream_id] = task
 
         def _forget(finished: asyncio.Task[None], stream_id: str = stream_id) -> None:
@@ -580,6 +693,13 @@ class AgentClient:
         """Why *req* cannot be accepted right now, or None to go ahead."""
         if self._update_task is not None and not self._update_task.done():
             return "busy:updating"
+        if self._update_in_flight:
+            # A successor is already being admitted; a second would race it.
+            return "busy:updating"
+        if self._canary_probation:
+            # This process *is* a canary. Its only job is to prove the new
+            # version, so it must not start an update of its own.
+            return "busy:updating"
         if self._boot.kind == "watch":
             # This process is itself an update still proving it works.
             return "busy:updating"
@@ -626,6 +746,11 @@ class AgentClient:
         self._update_task = asyncio.create_task(self._run_update(req, ws))
 
     async def _run_update(self, req: UpdateRequest, ws: Any) -> None:
+        if req.successor_nonce is not None:
+            # Stage B: the relay armed a canary handover.
+            await self._run_handover_update(req, ws)
+            return
+
         async def progress(p: UpdateProgress) -> None:
             with contextlib.suppress(Exception):
                 await ws.send(p.model_dump_json())
@@ -658,6 +783,288 @@ class AgentClient:
         logger.info("Restarting into %s", req.target_version)
         await self._restart_process(ws)
 
+    # -- Stage B: canary handover -------------------------------------------
+
+    async def _run_handover_update(self, req: UpdateRequest, ws: Any) -> None:
+        """Stage, verify and swap, then start a successor instead of exiting.
+
+        This process keeps its tunnels and its control connection. The
+        successor connects as this instance's successor, takes the endpoints
+        over, and the relay closes this connection with HANDOVER once it is
+        serving. Until then nothing here is torn down: if the successor cannot
+        be started or dies on the way up, the update is reported failed and
+        this process carries on from the rolled-back version.
+        """
+
+        async def progress(p: UpdateProgress) -> None:
+            with contextlib.suppress(Exception):
+                await ws.send(p.model_dump_json())
+
+        try:
+            updater = self._updater_factory(self._probe_support())
+            await agent_update.run_update(
+                req,
+                updater=updater,
+                home=self._home,
+                from_version=__version__,
+                send_progress=progress,
+            )
+        except Exception as exc:  # noqa: BLE001 — same reporting as Stage A
+            logger.error("Update to %s failed: %s", req.target_version, exc)
+            result = UpdateResult(
+                request_id=req.request_id,
+                ok=False,
+                from_version=__version__,
+                to_version=req.target_version,
+                log_tail=agent_update.log_tail(),
+            )
+            with contextlib.suppress(Exception):
+                await ws.send(result.model_dump_json())
+            return
+
+        try:
+            self._successor_proc = self._spawn_successor(req)
+        except Exception as exc:  # noqa: BLE001 — the relay hears why, the tunnels stay up
+            logger.error("Could not start successor for %s: %s", req.request_id, exc)
+            await self._report_handover_failure(req, ws, f"could not start successor: {exc}")
+            return
+
+        self._update_in_flight = True
+        logger.info(
+            "Update %s: successor started, holding tunnels until the relay hands them over",
+            req.request_id,
+        )
+        self._successor_task = asyncio.create_task(self._watch_successor(req, ws))
+
+    def _successor_executable(self) -> str:
+        """The just-swapped ``hle`` a successor should run.
+
+        The versioned layout names it through ``current``; pipx and uv own
+        their venvs and install in place, so the running interpreter's sibling
+        ``hle`` is the new version there.
+        """
+        exe = agent_update.versioned_exec_path(home=self._home)
+        if exe is not None:
+            return str(exe)
+        return str(Path(sys.executable).with_name("hle"))
+
+    def _spawn_successor(self, req: UpdateRequest) -> Any:
+        argv = agent_update.successor_argv(
+            self._successor_executable(),
+            successor_of=instance_id(),
+            successor_nonce=req.successor_nonce or "",
+            relay_host=self._relay_host,
+            relay_port=self._relay_port,
+        )
+        # The token is handed over in the environment, never argv: the
+        # incumbent may have been started with `--token` rather than the
+        # variable, and the successor must use the same credential.
+        env = dict(os.environ)
+        env[config.AGENT_TOKEN_ENV] = self._token
+        logger.info("Starting successor: %s", " ".join(argv))
+        return self._successor_spawner(argv, env=env)
+
+    async def _watch_successor(self, req: UpdateRequest, ws: Any, poll: float = 0.5) -> None:
+        """Report failure if the successor dies before the relay hands over.
+
+        A healthy successor stays up and serves, so the only thing to watch for
+        is an early exit. HANDOVER ends this loop and turns this process into
+        the child's supervisor; a successor that exits first means the update
+        failed and the incumbent reports it and carries on.
+        """
+        proc = self._successor_proc
+        while self._update_in_flight and self._running:
+            if proc is not None and proc.poll() is not None:
+                await self._report_handover_failure(
+                    req, ws, f"successor exited with {proc.returncode}"
+                )
+                return
+            await asyncio.sleep(poll)
+
+    async def _report_handover_failure(self, req: UpdateRequest, ws: Any, reason: str) -> None:
+        self._update_in_flight = False
+        logger.error("Update %s failed during handover: %s", req.request_id, reason)
+        try:
+            updater = self._updater_factory(self._probe_support())
+            prev = await asyncio.to_thread(updater.rollback)
+            logger.info("Rolled back to %s", prev)
+        except Exception as exc:  # noqa: BLE001 — report it and keep the old version running
+            reason = f"{reason}; rollback failed: {exc}"
+            logger.error("Rollback after handover failure failed: %s", exc)
+        # The canary may have written a marker on its way down; the incumbent is
+        # the one the relay is still listening to, so it reports and clears it.
+        agent_update.clear_update_state(self._home)
+        agent_update.clear_failed_marker(self._home)
+        result = UpdateResult(
+            request_id=req.request_id,
+            ok=False,
+            from_version=__version__,
+            to_version=req.target_version,
+            log_tail=agent_update.log_tail(),
+        )
+        # If a REPLACED already took the control channel the send fails; keep
+        # the result so it goes out on the next welcome instead.
+        try:
+            await ws.send(result.model_dump_json())
+            self._pending_result = None
+        except Exception:  # noqa: BLE001 — the channel may already be gone
+            self._pending_result = result
+        # The successor took some endpoints before it died. Restart them so the
+        # incumbent is whole again while it keeps serving the old version.
+        await self._retake_endpoints()
+
+    async def _retake_endpoints(self) -> None:
+        """Restart only the endpoints a failed successor stood down.
+
+        The successor takes endpoints over one at a time, so a healthy
+        incumbent tunnel is left alone; only a tunnel that is not connected or
+        whose task has finished was given up and needs starting again.
+        """
+        stood_down = [
+            running
+            for running in list(self._endpoints.values())
+            if not running.tunnel.is_connected or running.task.done()
+        ]
+        for running in stood_down:
+            await self._stop_endpoint(running.spec.label)
+            await self._start_endpoint(running.spec)
+
+    async def _wait_for_successor_control(self, poll: float = 0.5) -> None:
+        """Block while the successor owns the control channel after a REPLACED.
+
+        A REPLACED close ends the control channel, so the HANDOVER (4011) that
+        would announce the takeover can never arrive on it. The data plane is
+        the signal instead: the relay hands each incumbent tunnel to the
+        successor and the tunnel stops itself when it sees 4011. Once every
+        tunnel task is done the handover has happened, so this process becomes
+        the successor's supervisor. If the successor dies first,
+        ``_watch_successor`` reports it and this process reconnects instead.
+
+        Returns with ``_handover_done`` set (supervise the child) or clear
+        (reconnect and serve the old version).
+        """
+        task = self._successor_task
+        if task is None:
+            # Nothing was ever spawned to wait on: the takeover is all there is.
+            self._handover_done = True
+            return
+        while not task.done():
+            # Only a LIVE successor can be supervised: if it took the tunnels
+            # and died within a poll interval, let the watcher report the
+            # failure, roll back and retake instead of supervising a corpse.
+            proc = self._successor_proc
+            if self._all_tunnels_stood_down() and (proc is None or proc.poll() is None):
+                self._handover_done = True
+                self._update_in_flight = False
+                await self._cancel_successor_watch()
+                logger.info(
+                    "Every tunnel stood down for the successor after REPLACED; supervising it"
+                )
+                return
+            await asyncio.sleep(poll)
+        # The successor exited first, so there is nothing to supervise; the
+        # watcher has already reported the failure and this process resumes.
+
+    def _all_tunnels_stood_down(self) -> bool:
+        """Whether the relay has taken every incumbent tunnel for the successor.
+
+        An empty pool is not "all stood down": with nothing to hand over there
+        is no data-plane signal to wait for, so the control channel (or the
+        successor's death) decides. A tunnel counts as stood down when its task
+        has finished — a transient blip reconnects in place and leaves the task
+        running, so only a deliberate 4011 ends it.
+        """
+        if not self._endpoints:
+            return False
+        return all(running.task.done() for running in self._endpoints.values())
+
+    async def _supervise_successor(self, poll: float = 0.5) -> None:
+        """Stay alive as a thin supervisor of the successor we spawned.
+
+        A service manager stops a whole control group/job when the process it
+        started exits: systemd ``KillMode=control-group`` kills every child on
+        the way out, launchd ``KeepAlive`` restarts what it does not see, and a
+        Windows service does the same. So after HANDOVER this process must not
+        exit. It stops its own tunnels and control connection (done by the
+        caller) and then waits on the successor, forwarding SIGTERM/SIGINT (a
+        terminate on Windows) to it and exiting with the successor's status
+        once it does. The supervised PID stays alive, the cgroup/job stays
+        intact, and ``Restart=always`` only fires when the agent really died.
+        """
+        await self._cancel_successor_watch()
+        proc = self._successor_proc
+        if proc is None:
+            return
+        loop = asyncio.get_running_loop()
+        hooked: list[signal.Signals] = []
+
+        def _forward(name: str) -> None:
+            _signal_process(proc, name)
+
+        if sys.platform != "win32":
+            # Overrides the shutdown helper's cancel-the-task handlers: a
+            # signal meant for the agent belongs to the successor now.
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, _forward, sig.name)
+                    hooked.append(sig)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    continue
+        try:
+            while proc.poll() is None:
+                await asyncio.sleep(poll)
+        except asyncio.CancelledError:
+            # Never leave the successor orphaned if this supervisor is stopped.
+            await self._terminate_successor()
+            raise
+        finally:
+            for sig in hooked:
+                with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                    loop.remove_signal_handler(sig)
+        # A child killed by a signal reports a negative code; exit codes are
+        # unsigned, so map it to the shell convention 128 + signal number.
+        code = proc.returncode or 0
+        self._exit_code = code if code >= 0 else 128 - code
+
+    async def _terminate_successor(self, wait: float = 10.0) -> None:
+        """Stop a successor this process spawned but is not supervising.
+
+        The successor runs in its own session, so a stop signal sent to this
+        process's group does not reach it. On any exit that is not the
+        supervisor path — an explicit shutdown while an update is in flight, or
+        during the REPLACED hold — leaving it running would orphan a second
+        agent on the same identity. SIGTERM (terminate on Windows), then a
+        bounded wait, then kill.
+        """
+        proc = self._successor_proc
+        if proc is None or proc.poll() is not None:
+            return
+        await self._cancel_successor_watch()
+        _signal_process(proc, "SIGTERM")
+        try:
+            await asyncio.to_thread(proc.wait, wait)
+        except asyncio.CancelledError:
+            # A second stop signal can land while we wait; kill rather than
+            # leak the process, then let the cancellation keep unwinding.
+            with contextlib.suppress(Exception):
+                proc.kill()
+            raise
+        except Exception:  # noqa: BLE001 — TimeoutExpired, or proc has no wait()
+            pass
+        if proc.poll() is None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(proc.wait, wait)
+
+    async def _cancel_successor_watch(self) -> None:
+        task = self._successor_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._successor_task = None
+
     async def _restart_process(self, ws: Any) -> None:
         self._exit_code = 1
         self._running = False
@@ -683,6 +1090,13 @@ class AgentClient:
         elif self._boot.kind == "report_failed":
             logger.warning("A previous update failed: %s", self._boot.reason)
             self._undo_unverified_swap()
+        # A canary has to prove itself whether or not the incumbent's
+        # update.json was found. Without this deadline a canary that never
+        # reaches a welcome — update state missing, or the relay never answering
+        # — would sit in the reconnect loop forever while the incumbent serves.
+        if self._canary_probation and self._watchdog_task is None:
+            logger.info("Canary successor has %.0fs to become healthy", self._health_timeout)
+            self._watchdog_task = asyncio.create_task(self._watchdog_timer())
 
     def _undo_unverified_swap(self) -> None:
         """Repoint ``current`` away from a version that never proved itself.
@@ -714,7 +1128,7 @@ class AgentClient:
 
     async def _watchdog_timer(self) -> None:
         await asyncio.sleep(self._health_timeout)
-        if self._boot.kind == "watch":
+        if self._boot.kind == "watch" or self._canary_probation:
             await self._rollback_update(f"not healthy within {self._health_timeout:.0f}s")
 
     async def _after_welcome(self, ws: Any) -> None:
@@ -735,6 +1149,46 @@ class AgentClient:
             self._boot = agent_update.BootCheck("none")
         elif self._boot.kind == "watch":
             self._health_task = asyncio.create_task(self._confirm_update_health(ws))
+        # A successor has to prove every endpoint comes up whether or not it
+        # finds update state on disk — the incumbent always writes it, so
+        # `watch` above is the normal case, not a reason to skip this. On
+        # success this also drops the canary identity (fix 1).
+        if self._canary_probation:
+            self._canary_task = asyncio.create_task(self._confirm_canary_health(ws))
+        # A handover that failed after the control channel was gone (REPLACED)
+        # left its result behind; the dashboard hears it on this new session.
+        if self._pending_result is not None:
+            pending, self._pending_result = self._pending_result, None
+            with contextlib.suppress(Exception):
+                await ws.send(pending.model_dump_json())
+
+    async def _confirm_canary_health(self, ws: Any, poll: float = 0.5) -> None:
+        """A successor must bring every endpoint up, or exit without a fuss.
+
+        Exiting non-zero here is the point: this process was only ever an
+        experiment. The incumbent is still running and keeps serving; the
+        relay, seeing no welcome or no healthy endpoints, never hands over.
+        """
+        deadline = asyncio.get_running_loop().time() + self._health_timeout
+        while not self._all_endpoints_connected():
+            if asyncio.get_running_loop().time() >= deadline:
+                logger.error(
+                    "Canary successor did not bring every endpoint up within %.0fs; exiting",
+                    self._health_timeout,
+                )
+                self._exit_code = 1
+                self._running = False
+                if ws is not None:
+                    with contextlib.suppress(Exception):
+                        await ws.close()
+                return
+            await asyncio.sleep(poll)
+        # Healthy: the relay knows this process now, so stop claiming to be a
+        # successor. A later control reconnect is an ordinary agent's hello.
+        self._successor_of = None
+        self._successor_nonce = None
+        self._canary_probation = False
+        logger.info("Canary successor is serving every endpoint")
 
     def _all_endpoints_connected(self) -> bool:
         return all(bool(r.tunnel.is_connected) for r in self._endpoints.values())
@@ -765,6 +1219,25 @@ class AgentClient:
     async def _rollback_update(self, reason: str) -> None:
         """Put the previous version back and exit so the manager relaunches it."""
         state = self._boot.state
+        if self._canary_probation:
+            # During a Stage B handover the incumbent owns the rollback. A
+            # canary that cannot prove itself just exits non-zero; the
+            # incumbent is still running, sees the child die, and recovers.
+            # This comes before the boot-kind guard: a canary may have no
+            # update.json at all and still has to die on its deadline.
+            self._boot = agent_update.BootCheck("none")
+            self._disarm_watchdog()
+            logger.error(
+                "Canary update %s failed: %s — exiting for the incumbent to recover",
+                state.request_id if state is not None else agent_update.LOCAL_REQUEST_ID,
+                reason,
+            )
+            self._exit_code = 1
+            self._running = False
+            if self._ws is not None:
+                with contextlib.suppress(Exception):
+                    await self._ws.close()
+            return
         if self._boot.kind != "watch" or state is None:
             return
         self._boot = agent_update.BootCheck("none")
