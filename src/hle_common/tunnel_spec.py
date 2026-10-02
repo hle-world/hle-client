@@ -49,7 +49,7 @@ _NULL_EQUALS: dict[str, Any] = {
 }
 
 # Fields whose values must never be printed: repr masks them.
-SECRET_FIELDS: frozenset[str] = frozenset({"upstream_basic_auth"})
+SECRET_FIELDS: frozenset[str] = frozenset({"upstream_basic_auth", "basic_auth", "pin"})
 
 
 def _cli(**kw: Any) -> dict[str, Any]:
