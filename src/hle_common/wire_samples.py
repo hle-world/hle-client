@@ -20,6 +20,8 @@ from hle_common.agent_protocol import (
     AgentStateSync,
     AgentStatus,
     AgentWelcome,
+    AllowedUser,
+    DeclaredAccess,
     DeclaredAck,
     DeclaredAckEntry,
     DeclaredEndpoint,
@@ -337,6 +339,20 @@ SAMPLES: dict[str, object] = {
         upstream_basic_auth_secret="media/db-auth#password",
         source_ref="hletunnel:media/db",
         sync_policy="initial",
+    ),
+    # Visitor access travels (the server enforces it); upstream credentials do not.
+    "DeclaredEndpoint.access": DeclaredEndpoint(
+        label="photos",
+        target=K8sServiceTarget(namespace="media", name="photos", port=2283),
+        source_ref="hletunnel:media/photos",
+        access=DeclaredAccess(
+            allowed_users=[
+                AllowedUser(email="ana@example.com"),
+                AllowedUser(email="bo@example.com", provider="github"),
+            ],
+            pin="4821",
+            basic_auth="visitor:s3cret",
+        ),
     ),
     "DeclaredEndpoints": DeclaredEndpoints(
         revision=7,

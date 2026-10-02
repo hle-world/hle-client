@@ -11,6 +11,7 @@ the agent reconciles its running tunnels to match. Reconnects resend the snapsho
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -18,7 +19,7 @@ from typing import Literal
 
 # Runtime import, not just typing: pydantic resolves this to build the model.
 from hle_common.fp_protocol import ForwardRule  # noqa: TC001
-from hle_common.tunnel_spec import TunnelSpec
+from hle_common.tunnel_spec import SECRET_FIELDS, TunnelSpec, parse_basic_auth
 from hle_common.wire import WireModel
 
 # 1.1 adds firepuncher: `forward_rules` on welcome/state_sync, and `fp_*` frames
@@ -401,6 +402,53 @@ class UpdateResult(WireModel):
 # a label present in one frame and absent from the next is gone.
 
 
+@dataclass(kw_only=True)
+class AllowedUser(WireModel):
+    """One visitor allowed through an endpoint's SSO gate."""
+
+    email: str
+    provider: str = "any"
+
+    def __post_init__(self) -> None:
+        if not self.email or "@" not in self.email:
+            raise ValueError(f"allowed user email must be an email address, got {self.email!r}")
+        if not self.provider:
+            raise ValueError("allowed user provider must not be empty")
+
+
+@dataclass(kw_only=True, repr=False)
+class DeclaredAccess(WireModel):
+    """Visitor access policy a declaration carries for its endpoint.
+
+    Unlike upstream credentials, these values travel: the server enforces
+    visitor auth, so it has to hold ``pin`` and ``basic_auth`` itself, whereas
+    it only ever relays upstream auth and so never sees it. The channel is
+    WSS, the same exposure as the REST calls that set these today. ``basic_auth``
+    is ``user:pass``, parsed like ``upstream_basic_auth``. ``pin`` and
+    ``basic_auth`` are redacted from ``repr``.
+    """
+
+    allowed_users: list[AllowedUser] = field(default_factory=list)
+    pin: str | None = None
+    basic_auth: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.pin is not None and not self.pin:
+            raise ValueError("pin must not be empty")
+        if self.basic_auth is not None and (
+            not parse_basic_auth(self.basic_auth) or not self.basic_auth.partition(":")[0]
+        ):
+            raise ValueError("basic_auth must be in USER:PASS format")
+
+    def __repr__(self) -> str:
+        parts = []
+        for f in dataclasses.fields(self):
+            value = getattr(self, f.name)
+            shown = "'***'" if f.name in SECRET_FIELDS and value is not None else repr(value)
+            parts.append(f"{f.name}={shown}")
+        return f"{type(self).__name__}({', '.join(parts)})"
+
+
 @dataclass(kw_only=True, repr=False)
 class DeclaredEndpoint(TunnelSpec):
     """One endpoint a cluster manifest says should exist.
@@ -434,6 +482,10 @@ class DeclaredEndpoint(TunnelSpec):
     sync_policy: Literal["strict", "initial"] = "strict"
     # Where it came from, e.g. ``hletunnel:ns/name`` or ``ingress:ns/name``.
     source_ref: str = field()
+    # Visitor access policy (allowed users, PIN, basic auth). Null leaves the
+    # endpoint's rules alone on an `initial` declaration and clears them on a
+    # `strict` one. See DeclaredAccess for why these values travel.
+    access: DeclaredAccess | None = None
 
     def __post_init__(self) -> None:
         if self.target is None and not self.service_url:
