@@ -1,5 +1,51 @@
 # Changelog
 
+## v2610.1 — 2026-10-02
+
+### Added
+
+- **Large messages through the tunnel.** Any message over 1 MiB is now split
+  into 256 KiB fragments and rejoined on the other side, in both directions,
+  on tunnels and agents. WebSocket messages and HTTP bodies are no longer
+  capped at 4 MB per message. The limit is now 64 MiB, and a relay may set a
+  lower one. Big Home Assistant registries and similar no longer drop the
+  connection. This only takes effect when the relay supports it; older relays
+  see exactly the same traffic as before. Tunnel protocol 1.6, agent
+  protocol 1.5.
+- **Zero-drop agent updates.** A remote update now starts the new agent
+  alongside the old one and switches over only once it is healthy. If the
+  new version doesn't come up, the old one keeps running and the update
+  rolls back.
+- **Kubernetes agents** (used by the hle-operator Helm chart):
+  - **Target guard.** Endpoints may only target in-cluster Services. The
+    Kubernetes API, cloud metadata and node addresses are always refused.
+    Raw URLs need `HLE_ALLOW_RAW_URLS=true`.
+  - **Firepuncher** is off on Kubernetes unless `HLE_FIREPUNCHER_ENABLED=true`.
+  - **Readiness probe.** `hle agent status --ready` passes only while the
+    agent is connected.
+  - **Namespace exclusions.** `HLE_DISCOVERY_EXCLUDE_NAMESPACES` hides
+    namespaces from discovery and refuses them as targets.
+  - **Discovery** now reports port names, app protocols and ready-endpoint
+    counts.
+- **Agent logs in the dashboard.** The agent answers log requests from the
+  relay with lines from its own in-memory log, with credentials redacted. It
+  never reads files or other processes.
+- **Operator hooks** on `AgentClient` for declaring endpoints from the
+  cluster: `send_declared_endpoints`, `spec_resolver`, `endpoint_statuses`
+  and `HLE_HANDOVER_GROUP`.
+- The package now ships `py.typed`.
+
+### Fixed
+
+- **Reconnect backoff** resets only after a session has stayed up for a
+  while, so a flapping connection no longer reconnects in a tight loop.
+- **The API client** reuses one HTTP session across requests.
+- **`install.sh`** no longer overwrites a Homebrew-owned `hle` symlink.
+- **The TUI** shows canonical verbs in its equivalent commands and honours
+  the root `--api-key`.
+- **`hle update`** gives clear guidance for Docker, Home Assistant add-on,
+  Kubernetes and development installs.
+
 ## v2609.10 — 2026-09-25
 
 ### Added
