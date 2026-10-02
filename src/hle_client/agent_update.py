@@ -397,7 +397,7 @@ def boot_check(home: Path, running_version: str, *, now: float | None = None) ->
 class RingBufferHandler(logging.Handler):
     """Keeps the last *capacity* formatted log lines in memory."""
 
-    def __init__(self, capacity: int = 200) -> None:
+    def __init__(self, capacity: int = 2000) -> None:
         super().__init__()
         self.lines: deque[str] = deque(maxlen=capacity)
         self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
