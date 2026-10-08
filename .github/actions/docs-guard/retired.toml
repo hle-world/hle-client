@@ -1,0 +1,29 @@
+# Retired claims shared by every HLE repo.
+#
+# Each entry is a fact that used to be true and must not come back into the
+# docs. When a change retires something user-visible (a prefix, a path in the
+# dashboard, a CLI spelling), add its entry here in the same PR, so every repo's
+# docs are checked against it from then on.
+#
+#   id      — stable name; used by `docs-guard: allow <id>` and [[claims.allow]]
+#   pattern — Python regex, searched per line
+#   reason  — what changed, and since when
+#   use     — what to write instead
+
+[[retired]]
+id = "hlea-agent-token"
+pattern = '\bhlea_'
+reason = "Agents get an ordinary hle_ key (scoped to tunnels) since server v2609.2; hlea_ is legacy."
+use = "hle_… — mention hlea_ only in a note that old tokens still work, marked `docs-guard: allow hlea-agent-token`."
+
+[[retired]]
+id = "dashboard-new-agent-path"
+pattern = '(?i)(agents\s*(→|->|&rarr;|&gt;)\s*new agent|new\s*(→|->|&rarr;)\s*agent\b|dashboard\s*(→|->|&rarr;)\s*agents)'
+reason = "Agents live under Connections in the dashboard, and the button is \"New\"."
+use = "Connections → Agents → New (https://hle.world/dashboard/connections/agents)"
+
+[[retired]]
+id = "cli-pre-noun-verb"
+pattern = '\bhle (--debug )?(expose|fp|preflight|webhook|service|config)\b(?![./_-])'
+reason = "The CLI moved to `hle <noun> <verb>` in client v2609.5; old spellings are hidden aliases."
+use = "hle tunnel create / forward / tunnel preflight / tunnel webhook / daemon … / tunnel … (see migrate-cli-syntax.py)"
