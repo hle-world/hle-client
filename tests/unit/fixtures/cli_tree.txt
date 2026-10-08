@@ -6,18 +6,18 @@ hle  [group]  hidden=False  help='HomeLab Everywhere — expose homelab services
     option   -q/--quiet                   name=quiet type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --no-color                   name=no_color type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --no-input                   name=no_input type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent  [group]  hidden=False  help='Run a multi-tunnel agent controlled from the dashboard.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent enroll  [command]  hidden=True  help='Save an agent enrollment token. Now: hle auth login --agent-token.'
     argument token                        name=token type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent list  [command]  hidden=False  help="List the agents on your account, and whether they're online."
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
     option   --json                       name=as_json type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent logout  [command]  hidden=False  help='Remove the saved agent token.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent run  [command]  hidden=False  help='Run the agent: connect, fetch endpoints from the dashboard, and reconcile.'
     option   --token                      name=token type=text required=False multiple=False nargs=1 flag=False envvar=HLE_AGENT_TOKEN default_set=False hidden=False
     option   --relay-host                 name=relay_host type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -25,29 +25,29 @@ hle agent run  [command]  hidden=False  help='Run the agent: connect, fetch endp
     option   --successor-of               name=successor_of type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --successor-nonce            name=successor_nonce type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent services  [command]  hidden=False  help='List services this machine can see and could expose.'
     option   --provider                   name=provider type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --json                       name=as_json type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent status  [command]  hidden=False  help='Show whether an agent token is configured.'
     option   --ready                      name=ready type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle auth  [group]  hidden=False  help='Manage API key authentication.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle auth login  [command]  hidden=False  help='Save a credential for this machine.'
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --agent-token                name=agent_token type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle auth logout  [command]  hidden=False  help='Remove the saved API key from ~/.config/hle/config.toml.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle auth status  [command]  hidden=False  help='Show which credentials this machine has, and where they came from.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle completion  [command]  hidden=False  help='Print the shell completion script for SHELL.'
     argument shell                        name=shell type=choice required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon  [group]  hidden=False  help='Install and manage background services (systemd/launchd/rc.d).'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon delete  [command]  hidden=False  help='Stop, disable, and remove a background service.'
     argument target                       name=target type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --agent                      name=agent_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=True
@@ -55,9 +55,9 @@ hle daemon delete  [command]  hidden=False  help='Stop, disable, and remove a ba
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --user                       name=user_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon install  [group]  hidden=False  help='Install and start a background service.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon install _flags  [command]  hidden=True  help='Install (and start) a background service — the flag form.'
     option   --agent                      name=agent_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --fp                         name=fp_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
@@ -84,7 +84,7 @@ hle daemon install _flags  [command]  hidden=True  help='Install (and start) a b
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --run-as                     name=run_as type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --start                      name=start type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon install agent  [command]  hidden=False  help='Install the dashboard-driven agent.'
     option   --relay-host                 name=relay_host type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --relay-port                 name=relay_port type=integer required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
@@ -93,7 +93,7 @@ hle daemon install agent  [command]  hidden=False  help='Install the dashboard-d
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --user                       name=user_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon install forward  [command]  hidden=False  help='Install a permanent forward from a remote port to this machine.'
     argument agent_name                   name=agent_name type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument target                       name=target type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -106,7 +106,7 @@ hle daemon install forward  [command]  hidden=False  help='Install a permanent f
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --user                       name=user_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon install tunnel  [command]  hidden=False  help='Install one always-on tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument url                          name=url type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -125,11 +125,11 @@ hle daemon install tunnel  [command]  hidden=False  help='Install one always-on 
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --user                       name=user_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon list  [command]  hidden=False  help='List installed hle services, in both scopes by default.'
     option   --user                       name=user_only type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --system                     name=system_only type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon logs  [command]  hidden=False  help="Show a service's log."
     argument target                       name=target type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --agent                      name=agent_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=True
@@ -139,21 +139,21 @@ hle daemon logs  [command]  hidden=False  help="Show a service's log."
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   -n/--lines                   name=lines type=integer required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   -f/--follow                  name=follow type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon refresh  [command]  hidden=False  help='Rebuild a service file against the installed client, then start it.'
     argument target                       name=target type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --agent                      name=agent_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=True
     option   --label                      name=label type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --all                        name=refresh_all type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon restart  [command]  hidden=False  help='Restart a background service, or all of them with --all.'
     argument target                       name=target type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --agent                      name=agent_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=True
     option   --label                      name=label type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --all                        name=restart_all type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle daemon status  [command]  hidden=False  help='Show status for a background service.'
     argument target                       name=target type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --agent                      name=agent_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=True
@@ -161,7 +161,7 @@ hle daemon status  [command]  hidden=False  help='Show status for a background s
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --user                       name=user_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --system                     name=system_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle expose  [command]  hidden=True  help='Expose a local service to the internet.'
     option   --service                    name=service type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --label                      name=service_label type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
@@ -177,7 +177,7 @@ hle expose  [command]  hidden=True  help='Expose a local service to the internet
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle forward  [command]  hidden=False  help='Forward TCP ports from a remote agent to this machine.'
     option   --agent                      name=agent type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --to                         name=targets type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -187,7 +187,7 @@ hle forward  [command]  hidden=False  help='Forward TCP ports from a remote agen
     option   --relay-host                 name=relay_host type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --relay-port                 name=relay_port type=integer required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument command                      name=command type=text required=False multiple=False nargs=-1 flag=False envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle preflight  [command]  hidden=True  help='Check whether SERVICE_URL will work as a tunnel, before creating one.'
     argument service_url                  name=service_url type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --host                       name=tunnel_host type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
@@ -195,48 +195,48 @@ hle preflight  [command]  hidden=True  help='Check whether SERVICE_URL will work
     option   --no-websocket               name=no_websocket type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --forward-host               name=forward_host type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --json                       name=as_json type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle status  [command]  hidden=False  help='What this machine is set up to do, on one screen.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel  [group]  hidden=False  help='Create, inspect and secure tunnels.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel access  [group]  hidden=False  help='Manage tunnel access allow-list (SSO email rules).'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel access create  [command]  hidden=False  help="Add an email to a tunnel's access allow-list."
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument email                        name=email type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --provider                   name=provider type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel access delete  [command]  hidden=False  help='Remove an access rule by ID.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument rule_id                      name=rule_id type=integer required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel access list  [command]  hidden=False  help='List access rules for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel access replace  [command]  hidden=False  help="Reconcile a tunnel's access allow-list to exactly SPECS."
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument specs                        name=specs type=text required=False multiple=False nargs=-1 flag=False envvar=None default_set=True hidden=False
     option   --clear                      name=do_clear type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel basic-auth  [group]  hidden=False  help='Manage tunnel HTTP Basic Auth access control.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel basic-auth delete  [command]  hidden=False  help='Remove HTTP Basic Auth from a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel basic-auth get  [command]  hidden=False  help='Show HTTP Basic Auth status for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel basic-auth set  [command]  hidden=False  help='Set HTTP Basic Auth credentials for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel create  [command]  hidden=False  help='Expose a local service to the internet.'
     argument first                        name=first type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument second                       name=second type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -252,33 +252,33 @@ hle tunnel create  [command]  hidden=False  help='Expose a local service to the 
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel delete  [command]  hidden=False  help="Delete a tunnel's record."
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --yes/-y                     name=yes type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel get  [command]  hidden=False  help='Show full configuration and live state for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel list  [command]  hidden=False  help='List active tunnels for your account.'
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel pin  [group]  hidden=False  help='Manage tunnel PIN access control.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel pin delete  [command]  hidden=False  help='Remove the PIN for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel pin get  [command]  hidden=False  help='Show PIN status for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel pin set  [command]  hidden=False  help='Set a PIN for a tunnel (prompts for 4-8 digit PIN).'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel preflight  [command]  hidden=False  help='Check whether SERVICE_URL will work as a tunnel, before creating one.'
     argument service_url                  name=service_url type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --host                       name=tunnel_host type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
@@ -286,15 +286,15 @@ hle tunnel preflight  [command]  hidden=False  help='Check whether SERVICE_URL w
     option   --no-websocket               name=no_websocket type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --forward-host               name=forward_host type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --json                       name=as_json type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel set  [command]  hidden=False  help="Change a published tunnel's settings."
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --auth                       name=mode type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --set                        name=legacy_mode type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel share  [group]  hidden=False  help='Manage temporary share links for a tunnel.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel share create  [command]  hidden=False  help='Create a temporary share link for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --duration                   name=duration type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -302,16 +302,16 @@ hle tunnel share create  [command]  hidden=False  help='Create a temporary share
     option   --label                      name=legacy_link_label type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True
     option   --max-uses                   name=max_uses type=integer required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel share delete  [command]  hidden=False  help='Revoke a share link by ID.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument link_id                      name=link_id type=integer required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel share list  [command]  hidden=False  help='List share links for a tunnel.'
     argument label                        name=label type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle tunnel webhook  [command]  hidden=False  help='Forward incoming webhooks to a local service.'
     option   --path                       name=path type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --forward-to                 name=forward_to type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -319,14 +319,14 @@ hle tunnel webhook  [command]  hidden=False  help='Forward incoming webhooks to 
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle update  [command]  hidden=False  help='Update the HLE client to the latest version (any install method).'
     option   --check                      name=check type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --version                    name=target_version type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --yes/-y                     name=yes type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle version  [command]  hidden=False  help='Print the installed version.'
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle webhook  [command]  hidden=True  help='Forward incoming webhooks to a local service.'
     option   --path                       name=path type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --forward-to                 name=forward_to type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -334,7 +334,7 @@ hle webhook  [command]  hidden=True  help='Forward incoming webhooks to a local 
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False
     option   --response-timeout           name=response_timeout type=integer range required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
-    option   --help                       name=_click_default_help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
+    option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 ALIASES
   hle : config -> tunnel
   hle : fp -> forward
