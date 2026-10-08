@@ -9,7 +9,7 @@
 #   curl -fsSL https://get.hle.world | sh -s -- --agent
 #
 #   # Fully unattended (CI, cloud-init, Ansible):
-#   curl -fsSL https://get.hle.world | sh -s -- --agent --token hlea_xxxxx
+#   curl -fsSL https://get.hle.world | sh -s -- --agent --token hle_xxxxx
 set -e
 
 PACKAGE="hle-client"
@@ -32,7 +32,7 @@ HLE Client installer
 Options:
   --version <v>     Install a specific hle-client version
   --agent           Enroll this machine as an HLE agent and run it as a service
-  --token <token>   Agent enrollment token (hlea_...); implies --agent.
+  --token <token>   Agent token (hle_...) from the dashboard; implies --agent.
                     Without it, --agent prompts on the terminal.
   --no-service      With --agent: enroll only, don't install a service
   --no-modify-path  Don't add ~/.local/bin to your shell's PATH
@@ -420,7 +420,7 @@ refresh_existing_services() {
 # --- Agent setup ---
 
 # Enroll this machine as an agent. The token is passed to `hle agent enroll`,
-# which validates the hlea_ prefix and writes ~/.config/hle/agent.toml (0600).
+# which checks the token shape and writes ~/.config/hle/agent.toml (0600).
 # It is never written to disk by this script, nor echoed back.
 agent_enroll() {
     if [ -n "$AGENT_TOKEN" ]; then
@@ -439,7 +439,7 @@ agent_enroll() {
 
     if ! has_tty; then
         warn "No agent token and no terminal to prompt on."
-        warn "Re-run with: --agent --token hlea_xxxxx"
+        warn "Re-run with: --agent --token hle_xxxxx"
         return 1
     fi
 
