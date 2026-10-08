@@ -20,10 +20,12 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from hle_common.credentials import LEGACY_AGENT_TOKEN_PREFIX
+
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
 
-AGENT_TOKEN_PREFIX = "hlea_"
+AGENT_TOKEN_PREFIX = LEGACY_AGENT_TOKEN_PREFIX
 
 NOTICE = (
     "HLE_API_KEY holds a legacy agent token; reading it as HLE_AGENT_TOKEN as well. "
