@@ -1,5 +1,31 @@
 # Changelog
 
+## v2610.3 — 2026-10-08
+
+### Fixed
+
+- `hle agent enroll` now says where the token was actually saved. It used to
+  name `~/.config/hle/agent.toml` even when `HLE_AGENT_CONFIG` put it
+  somewhere else.
+- The installer's messages use the current command spellings:
+  `hle daemon install agent`, `hle daemon status agent` and
+  `hle tunnel create`. They used to show the hidden older forms
+  (`hle service install --agent`, `hle expose --service`).
+
+### Changed
+
+- The agent-credential format is shared with the relay through `hle_common`
+  (`hle_common.credentials`). The client and server now check the same
+  definition, so a server-side change to the key format can't silently break
+  `hle agent enroll` again. There is no behaviour change.
+
+### Internal
+
+- docs-guard: a check that every HLE repo runs in CI. It catches retired
+  claims in the docs (old token prefixes, dashboard paths, CLI spellings) and
+  code changes that land without the docs that describe them. It lives in
+  `.github/actions/docs-guard/`.
+
 ## v2610.2 — 2026-10-08
 
 ### Fixed
