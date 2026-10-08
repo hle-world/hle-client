@@ -42,9 +42,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SHARED_RETIRED = HERE / "retired.toml"
 CONFIG_NAME = "docs-guard.toml"
-# Horizontal whitespace only: `\s` would let an empty "Docs-Impact:" borrow the
-# next line as its reason.
-ESCAPE = re.compile(r"^[ \t]*Docs-Impact:[ \t]*(\S.*)$", re.MULTILINE | re.IGNORECASE)
+# The line may be a list item or bold (`- **Docs-Impact:** none`) — that is how
+# people write it in a PR description. Horizontal whitespace only: `\s` would
+# let an empty "Docs-Impact:" borrow the next line as its reason.
+ESCAPE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?Docs-Impact:(?:\*\*|__)?[ \t]*(\S.*)$",
+    re.MULTILINE | re.IGNORECASE,
+)
 ALLOW_MARK = re.compile(r"docs-guard:\s*allow\s+([\w,\s-]+)")
 
 
