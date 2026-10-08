@@ -2,7 +2,19 @@
 
 ## v2610.2 — 2026-10-08
 
-<!-- TODO: Fill in release notes before merging -->
+### Fixed
+
+- **Agents created in the dashboard can enrol again.** Since server
+  v2609.2, the New Agent dialog hands out an ordinary `hle_` key scoped to
+  tunnels, and tells you to run `hle agent enroll <key>`. The client still
+  demanded the old `hlea_` prefix and refused it with *"Invalid agent token.
+  Expected one starting with 'hlea_'"*. `hle agent enroll`,
+  `hle auth login --agent-token` and the installer
+  (`get.hle.world --agent --token`) now accept `hle_` keys. Existing `hlea_`
+  tokens keep working, and nobody needs to re-enrol.
+- A pasted token's leading and trailing whitespace is ignored. The error for
+  a malformed token now points to **Connections → Agents → New** in the
+  dashboard.
 
 ## v2610.1 — 2026-10-02
 
