@@ -7,6 +7,7 @@ repos use), so it is loaded by path rather than imported from the package.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,14 +31,23 @@ def _isolated_git(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def _repo(tmp_path: Path, config: str, files: dict[str, str]) -> Path:
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+# CI's test container (python:3.x-slim) has no git; the Docs Guard job, which
+# runs the tool for real, uses an image that does.
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+
+
+def _repo(tmp_path: Path, config: str, files: dict[str, str], *, git: bool = True) -> Path:
+    """A scratch repo. ``git=False`` when only the config is needed."""
     (tmp_path / "docs-guard.toml").write_text(config)
     for rel, text in files.items():
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    if git:
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     return tmp_path
 
 
@@ -66,7 +76,7 @@ class TestSharedRetiredClaims:
 
     @pytest.fixture
     def rules(self, tmp_path):
-        return dg.load_config(_repo(tmp_path, CLAIMS, {})).rules
+        return dg.load_config(_repo(tmp_path, CLAIMS, {}, git=False)).rules
 
     @pytest.mark.parametrize(
         "line",
@@ -160,7 +170,7 @@ IMPACT = (
 class TestImpact:
     @pytest.fixture
     def cfg(self, tmp_path):
-        return dg.load_config(_repo(tmp_path, IMPACT, {}))
+        return dg.load_config(_repo(tmp_path, IMPACT, {}, git=False))
 
     def test_code_without_docs_is_a_gap(self, cfg):
         [gap] = dg.find_gaps(cfg, ["src/cli.py", "tests/test_cli.py"])
@@ -200,6 +210,7 @@ class TestImpact:
         assert dg.main(["--root", str(root), "impact", "--staged"]) == 0
 
 
+@needs_git
 def test_this_repo_passes_its_own_claims_check():
     root = Path(__file__).resolve().parents[2]
     assert dg.main(["--root", str(root), "claims"]) == 0
