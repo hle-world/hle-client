@@ -380,7 +380,7 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
     Examples:
       hle auth login                        Paste an API key from the dashboard
       hle auth login --api-key hle_...      Non-interactive
-      hle auth login --agent-token hlea_... Enrol this machine as an agent
+      hle auth login --agent-token hle_...  Enrol this machine as an agent
       hle auth login --agent-token          Same, pasting the token at a prompt
     """
     if agent_token is not None:

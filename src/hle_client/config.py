@@ -3,7 +3,7 @@
 Two files, one place that knows about both:
 
 * ``~/.config/hle/config.toml`` holds the API key (``hle_`` + 32 hex).
-* ``~/.config/hle/agent.toml`` holds an agent enrollment token (``hlea_...``),
+* ``~/.config/hle/agent.toml`` holds the agent credential (``hle_...``, or a legacy ``hlea_...``),
   at a path ``HLE_AGENT_CONFIG`` can override so a service unit can point at
   the file it was enrolled with rather than whatever HOME it was started under.
 
@@ -38,8 +38,9 @@ AGENT_CONFIG_ENV = "HLE_AGENT_CONFIG"
 # trailing newline is refused there while still working elsewhere.
 API_KEY_PATTERN = re.compile(r"^hle_[0-9a-f]{32}$")
 
-# Agent enrollment tokens share the "hle" stem, which is precisely why they get
-# put in variables named for API keys.
+# Legacy agent enrollment tokens. Agents created since server v2609.2 get an
+# ordinary API_KEY_PATTERN key instead; these keep working. They share the
+# "hle" stem, which is precisely why they get put in variables named for API keys.
 AGENT_TOKEN_PREFIX = "hlea_"
 
 API_KEY_ENV = "HLE_API_KEY"

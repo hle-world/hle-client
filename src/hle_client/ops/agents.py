@@ -51,10 +51,17 @@ def local_agent_status() -> LocalAgent:
 
 
 def enroll(token: str) -> str:
-    """Save an enrollment token. Returns the path it was written to."""
-    if not token.startswith(config.AGENT_TOKEN_PREFIX):
+    """Save an enrollment token. Returns the path it was written to.
+
+    Agents created since server v2609.2 get an ordinary ``hle_`` key scoped
+    to tunnels; older ones hold an ``hlea_`` token, which still works. Only
+    the shape is checked here: whether it is an agent's is the relay's call.
+    """
+    token = token.strip()
+    if not (config.API_KEY_PATTERN.match(token) or token.startswith(config.AGENT_TOKEN_PREFIX)):
         raise HleError(
-            f"Invalid agent token. Expected one starting with '{config.AGENT_TOKEN_PREFIX}'."
+            "Invalid agent token. Copy it from Connections → Agents → New in the "
+            "dashboard; it starts with 'hle_'."
         )
     config.save_agent_token(token)
     return str(config.agent_config_path())
