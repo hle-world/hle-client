@@ -57,10 +57,16 @@ def _param_info(p: click.Parameter) -> ParamInfo:
     envvar: str | None = (
         p.envvar if p.envvar is None or isinstance(p.envvar, str) else ",".join(p.envvar)
     )
+    name = p.name or ""
+    # click renamed the built-in --help parameter between releases
+    # (8.3.x: "help", 8.5.x: "_click_default_help"). The tree should not
+    # depend on which click is installed.
+    if name == "_click_default_help":
+        name = "help"
     return ParamInfo(
         kind="argument" if isinstance(p, click.Argument) else "option",
         opts=tuple(p.opts),
-        name=p.name or "",
+        name=name,
         type_name=getattr(p.type, "name", type(p.type).__name__),
         required=bool(p.required),
         multiple=bool(getattr(p, "multiple", False)),
