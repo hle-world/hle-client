@@ -13,8 +13,8 @@ hle tunnel webhook --path /hook --forward-to http://localhost:3000 --label gh --
 hle agent run --events jsonl
 ```
 
-The legacy spellings `hle expose ... --events jsonl` and
-`hle webhook ... --events jsonl` accept it too.
+The legacy spellings `hle expose ... --events jsonl` and <!-- docs-guard: allow cli-pre-noun-verb -->
+`hle webhook ... --events jsonl` accept it too. <!-- docs-guard: allow cli-pre-noun-verb -->
 
 With `--events jsonl`:
 

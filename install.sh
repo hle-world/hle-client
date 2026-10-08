@@ -458,13 +458,15 @@ agent_install_service() {
 
     # Scope is auto-detected by the CLI (root -> system, otherwise per-user)
     # unless the caller pinned it with --user / --system.
+    # The flag form, not `hle daemon install agent`: --version may install a
+    # client older than v2609.5, and the hidden alias works on every version.
     # shellcheck disable=SC2086  # SERVICE_SCOPE is intentionally unquoted (may be empty)
-    if hle service install --agent $SERVICE_SCOPE; then
+    if hle service install --agent $SERVICE_SCOPE; then  # docs-guard: allow cli-pre-noun-verb
         return 0
     fi
 
     warn "Could not install the service automatically."
-    warn "Install it manually with: sudo hle service install --agent --system"
+    warn "Install it manually with: sudo hle daemon install agent --system"
     warn "Or just run the agent in the foreground: hle agent run"
     return 1
 }
@@ -472,14 +474,14 @@ agent_install_service() {
 setup_agent() {
     if ! command -v hle >/dev/null 2>&1; then
         error "hle is not on PATH yet — cannot set up the agent."
-        error "Restart your shell, then run: hle agent enroll && hle service install --agent"
+        error "Restart your shell, then run: hle agent enroll && hle daemon install agent"
         exit 1
     fi
 
     if ! agent_enroll; then
         error "Agent enrollment failed. The client is installed; you can retry with:"
         error "  hle agent enroll"
-        error "  hle service install --agent"
+        error "  hle daemon install agent"
         exit 1
     fi
 
@@ -500,7 +502,7 @@ setup_agent() {
 
     success "Agent is set up."
     info "Add endpoints at https://hle.world/dashboard — the agent picks them up in seconds."
-    info "Check on it with: hle service status --agent"
+    info "Check on it with: hle daemon status agent"
 }
 
 # --- Main ---
@@ -568,7 +570,7 @@ main() {
         info "  export PATH=\"\$HOME/.local/bin:\$PATH\""
         if [ "$AGENT" -eq 1 ]; then
             warn "Then finish agent setup with:"
-            warn "  hle agent enroll && hle service install --agent"
+            warn "  hle agent enroll && hle daemon install agent"
         fi
         exit 0
     fi
@@ -582,7 +584,7 @@ main() {
     if [ "$AGENT" -eq 1 ]; then
         setup_agent
     else
-        info "Run 'hle expose --service http://localhost:8080' to expose one service,"
+        info "Run 'hle tunnel create web http://localhost:8080' to expose one service,"
         info "or re-run this installer with --agent to manage many from the dashboard."
     fi
 }
