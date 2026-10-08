@@ -9,8 +9,8 @@ jobs:
     runs-on: <your runner>
     container: { image: "python:3.12" }   # python3 3.11+ and git
     steps:
-      - uses: actions/checkout@v4
-      - uses: hle-world/hle-client/.github/actions/docs-guard@main
+      - uses: actions/checkout@<pinned sha>  # pin actions to a commit
+      - uses: hle-world/hle-client/.github/actions/docs-guard@<commit sha>  # pin; bump to pick up new retired claims
 ```
 
 Trigger it on `pull_request` with `types: [opened, synchronize, reopened, edited]`,
