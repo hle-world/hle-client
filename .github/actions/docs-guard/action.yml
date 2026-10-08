@@ -13,27 +13,32 @@ inputs:
     description: Repo root to check (where docs-guard.toml lives)
     default: "."
 
+# Every value reaches the scripts through the environment, never by
+# interpolating ${{ }} into `run:` — that is shell injection for anything a
+# caller or a PR author controls.
 runs:
   using: composite
   steps:
     - name: Retired claims
       if: contains(inputs.checks, 'claims')
       shell: bash
+      env:
+        DOCS_GUARD_ROOT: ${{ inputs.root }}
       run: |
         # Checkout inside a container leaves the workspace owned by another
         # uid, and git then refuses to read it.
-        git config --global --add safe.directory "$(cd "${{ inputs.root }}" && pwd)"
-        python3 "$GITHUB_ACTION_PATH/docs_guard.py" --root "${{ inputs.root }}" claims
+        git config --global --add safe.directory "$(cd "$DOCS_GUARD_ROOT" && pwd)"
+        python3 "$GITHUB_ACTION_PATH/docs_guard.py" --root "$DOCS_GUARD_ROOT" claims
 
     - name: Docs impact
       if: contains(inputs.checks, 'impact') && github.event_name == 'pull_request'
       shell: bash
       env:
-        # Passed through the environment, never interpolated into the script:
-        # a PR body is attacker-controlled text.
+        DOCS_GUARD_ROOT: ${{ inputs.root }}
+        # A PR body is attacker-controlled text.
         DOCS_GUARD_MESSAGE: ${{ github.event.pull_request.body }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
-        git config --global --add safe.directory "$(cd "${{ inputs.root }}" && pwd)"
-        git -C "${{ inputs.root }}" fetch --no-tags --depth=1 origin "$BASE_SHA"
-        python3 "$GITHUB_ACTION_PATH/docs_guard.py" --root "${{ inputs.root }}" impact --base "$BASE_SHA"
+        git config --global --add safe.directory "$(cd "$DOCS_GUARD_ROOT" && pwd)"
+        git -C "$DOCS_GUARD_ROOT" fetch --no-tags --depth=1 origin "$BASE_SHA"
+        python3 "$GITHUB_ACTION_PATH/docs_guard.py" --root "$DOCS_GUARD_ROOT" impact --base "$BASE_SHA"
