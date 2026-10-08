@@ -24,6 +24,9 @@ use = "Connections → Agents → New (https://hle.world/dashboard/connections/a
 
 [[retired]]
 id = "cli-pre-noun-verb"
-pattern = '\bhle (--debug )?(expose|fp|preflight|webhook|service|config)\b(?![./_-])'
+# `service`, `config` and `webhook` are also ordinary words ("restart every hle
+# service"), so those three only match when a subcommand, flag or argument
+# follows.
+pattern = '\bhle (--debug )?(expose|fp|preflight)\b(?![./_-])|\bhle (service|config) +(--\w|install|list|status|restart|uninstall|logs|auth-mode|basic-auth|access|share|pin|show)\b|\bhle (--debug )?webhook +(--|<|[\w-]+ +(https?://|--|<))'
 reason = "The CLI moved to `hle <noun> <verb>` in client v2609.5; old spellings are hidden aliases."
 use = "hle tunnel create / forward / tunnel preflight / tunnel webhook / daemon … / tunnel … (see migrate-cli-syntax.py)"
