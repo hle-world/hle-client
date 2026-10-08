@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from hle_common import credentials
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +34,15 @@ AGENT_CONFIG_PATH = CONFIG_DIR / "agent.toml"
 # in, so the service reads the same file the enrolling user wrote.
 AGENT_CONFIG_ENV = "HLE_AGENT_CONFIG"
 
-# An API key is "hle_" plus 32 hex characters. The relay checks this exact
-# length before it will even hash a key, so a value with a stray quote or a
-# trailing newline is refused there while still working elsewhere.
-API_KEY_PATTERN = re.compile(r"^hle_[0-9a-f]{32}$")
+# The credential shapes are defined once, in hle_common, shared with the relay.
+# An API key is "hle_" plus 32 hex characters. Re-exported here so existing
+# `config.API_KEY_PATTERN` users keep working.
+API_KEY_PATTERN = credentials.API_KEY_PATTERN
 
 # Legacy agent enrollment tokens. Agents created since server v2609.2 get an
 # ordinary API_KEY_PATTERN key instead; these keep working. They share the
 # "hle" stem, which is precisely why they get put in variables named for API keys.
-AGENT_TOKEN_PREFIX = "hlea_"
+AGENT_TOKEN_PREFIX = credentials.LEGACY_AGENT_TOKEN_PREFIX
 
 API_KEY_ENV = "HLE_API_KEY"
 AGENT_TOKEN_ENV = "HLE_AGENT_TOKEN"

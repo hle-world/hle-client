@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from hle_client import config
 from hle_client.errors import ApiError, HleError
 from hle_client.ops.models import Agent
+from hle_common.credentials import is_agent_credential
 
 if TYPE_CHECKING:
     from hle_client.api import ApiClient
@@ -58,7 +59,7 @@ def enroll(token: str) -> str:
     the shape is checked here: whether it is an agent's is the relay's call.
     """
     token = token.strip()
-    if not (config.API_KEY_PATTERN.match(token) or token.startswith(config.AGENT_TOKEN_PREFIX)):
+    if not is_agent_credential(token):
         raise HleError(
             "Invalid agent token. Copy it from Connections → Agents → New in the "
             "dashboard; it starts with 'hle_'."
