@@ -10,6 +10,7 @@ import sys
 import webbrowser
 from collections.abc import Callable
 from datetime import UTC
+from pathlib import Path
 from typing import Any, TypeVar
 
 import click
@@ -408,8 +409,9 @@ def _save_agent_token(ctx: click.Context, token: str | None) -> None:
         )
         token = str(prompt(ctx, "Agent token", hide_input=True))
 
-    ops_agents.enroll(token)
-    console.print("[green]Enrolled[/green] — token saved to ~/.config/hle/agent.toml")
+    # Report where it actually went: HLE_AGENT_CONFIG can move it.
+    saved = ops_agents.enroll(token).replace(str(Path.home()), "~", 1)
+    console.print(f"[green]Enrolled[/green] — token saved to {saved}")
     console.print(
         "Start the agent with: [cyan]hle agent run[/cyan]  (or: hle daemon install agent)"
     )
