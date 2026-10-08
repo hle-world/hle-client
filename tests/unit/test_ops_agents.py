@@ -56,10 +56,27 @@ class TestLocal:
         assert status.token_prefix == "hlea_bbbb…"
         assert status.source == "~/.config/hle/agent.toml"
 
-    def test_enroll_rejects_the_wrong_kind_of_token(self):
+    @pytest.mark.parametrize(
+        "token",
+        [
+            # What the dashboard's New Agent dialog hands out since v2609.2.
+            "hle_" + "a" * 32,
+            # Copied with a trailing newline.
+            "hle_" + "a" * 32 + "\n",
+            # Legacy enrollment token; still accepted by the relay.
+            "hlea_" + "b" * 40,
+        ],
+    )
+    def test_enroll_accepts_both_agent_credential_shapes(self, token):
+        with patch("hle_client.config.save_agent_token") as save:
+            agents.enroll(token)
+        save.assert_called_once_with(token.strip())
+
+    @pytest.mark.parametrize("token", ["", "hle_short", "sk_live_" + "a" * 32, "hle_" + "A" * 32])
+    def test_enroll_rejects_what_is_not_an_hle_credential(self, token):
         with (
             patch("hle_client.config.save_agent_token") as save,
-            pytest.raises(HleError, match="hlea_"),
+            pytest.raises(HleError, match="hle_"),
         ):
-            agents.enroll("hle_" + "a" * 32)
+            agents.enroll(token)
         save.assert_not_called()
