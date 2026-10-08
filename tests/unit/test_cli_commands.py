@@ -487,6 +487,16 @@ class TestAgentCli:
         assert "Enrolled" in result.output
         assert "token" in cfg.read_text()
 
+    def test_enroll_reports_where_the_token_went(self, tmp_path: Path, monkeypatch) -> None:
+        # HLE_AGENT_CONFIG moves the file; the message used to name the default anyway.
+        cfg = tmp_path / "elsewhere.toml"
+        monkeypatch.setenv("HLE_AGENT_CONFIG", str(cfg))
+        result = CliRunner().invoke(main, ["agent", "enroll", "hle_" + "0" * 32])
+        assert result.exit_code == 0, result.output
+        assert cfg.exists()
+        assert "elsewhere.toml" in result.output
+        assert "~/.config/hle/agent.toml" not in result.output
+
     def test_enroll_rejects_bad_token(self) -> None:
         runner = CliRunner()
         result = runner.invoke(main, ["agent", "enroll", "hle_notanagent"])
