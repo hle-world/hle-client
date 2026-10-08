@@ -194,13 +194,25 @@ class TestImpact:
         [
             "Summary\n\nDocs-Impact: hle-world/hle#12\n",
             "docs-impact: none — internal refactor, no behaviour change",
+            # As a list item, as written in hle#486's description.
+            "## Technical details\n- Docs-Impact: none — spelling fix only\n",
+            "* **Docs-Impact:** hle-world/hle#12",
         ],
     )
     def test_docs_impact_line_accepts_the_gap(self, cfg, message):
         assert dg.cmd_impact(Path("."), cfg, ["src/cli.py"], message, warn=False) == 0
 
-    def test_an_empty_docs_impact_line_does_not_count(self, cfg):
-        assert dg.cmd_impact(Path("."), cfg, ["src/cli.py"], "Docs-Impact:\n", warn=False) == 1
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Docs-Impact:\n",
+            "- Docs-Impact:\nnext line is not a reason",
+            # Mentioned in prose, not declared.
+            "Remember to add a Docs-Impact: line next time",
+        ],
+    )
+    def test_what_does_not_count_as_a_docs_impact_line(self, cfg, message):
+        assert dg.cmd_impact(Path("."), cfg, ["src/cli.py"], message, warn=False) == 1
 
     def test_staged_end_to_end(self, tmp_path):
         root = _repo(tmp_path, IMPACT, {"src/cli.py": "x = 1\n"})
