@@ -90,6 +90,10 @@ class TestSharedRetiredClaims:
             "sudo hle service install --agent",
             "hle fp --agent box --to 22",
             "hle config access add ha you@example.com",
+            "hle service status --agent",
+            "hle config show ha",
+            "hle webhook --forward-to http://localhost:9000",
+            "hle webhook gh http://localhost:9000",
         ],
     )
     def test_flags_retired(self, rules, line):
@@ -105,6 +109,10 @@ class TestSharedRetiredClaims:
             "hle forward create box 22",
             "Saved to ~/.config/hle/config.toml",
             "The hle_tunnel_token cookie",
+            # Plain words, not commands (hle#487's generated help said these).
+            "| `--all` | Restart every hle service |",
+            "Edit the hle config file by hand",
+            "Each hle webhook tunnel gets a URL",
         ],
     )
     def test_leaves_current_text_alone(self, rules, line):
