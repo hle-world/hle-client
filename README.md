@@ -68,8 +68,8 @@ hle status
 
 The CLI has one shape: `hle <noun> <verb>`. The nouns are `tunnel`, `agent`,
 `daemon`, `forward` and `auth`, and the verbs are the same wherever they
-apply: `list`, `get`, `create`, `set`, `delete`. Older spellings (`hle expose`,
-`hle config`, `hle service`, `hle fp`, and verbs such as `access add`,
+apply: `list`, `get`, `create`, `set`, `delete`. Older spellings (`hle expose`, <!-- docs-guard: allow cli-pre-noun-verb -->
+`hle config`, `hle service`, `hle fp`, and verbs such as `access add`, <!-- docs-guard: allow cli-pre-noun-verb -->
 `pin status`, `share revoke`, `auth-mode --set`, `daemon uninstall --label`,
 `agent enroll`) still work but are not listed in `--help`.
 

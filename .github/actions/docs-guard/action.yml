@@ -1,0 +1,39 @@
+name: docs-guard
+description: >
+  Fail when docs repeat a retired claim, or when code that a doc describes
+  changes without that doc. Configured by docs-guard.toml at the repo root.
+  Needs python3 (3.11+) and git on the runner; the full python:3.1x
+  container images have both.
+
+inputs:
+  checks:
+    description: "Which checks to run: claims, impact, or both (space-separated)"
+    default: "claims impact"
+  root:
+    description: Repo root to check (where docs-guard.toml lives)
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: Retired claims
+      if: contains(inputs.checks, 'claims')
+      shell: bash
+      run: |
+        # Checkout inside a container leaves the workspace owned by another
+        # uid, and git then refuses to read it.
+        git config --global --add safe.directory "$(cd "${{ inputs.root }}" && pwd)"
+        python3 "$GITHUB_ACTION_PATH/docs_guard.py" --root "${{ inputs.root }}" claims
+
+    - name: Docs impact
+      if: contains(inputs.checks, 'impact') && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        # Passed through the environment, never interpolated into the script:
+        # a PR body is attacker-controlled text.
+        DOCS_GUARD_MESSAGE: ${{ github.event.pull_request.body }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: |
+        git config --global --add safe.directory "$(cd "${{ inputs.root }}" && pwd)"
+        git -C "${{ inputs.root }}" fetch --no-tags --depth=1 origin "$BASE_SHA"
+        python3 "$GITHUB_ACTION_PATH/docs_guard.py" --root "${{ inputs.root }}" impact --base "$BASE_SHA"

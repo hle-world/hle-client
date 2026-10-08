@@ -1,0 +1,29 @@
+name: Docs Guard
+
+# Retired claims in the docs, and code changed without the docs that describe
+# it. Rules: docs-guard.toml. Tool: .github/actions/docs-guard/ (other HLE
+# repos use the same action).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # Editing the PR description is how a `Docs-Impact:` line gets added.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs-guard:
+    runs-on: arc-runner-hle-client
+    timeout-minutes: 5
+    container:
+      image: python:3.12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/docs-guard

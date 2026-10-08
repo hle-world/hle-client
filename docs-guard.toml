@@ -1,0 +1,30 @@
+# docs-guard config for hle-client. The tool and the shared retired-claims
+# list live in .github/actions/docs-guard/; see its docs_guard.py.
+
+[claims]
+# User-facing text only. Source comments may name legacy shapes on purpose.
+include = ["README.md", "install.sh", "docs/**/*.md"]
+
+[[impact]]
+name = "CLI commands and options"
+# The snapshot changes exactly when a command, option or help line does.
+paths = ["tests/unit/fixtures/cli_tree.txt"]
+docs = ["README.md"]
+note = "The full CLI reference (cli.md) is on hle.world. Update it in that repo and put its PR in `Docs-Impact:`."
+
+[[impact]]
+name = "Credential and config handling"
+paths = ["src/hle_client/config.py", "src/hle_client/credentials.py", "src/hle_client/ops/agents.py"]
+docs = ["README.md"]
+note = "Key formats, env vars and config file paths appear in the README, in install.sh and in the hle.world auth/agent/env pages."
+
+[[impact]]
+name = "Installer"
+paths = ["install.sh"]
+docs = ["README.md"]
+note = "The install page on hle.world documents install.sh flags too."
+
+[[impact]]
+name = "Event stream"
+paths = ["src/hle_client/agent_logs.py", "src/hle_common/events.py"]
+docs = ["docs/events.md"]
