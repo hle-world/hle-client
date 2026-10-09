@@ -264,17 +264,22 @@ ensure_venv_support() {
     fi
 
     if [ "$(id -u)" = 0 ]; then
-        apt-get install -y "$PKG" || apt-get install -y python3-venv || true
+        AS_ROOT=""
     elif sudo -n true 2>/dev/null; then
-        info "Installing $PKG (needed for Python virtual environments)..."
-        if ! sudo -n apt-get install -y "$PKG" 2>/dev/null; then
-            sudo -n apt-get update -qq 2>/dev/null || true
-            sudo -n apt-get install -y "$PKG" || sudo -n apt-get install -y python3-venv || true
-        fi
+        AS_ROOT="sudo -n"
     else
         error "Python's venv module is unavailable (ensurepip missing). Install it and re-run:"
         error "  sudo apt install $PKG"
         exit 1
+    fi
+
+    # A fresh cloud image often has empty apt lists, so retry once after an update.
+    info "Installing $PKG (needed for Python virtual environments)..."
+    if ! $AS_ROOT apt-get install -y "$PKG" >/dev/null 2>&1; then
+        $AS_ROOT apt-get update -qq >/dev/null 2>&1 || true
+        $AS_ROOT apt-get install -y "$PKG" >/dev/null 2>&1 \
+            || $AS_ROOT apt-get install -y python3-venv >/dev/null 2>&1 \
+            || true
     fi
 
     if ! "$PYTHON" -c 'import ensurepip, venv' >/dev/null 2>&1; then

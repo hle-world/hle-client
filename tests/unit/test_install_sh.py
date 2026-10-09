@@ -177,6 +177,7 @@ def _make_fake_bin(
     apt: bool = True,
     sudo_ok: bool = False,
     venv: bool = False,
+    empty_lists: bool = False,
 ) -> tuple[dict[str, str], Path]:
     """Fake python3/apt-get/sudo/id on a scratch PATH.
 
@@ -225,8 +226,16 @@ def _make_fake_bin(
     (bindir / "sudo").chmod(0o755)
 
     if apt:
+        # With empty_lists, install fails until `apt-get update` has run, like a
+        # fresh cloud image.
+        updated = state / "updated"
+        if not empty_lists:
+            updated.write_text("")
         (bindir / "apt-get").write_text(
-            '#!/bin/sh\necho "apt-get $*" >> "$HLE_FAKE_APT_LOG"\nexit 0\n'
+            "#!/bin/sh\n"
+            'echo "apt-get $*" >> "$HLE_FAKE_APT_LOG"\n'
+            f'[ "$1" = "update" ] && : > "{updated}" && exit 0\n'
+            f'[ -f "{updated}" ]\n'
         )
         (bindir / "apt-get").chmod(0o755)
 
@@ -251,6 +260,16 @@ class TestEnsureVenvSupport:
         result = _run_ensure_venv(env)
         assert result.returncode == 0, result.stderr
         assert "apt-get install -y python3.12-venv" in apt_log.read_text()
+
+    def test_root_updates_empty_apt_lists_and_retries(self, tmp_path):
+        env, apt_log = _make_fake_bin(tmp_path, uid="0", empty_lists=True)
+        result = _run_ensure_venv(env)
+        assert result.returncode == 0, result.stderr
+        assert apt_log.read_text().splitlines() == [
+            "apt-get install -y python3.12-venv",
+            "apt-get update -qq",
+            "apt-get install -y python3.12-venv",
+        ]
 
     def test_passwordless_sudo_installs_venv_package(self, tmp_path):
         env, apt_log = _make_fake_bin(tmp_path, sudo_ok=True)
