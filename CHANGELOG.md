@@ -1,12 +1,16 @@
 # Changelog
 
-## Unreleased
+## v2610.5 — 2026-10-10
 
 ### Fixed
 
-- An agent installed as a per-user service on Linux (the default without sudo)
-  no longer stops when you log out: the installer turns on lingering when it
-  can, and otherwise warns with the exact command.
+- An agent installed over SSH as a normal user keeps running after you log
+  out. Without sudo the agent is a per-user systemd service, and Linux stops
+  those at logout unless "lingering" is on, so the tunnel went dark (502) the
+  moment the install session closed. Installing the service now turns
+  lingering on when that needs no password. Otherwise it shows a clear warning
+  with the one command to run (`sudo loginctl enable-linger <user>`), and
+  `hle daemon status` says when lingering is off.
 
 ## v2610.4 — 2026-10-09
 
