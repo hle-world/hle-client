@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Installer: on Debian/Ubuntu without python3-venv, install it automatically
+  (root or passwordless sudo) or print the exact command, instead of failing
+  mid-install.
+
 ## v2610.3 — 2026-10-08
 
 ### Fixed
