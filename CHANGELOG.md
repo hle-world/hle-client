@@ -2,15 +2,15 @@
 
 ## v2610.4 — 2026-10-09
 
-<!-- TODO: Fill in release notes before merging -->
-
-## Unreleased
-
 ### Fixed
 
-- Installer: on Debian/Ubuntu without python3-venv, install it automatically
-  (root or passwordless sudo) or print the exact command, instead of failing
-  mid-install.
+- The one-line installer works on a fresh Debian or Ubuntu server. These
+  systems ship Python without `ensurepip` (it lives in `python3.X-venv`), so
+  the install used to stop halfway with Python's "ensurepip is not available"
+  error. The installer now installs that package itself when it runs as root
+  or with passwordless sudo, refreshing the package lists first if needed.
+  Otherwise it stops before changing anything and prints the one command to
+  run: `sudo apt install python3.12-venv` (or your Python version).
 
 ## v2610.3 — 2026-10-08
 
