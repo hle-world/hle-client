@@ -178,3 +178,31 @@ jobs:
             -H "Authorization: Bearer ${HLE_PAT}" \
             https://api.github.com/repos/hle-world/hle-webapp/dispatches \
             -d @-
+
+  # Runs the home-lab suite (jspanos/hle-lab) against the published version. The
+  # lab waits until the version is installable from PyPI before it starts. A
+  # failed dispatch never fails a good release: it only means no lab run.
+  notify-lab:
+    name: Trigger the lab suite
+    needs: publish
+    runs-on: arc-runner-hle-client
+    container:
+      image: python:3.13-slim
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Install tools
+        run: apt-get update && apt-get install -y curl jq
+
+      - name: Dispatch to hle-lab
+        env:
+          LAB_TOKEN: ${{ secrets.HLE_LAB_DISPATCH_TOKEN }}
+        run: |
+          jq -n --arg version "$RELEASE_TAG" \
+            '{"event_type":"client-released","client_payload":{"version":$version}}' | \
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${LAB_TOKEN}" \
+            https://api.github.com/repos/jspanos/hle-lab/dispatches \
+            -d @- \
+            || echo "::warning::Lab dispatch failed; no lab run for ${RELEASE_TAG}"
