@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from click.testing import CliRunner
 
 from hle_client import service_cmd
+from hle_client.cli import main
 from hle_client.errors import HleError, UsageError
 from hle_client.service_cmd import (
     AGENT_LABEL,
@@ -771,3 +775,119 @@ class TestDuplicateScopeInstall:
         )
 
         assert not (tmp_path / "home" / ".config" / "systemd" / "user").exists()
+
+
+class TestEnsureLinger:
+    """A per-user unit dies at logout unless lingering is on.
+
+    `get.hle.world | sh` over SSH installs a per-user service as a normal user.
+    With lingering off it stopped the instant the SSH session closed, and every
+    request to the tunnel in between returned 502. The installer now turns
+    lingering on when that needs no password, and warns plainly when it cannot.
+    """
+
+    @staticmethod
+    def _fake_run(monkeypatch, *, show, enable_rc=0, sudo_rc=0, platform="linux"):
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake(cmd, **kwargs):
+            calls.append((list(cmd), kwargs))
+            # Both properties the issue requires of every call on these paths.
+            assert kwargs.get("stdin") is subprocess.DEVNULL
+            assert kwargs.get("timeout") == service_cmd._LINGER_TIMEOUT
+            if cmd[1:2] == ["show-user"]:
+                return SimpleNamespace(returncode=0, stdout=show.pop(0), stderr="")
+            if cmd[0] == "sudo":
+                return SimpleNamespace(returncode=sudo_rc, stdout="", stderr="")
+            return SimpleNamespace(returncode=enable_rc, stdout="", stderr="")
+
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: platform)
+        monkeypatch.setattr(service_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(service_cmd.subprocess, "run", fake)
+        return calls
+
+    @staticmethod
+    def _install(tmp_path, monkeypatch, capsys, *, user_mode, show, enable_rc=0, sudo_rc=0):
+        system_dir = tmp_path / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", system_dir)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
+        monkeypatch.setattr(
+            service_cmd, "_systemctl", lambda *a, **k: SimpleNamespace(returncode=0)
+        )
+        monkeypatch.setattr(service_cmd.getpass, "getuser", lambda: "e2e")
+        calls = TestEnsureLinger._fake_run(
+            monkeypatch, show=show, enable_rc=enable_rc, sudo_rc=sudo_rc
+        )
+        service_cmd._systemd_install(
+            label=AGENT_LABEL,
+            run_args=["agent", "run"],
+            name=None,
+            user_mode=user_mode,
+            run_as=None,
+            start=True,
+        )
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        return calls, out
+
+    def test_linger_already_on_enables_nothing(self, monkeypatch):
+        calls = self._fake_run(monkeypatch, show=["yes"])
+        assert service_cmd._ensure_linger("e2e") == "already"
+        assert [cmd[1] for cmd, _ in calls] == ["show-user"]
+
+    def test_self_linger_succeeds_without_sudo(self, monkeypatch):
+        calls = self._fake_run(monkeypatch, show=["no", "yes"])
+        assert service_cmd._ensure_linger("e2e") == "enabled"
+        assert ["sudo", "-n"] not in [cmd[:2] for cmd, _ in calls]
+
+    def test_falls_back_to_passwordless_sudo(self, monkeypatch):
+        calls = self._fake_run(monkeypatch, show=["no", "yes"], enable_rc=1, sudo_rc=0)
+        assert service_cmd._ensure_linger("e2e") == "enabled"
+        assert ["sudo", "-n"] in [cmd[:2] for cmd, _ in calls]
+
+    def test_both_failing_warns_with_the_command(self, tmp_path, monkeypatch, capsys):
+        _, out = self._install(
+            tmp_path,
+            monkeypatch,
+            capsys,
+            user_mode=True,
+            show=["no", "no"],
+            enable_rc=1,
+            sudo_rc=1,
+        )
+        assert "Warning:" in out
+        assert "sudo loginctl enable-linger e2e" in out
+
+    def test_a_successful_enable_is_reported(self, tmp_path, monkeypatch, capsys):
+        _, out = self._install(tmp_path, monkeypatch, capsys, user_mode=True, show=["no", "yes"])
+        assert "Enabled lingering for e2e" in out
+
+    def test_already_lingering_adds_nothing(self, tmp_path, monkeypatch, capsys):
+        _, out = self._install(tmp_path, monkeypatch, capsys, user_mode=True, show=["yes"])
+        assert "enable-linger" not in out
+        assert "Enabled lingering" not in out
+
+    def test_system_mode_never_touches_linger(self, tmp_path, monkeypatch, capsys):
+        calls, _ = self._install(tmp_path, monkeypatch, capsys, user_mode=False, show=[])
+        assert calls == []
+
+    def test_non_linux_makes_no_loginctl_calls(self, monkeypatch):
+        calls = self._fake_run(monkeypatch, show=[], platform="darwin")
+        assert service_cmd._ensure_linger("e2e") == "failed"
+        assert calls == []
+
+
+class TestStatusWarnsAboutLingering:
+    def test_a_user_unit_with_linger_off_says_so(self):
+        with (
+            patch("hle_client.service_cmd._require_supported", return_value="linux"),
+            patch("hle_client.service_cmd.resolve_user_mode", return_value=True),
+            patch("hle_client.service_cmd._linger_state", return_value="no"),
+            patch("hle_client.service_cmd.getpass.getuser", return_value="e2e"),
+            patch("hle_client.ops.daemon.status", new_callable=AsyncMock),
+        ):
+            result = CliRunner().invoke(main, ["daemon", "status", "ha", "--user"])
+        assert result.exit_code == 0, result.output
+        out = " ".join(_ANSI.sub("", result.output).split())
+        assert "sudo loginctl enable-linger e2e" in out
