@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- An agent installed as a per-user service on Linux (the default without sudo)
+  no longer stops when you log out: the installer turns on lingering when it
+  can, and otherwise warns with the exact command.
+
 ## v2610.4 — 2026-10-09
 
 ### Fixed

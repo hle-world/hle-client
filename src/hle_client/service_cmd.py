@@ -583,6 +583,69 @@ def _same_agent(existing_unit: str, new_unit: str) -> bool | None:
     return None
 
 
+# `loginctl` may ask polkit for authorization, so every call gets no terminal
+# and a hard deadline: an install that blocks on a password prompt nobody can
+# answer is worse than one that gives up and warns.
+_LINGER_TIMEOUT = 10
+
+
+def _linger_state(user: str) -> str:
+    """``loginctl``'s ``Linger`` value for *user*, or ``""`` when it cannot be read.
+
+    Empty on anything but Linux, or without ``loginctl``, so callers can tell
+    "not lingering" from "cannot ask" only where it matters.
+    """
+    if current_platform() != "linux" or shutil.which("loginctl") is None:
+        return ""
+    try:
+        result = subprocess.run(  # noqa: S603 — argv built internally
+            ["loginctl", "show-user", user, "-p", "Linger", "--value"],
+            check=False,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=_LINGER_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip()
+
+
+def _ensure_linger(user: str) -> str:
+    """Turn on systemd lingering so a per-user service survives logout.
+
+    Returns ``"already"``, ``"enabled"`` or ``"failed"``. polkit often allows a
+    user to enable lingering for themselves without a password; that is tried
+    first, then passwordless ``sudo -n``. Neither can prompt: stdin is closed
+    and each call has a deadline, so this never hangs an install waiting for a
+    password it cannot receive.
+    """
+    if _linger_state(user) == "yes":
+        return "already"
+    if current_platform() != "linux" or shutil.which("loginctl") is None:
+        return "failed"
+    for argv in (
+        ["loginctl", "enable-linger", user],
+        ["sudo", "-n", "loginctl", "enable-linger", user],
+    ):
+        try:
+            # Output captured: a refusal ("Interactive authentication required",
+            # "a password is required") is expected here, and the caller prints
+            # one clear warning instead.
+            result = subprocess.run(  # noqa: S603 — argv built internally
+                argv,
+                check=False,
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=_LINGER_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            break
+    return "enabled" if _linger_state(user) == "yes" else "failed"
+
+
 def _systemd_install(
     *,
     label: str,
@@ -663,6 +726,24 @@ def _systemd_install(
 
     console.print(f"[green]Wrote[/green] {path}")
     _systemctl(user_mode, "daemon-reload")
+    if user_mode:
+        # A per-user unit stops the moment the user logs out unless lingering is
+        # on. Turn it on when we can do so without a password; say so loudly
+        # when we cannot, because the alternative is a tunnel that 502s the
+        # first time the install SSH session closes.
+        user = getpass.getuser()
+        linger = _ensure_linger(user)
+        if linger == "enabled":
+            console.print(
+                f"[green]Enabled lingering[/green] for {user}: the agent keeps running "
+                "after logout and starts at boot."
+            )
+        elif linger == "failed":
+            console.print(
+                f"[yellow]Warning:[/yellow] this per-user service stops when {user} "
+                f"logs out. Run: sudo loginctl enable-linger {user}  "
+                "(or reinstall with --system)"
+            )
     if start:
         result = _systemctl(user_mode, "enable", "--now", uname)
         if result.returncode == 0:
@@ -671,13 +752,6 @@ def _systemd_install(
             console.print(f"[yellow]Installed but failed to start {uname}.[/yellow]")
     else:
         console.print(f"Run: systemctl {'--user ' if user_mode else ''}enable --now {uname}")
-
-    if user_mode:
-        # Per-user units stop when the user logs out unless lingering is on.
-        console.print(
-            f"[dim]Tip: run `sudo loginctl enable-linger {getpass.getuser()}` so the "
-            f"service keeps running after logout and starts at boot.[/dim]"
-        )
 
 
 def _systemd_uninstall(*, label: str, name: str | None, user_mode: bool) -> None:
@@ -1959,10 +2033,21 @@ def status(
     """
     from hle_client.ops import daemon as ops_daemon
 
-    _require_supported()
+    plat = _require_supported()
     label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     asyncio.run(ops_daemon.status(label, name=name, user_mode=user_mode))
+
+    if user_mode and plat == "linux":
+        # "active (running)" is true and useless if the unit dies at logout.
+        # The status a per-user service is asked for is precisely the one that
+        # has to say lingering is off.
+        user = getpass.getuser()
+        if _linger_state(user) != "yes":
+            console.print(
+                f"\n[yellow]Lingering is off[/yellow] — this service stops when {user} logs out."
+            )
+            console.print(f"Fix with: [cyan]sudo loginctl enable-linger {user}[/cyan]")
 
     # A service manager reports on a process, not on whether it works. An agent
     # with no token exits immediately and is restarted forever, so "running as
