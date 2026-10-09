@@ -860,9 +860,7 @@ class TestEnsureLinger:
         assert "sudo loginctl enable-linger e2e" in out
 
     def test_a_successful_enable_is_reported(self, tmp_path, monkeypatch, capsys):
-        _, out = self._install(
-            tmp_path, monkeypatch, capsys, user_mode=True, show=["no", "yes"]
-        )
+        _, out = self._install(tmp_path, monkeypatch, capsys, user_mode=True, show=["no", "yes"])
         assert "Enabled lingering for e2e" in out
 
     def test_already_lingering_adds_nothing(self, tmp_path, monkeypatch, capsys):

@@ -629,9 +629,13 @@ def _ensure_linger(user: str) -> str:
         ["sudo", "-n", "loginctl", "enable-linger", user],
     ):
         try:
+            # Output captured: a refusal ("Interactive authentication required",
+            # "a password is required") is expected here, and the caller prints
+            # one clear warning instead.
             result = subprocess.run(  # noqa: S603 — argv built internally
                 argv,
                 check=False,
+                capture_output=True,
                 stdin=subprocess.DEVNULL,
                 timeout=_LINGER_TIMEOUT,
             )
@@ -2041,8 +2045,7 @@ def status(
         user = getpass.getuser()
         if _linger_state(user) != "yes":
             console.print(
-                f"\n[yellow]Lingering is off[/yellow] — this service stops when {user} "
-                "logs out."
+                f"\n[yellow]Lingering is off[/yellow] — this service stops when {user} logs out."
             )
             console.print(f"Fix with: [cyan]sudo loginctl enable-linger {user}[/cyan]")
 
