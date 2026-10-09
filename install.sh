@@ -244,6 +244,47 @@ pypi_latest() {
 print(json.load(urllib.request.urlopen("https://pypi.org/pypi/hle-client/json", timeout=15))["info"]["version"])' 2>/dev/null
 }
 
+# Debian and Ubuntu split ensurepip out of the base interpreter into a
+# separate python3.X-venv package, so `python3 -m venv` fails on a fresh cloud
+# image with Python's generic "ensurepip is not available" message. Install the
+# package ourselves when that needs no password, otherwise stop before touching
+# anything and print the one command that fixes it.
+ensure_venv_support() {
+    PYTHON="$1"
+    if "$PYTHON" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    PYVER=$("$PYTHON" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+    PKG="python${PYVER}-venv"
+
+    if ! command -v apt-get >/dev/null 2>&1; then
+        error "Python's venv module is unavailable (ensurepip missing). Install your distribution's python venv package and re-run."
+        exit 1
+    fi
+
+    if [ "$(id -u)" = 0 ]; then
+        apt-get install -y "$PKG" || apt-get install -y python3-venv || true
+    elif sudo -n true 2>/dev/null; then
+        info "Installing $PKG (needed for Python virtual environments)..."
+        if ! sudo -n apt-get install -y "$PKG" 2>/dev/null; then
+            sudo -n apt-get update -qq 2>/dev/null || true
+            sudo -n apt-get install -y "$PKG" || sudo -n apt-get install -y python3-venv || true
+        fi
+    else
+        error "Python's venv module is unavailable (ensurepip missing). Install it and re-run:"
+        error "  sudo apt install $PKG"
+        exit 1
+    fi
+
+    if ! "$PYTHON" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+        error "Python's venv module is still unavailable after installing $PKG. Install it and re-run:"
+        error "  sudo apt install $PKG"
+        exit 1
+    fi
+    return 0
+}
+
 # Versioned layout, so the agent can update itself and roll back:
 #
 #   $HLE_HOME/versions/<v>/   one venv per version
@@ -257,6 +298,7 @@ print(json.load(urllib.request.urlopen("https://pypi.org/pypi/hle-client/json", 
 # deleted by hand once nothing runs from it.
 install_with_venv() {
     PYTHON="$1"
+    ensure_venv_support "$PYTHON"
     HLE_HOME="${HLE_HOME:-$HOME/.local/share/hle}"
     VERSIONS_DIR="$HLE_HOME/versions"
     mkdir -p "$VERSIONS_DIR"

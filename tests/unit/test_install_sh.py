@@ -151,3 +151,121 @@ class TestLinkIntoSystemPath:
 
         assert result.returncode == 0, result.stderr
         assert os.readlink(system_bin / "hle") == str(new_target)
+
+
+def _run_ensure_venv(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    source = INSTALL_SH.read_text()
+    func = _extract_function(source, "ensure_venv_support")
+    body = (
+        'info() { printf "INFO %s\\n" "$1"; }\n'
+        'error() { printf "ERROR %s\\n" "$1" >&2; }\n'
+        'ensure_venv_support "$1"'
+    )
+    return subprocess.run(  # noqa: S603 — fixed argv, local script + scratch dir
+        ["/bin/sh", "-c", f"{func}\n{body}", "install.sh", "python3"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+
+
+def _make_fake_bin(
+    tmp_path: Path,
+    *,
+    uid: str = "1000",
+    apt: bool = True,
+    sudo_ok: bool = False,
+    venv: bool = False,
+) -> tuple[dict[str, str], Path]:
+    """Fake python3/apt-get/sudo/id on a scratch PATH.
+
+    The fake python3 fails `import ensurepip, venv` exactly once, so a
+    successful install is observable: the re-check after installing passes.
+    Returns the child env and the path to the apt log.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    mark = state / "venv-ok"
+    if venv:
+        mark.write_text("")
+    apt_log = state / "apt.log"
+
+    (bindir / "python3").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *"import ensurepip, venv"*)\n'
+        '    [ -f "$HLE_FAKE_VENV_MARK" ] && exit 0\n'
+        '    : > "$HLE_FAKE_VENV_MARK"\n'
+        "    exit 1 ;;\n"
+        '  *"sys.version_info"*) echo 3.12; exit 0 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    (bindir / "python3").chmod(0o755)
+
+    (bindir / "id").write_text(f'#!/bin/sh\n[ "$1" = "-u" ] && echo "{uid}"\nexit 0\n')
+    (bindir / "id").chmod(0o755)
+
+    (bindir / "sudo").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-n" ] && [ "$2" = "true" ]; then\n'
+        '  [ "$HLE_FAKE_SUDO_OK" = "1" ] && exit 0\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [ "$1" = "-n" ] && [ "$2" = "apt-get" ]; then\n'
+        "  shift 2\n"
+        '  echo "sudo apt-get $*" >> "$HLE_FAKE_APT_LOG"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    (bindir / "sudo").chmod(0o755)
+
+    if apt:
+        (bindir / "apt-get").write_text(
+            '#!/bin/sh\necho "apt-get $*" >> "$HLE_FAKE_APT_LOG"\nexit 0\n'
+        )
+        (bindir / "apt-get").chmod(0o755)
+
+    env = {
+        "PATH": str(bindir),
+        "HLE_FAKE_VENV_MARK": str(mark),
+        "HLE_FAKE_APT_LOG": str(apt_log),
+        "HLE_FAKE_SUDO_OK": "1" if sudo_ok else "",
+    }
+    return env, apt_log
+
+
+class TestEnsureVenvSupport:
+    def test_venv_available_makes_no_apt_call(self, tmp_path):
+        env, apt_log = _make_fake_bin(tmp_path, venv=True)
+        result = _run_ensure_venv(env)
+        assert result.returncode == 0, result.stderr
+        assert not apt_log.exists()
+
+    def test_root_installs_venv_package(self, tmp_path):
+        env, apt_log = _make_fake_bin(tmp_path, uid="0")
+        result = _run_ensure_venv(env)
+        assert result.returncode == 0, result.stderr
+        assert "apt-get install -y python3.12-venv" in apt_log.read_text()
+
+    def test_passwordless_sudo_installs_venv_package(self, tmp_path):
+        env, apt_log = _make_fake_bin(tmp_path, sudo_ok=True)
+        result = _run_ensure_venv(env)
+        assert result.returncode == 0, result.stderr
+        assert "sudo apt-get install -y python3.12-venv" in apt_log.read_text()
+
+    def test_no_sudo_exits_with_the_exact_command(self, tmp_path):
+        env, _ = _make_fake_bin(tmp_path)
+        result = _run_ensure_venv(env)
+        assert result.returncode == 1
+        assert "sudo apt install python3.12-venv" in result.stderr
+
+    def test_no_apt_get_exits(self, tmp_path):
+        env, _ = _make_fake_bin(tmp_path, apt=False)
+        result = _run_ensure_venv(env)
+        assert result.returncode == 1
+        assert "python venv package" in result.stderr
