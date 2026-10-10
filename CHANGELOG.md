@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- pfSense: the agent now starts again after a reboot. pfSense only runs
+  `rc.d/*.sh` scripts at boot, so the agent's service was never started.
+  Existing installs pick the fix up with `hle update`.
+
 ## v2610.5 — 2026-10-10
 
 ### Fixed
