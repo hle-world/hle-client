@@ -750,7 +750,12 @@ def _systemd_install(
                 "(or reinstall with --system)"
             )
     if start:
-        result = _systemctl(user_mode, "enable", "--now", uname)
+        # `enable --now` is a no-op on a unit that is already running, so a
+        # refresh left the old process (and the old code) serving traffic until
+        # the next reboot. `restart` also starts a stopped unit, so a fresh
+        # install behaves the same while a reinstall picks up the new file.
+        _systemctl(user_mode, "enable", uname)
+        result = _systemctl(user_mode, "restart", uname)
         if result.returncode == 0:
             console.print(f"[green]Started[/green] {uname}")
         else:
@@ -957,6 +962,11 @@ def _launchd_install(
         _launchctl("unload", str(path))
         result = _launchctl("load", "-w", str(path))
         if result.returncode == 0:
+            # `load` on an already-loaded job is a no-op, so a refresh could
+            # leave the old process (and its old code) running. `kickstart -k`
+            # restarts it, so the newly written plist is what actually runs.
+            domain = f"gui/{os.getuid()}" if user_mode else "system"
+            _launchctl("kickstart", "-k", f"{domain}/{plabel}")
             console.print(f"[green]Loaded[/green] {plabel}")
         else:
             console.print(f"[yellow]Wrote plist but failed to load {plabel}.[/yellow]")
@@ -1325,7 +1335,12 @@ def _rcd_install(
     else:
         _sysrc(f"{svc}_enable=YES")
     if start:
-        result = _service_cmd(svc, "start")
+        # `service <svc> start` is a no-op when it is already running, so a
+        # refresh left the previous release serving. Restart a running service
+        # so it picks up the rebuilt script; start a stopped one (a fresh
+        # install) as before.
+        action = "restart" if _rcd_running(svc) else "start"
+        result = _service_cmd(svc, action)
         if result.returncode == 0 and _rcd_settles(svc):
             console.print(f"[green]Started[/green] {svc}")
         else:

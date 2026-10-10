@@ -25,6 +25,11 @@ console = Console()
 
 _PACKAGE = "hle-client"
 
+# How long the new client gets to rebuild and restart one service. The work is
+# a file write and a `systemctl`/`service`/`launchctl` call, so 120s is well
+# past generous; it exists so a wedged rebuild cannot hang `hle update`.
+_REFRESH_TIMEOUT = 120
+
 # Install-method identifiers.
 PIPX = "pipx"
 UV = "uv"
@@ -414,6 +419,46 @@ def _agent_services(services: list[tuple[str, bool]]) -> bool:
     return False
 
 
+def _new_client_exec(home: Path | None, new_version: str | None) -> str | None:
+    """``current/bin/hle`` when the upgrade repointed it at a different release.
+
+    The service file must be rebuilt by the *new* client, not the process
+    running the upgrade: the old code would stamp its own ``__version__`` and
+    write the old service format, so a fix to that format in release N would
+    not apply to anyone updating to N. ``current`` already points at the new
+    version, so running it from here is the new code.
+    """
+    if home is None or not new_version or new_version == __version__:
+        return None
+    from hle_client.agent_update import current_exec_path
+
+    exe = current_exec_path(home)
+    return str(exe) if exe.exists() else None
+
+
+def _refresh_with_new_client(executable: str, svc: str) -> str | None:
+    """Rebuild one service by running the just-installed client.
+
+    Returns ``"refreshed"``/``"failed"`` from the child's exit code, or ``None``
+    when the new binary could not be started at all — the caller then rebuilds
+    in-process rather than claim a result it never saw.
+    """
+    argv = [executable, "daemon", "refresh", svc]
+    try:
+        result = subprocess.run(  # noqa: S603 — argv built internally
+            argv,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=_REFRESH_TIMEOUT,
+        )
+    except OSError:
+        return None
+    except subprocess.SubprocessError:
+        return "failed"
+    return "refreshed" if result.returncode == 0 else "failed"
+
+
 def _restart_services(
     ctx: click.Context, *, yes: bool, home: Path | None, new_version: str | None
 ) -> None:
@@ -459,6 +504,12 @@ def _restart_services(
             home, UpdateState(LOCAL_REQUEST_ID, __version__, new_version, time.time())
         )
 
+    # Where the upgrade installed a side-by-side version, rebuild through the
+    # new binary: it stamps the new version and writes the new service format,
+    # which the old code cannot do for itself. pipx, Homebrew and plain-pip
+    # installs have no such layout, so they keep the in-process path.
+    new_hle = _new_client_exec(home, new_version)
+
     failed = []
     needs_root = False
     for svc, user_mode in services:
@@ -466,7 +517,9 @@ def _restart_services(
         # Rebuild, not just restart. The service file records the path the
         # previous client lived at, and an upgrade can move it — a restart
         # then faithfully re-runs a command that is no longer there.
-        outcome = refresh_service(svc, user_mode)
+        outcome = _refresh_with_new_client(new_hle, svc) if new_hle else None
+        if outcome is None:
+            outcome = refresh_service(svc, user_mode)
         if outcome == "refreshed":
             console.print(f"  [green]rebuilt and started[/green] {svc} ({scope})")
         elif outcome == "restarted":

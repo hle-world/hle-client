@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `hle update` and re-running the installer now restart the agent onto the new
+  version. Before, the service file was rewritten but an already-running agent
+  kept running the previous release until the next reboot, and service fixes in
+  a new release only applied after a second `hle daemon refresh`.
+
 ## v2610.6 — 2026-10-10
 
 ### Fixed

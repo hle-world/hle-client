@@ -199,6 +199,9 @@ class TestHleUpdateVersioned:
             patch("hle_client.service_cmd.service_spec", return_value=spec),
             patch("hle_client.service_cmd.refresh_service", return_value="refreshed") as refresh,
         ):
+            # `subprocess.run` here is the new client's `daemon refresh`, not the
+            # in-place pip upgrade (that goes through agent_update._run).
+            in_place.return_value.returncode = 0
             result = runner.invoke(main, ["update", *args])
         return result, in_place, refresh
 
@@ -207,13 +210,17 @@ class TestHleUpdateVersioned:
         pip = FakePip()
         result, in_place, refresh = self._run(home, pip=pip, services=[("hle-ha.service", False)])
         assert result.exit_code == 0, result.output
-        in_place.assert_not_called()  # the running venv is never pip-upgraded
+        # The running venv is never pip-upgraded; the new client rebuilds the
+        # unit, so the service format it writes is the one that ships.
+        assert [c.args[0] for c in in_place.call_args_list] == [
+            [str(home / "current" / "bin" / "hle"), "daemon", "refresh", "hle-ha.service"]
+        ]
         assert current_version(home) == NEW
         assert (home / PREVIOUS_FILE).read_text().strip() == OLD
         assert [c for c in pip.calls if c[1:4] == ["-m", "pip", "install"]][0][-1] == (
             f"hle-client=={NEW}"
         )
-        refresh.assert_called_once_with("hle-ha.service", False)
+        refresh.assert_not_called()
         assert f"Updated to {NEW}" in plain(result.output)
         # No agent among the services: no watchdog to arm.
         assert read_update_state(home) is None

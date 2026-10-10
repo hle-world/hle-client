@@ -284,3 +284,46 @@ class TestPfSenseBootHook:
         self._install(tmp_path, monkeypatch, pfsense=True)
         monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
         assert service_cmd.installed_services() == [("hle_agent", False)]
+
+
+class TestRcdInstallRestartsARunningService:
+    """`service <svc> start` is a no-op on a running service.
+
+    So a refresh rewrote the script and left the previous release running.
+    Restart when it is up; start when it is not (a fresh install).
+    """
+
+    class _Result:
+        def __init__(self, returncode: int = 0) -> None:
+            self.returncode = returncode
+
+    def _install(self, tmp_path, monkeypatch, *, running: bool) -> list[tuple[str, ...]]:
+        calls: list[tuple[str, ...]] = []
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/local/bin/hle")
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: False)
+        monkeypatch.setattr(service_cmd, "_sysrc", lambda *a: None)
+        monkeypatch.setattr(service_cmd, "_rcd_running", lambda svc: running)
+        monkeypatch.setattr(service_cmd, "_rcd_settles", lambda svc, **k: True)
+        monkeypatch.setattr(
+            service_cmd, "_service_cmd", lambda *a: calls.append(a) or self._Result(0)
+        )
+        service_cmd._rcd_install(
+            label="agent",
+            run_args=build_agent_args(),
+            name=None,
+            run_as=None,
+            start=True,
+        )
+        return calls
+
+    def test_a_running_service_is_restarted(self, tmp_path, monkeypatch):
+        calls = self._install(tmp_path, monkeypatch, running=True)
+        assert ("hle_agent", "restart") in calls
+        assert ("hle_agent", "start") not in calls
+
+    def test_a_stopped_service_is_started(self, tmp_path, monkeypatch):
+        calls = self._install(tmp_path, monkeypatch, running=False)
+        assert ("hle_agent", "start") in calls
+        assert ("hle_agent", "restart") not in calls
+
