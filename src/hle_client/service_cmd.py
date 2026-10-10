@@ -1210,6 +1210,26 @@ def _service_cmd(*args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(["service", *args], check=False)  # noqa: S603 — argv built internally
 
 
+def _rcd_restart_outside_session(svc: str) -> subprocess.CompletedProcess[bytes]:
+    """``service <svc> restart`` in its own session, with no terminal attached.
+
+    On a firewall the agent usually carries the tunnel the operator reached the
+    box through. Stopping it drops their session, and a restart that belongs to
+    that session is hung up between the stop and the start — leaving the agent
+    down and the box unreachable (see ``restart_service``). A new session and no
+    inherited stdio means the hangup, and a closed pipe, cannot reach it; it
+    still runs to completion so the exit code is real.
+    """
+    return subprocess.run(  # noqa: S603 — argv built internally
+        ["service", svc, "restart"],
+        check=False,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _sysrc(assignment: str, *flags: str) -> subprocess.CompletedProcess[bytes]:
     """Run sysrc, with any extra ``flags`` placed before the assignment.
 
@@ -1339,8 +1359,10 @@ def _rcd_install(
         # refresh left the previous release serving. Restart a running service
         # so it picks up the rebuilt script; start a stopped one (a fresh
         # install) as before.
-        action = "restart" if _rcd_running(svc) else "start"
-        result = _service_cmd(svc, action)
+        if _rcd_running(svc):
+            result = _rcd_restart_outside_session(svc)
+        else:
+            result = _service_cmd(svc, "start")
         if result.returncode == 0 and _rcd_settles(svc):
             console.print(f"[green]Started[/green] {svc}")
         else:

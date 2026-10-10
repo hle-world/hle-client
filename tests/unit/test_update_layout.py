@@ -213,7 +213,14 @@ class TestHleUpdateVersioned:
         # The running venv is never pip-upgraded; the new client rebuilds the
         # unit, so the service format it writes is the one that ships.
         assert [c.args[0] for c in in_place.call_args_list] == [
-            [str(home / "current" / "bin" / "hle"), "daemon", "refresh", "hle-ha.service"]
+            [
+                str(home / "current" / "bin" / "hle"),
+                "daemon",
+                "refresh",
+                "hle-ha.service",
+                "--name",
+                "hle-ha.service",
+            ]
         ]
         assert current_version(home) == NEW
         assert (home / PREVIOUS_FILE).read_text().strip() == OLD

@@ -7,6 +7,7 @@ covered here rather than discovered on a firewall.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -276,6 +277,7 @@ class TestPfSenseBootHook:
         monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
         monkeypatch.setattr(service_cmd, "_service_cmd", lambda *a: _Result(0))
         monkeypatch.setattr(service_cmd, "_rcd_settles", lambda *a, **k: True)
+        monkeypatch.setattr(service_cmd, "_rcd_running", lambda svc: False)
         assert service_cmd.refresh_service("hle_agent", False) == "refreshed"
         assert hook.exists()
         assert "hle_agent" in hook.read_text()
@@ -308,6 +310,11 @@ class TestRcdInstallRestartsARunningService:
         monkeypatch.setattr(
             service_cmd, "_service_cmd", lambda *a: calls.append(a) or self._Result(0)
         )
+        monkeypatch.setattr(
+            service_cmd,
+            "_rcd_restart_outside_session",
+            lambda svc: calls.append((svc, "restart")) or self._Result(0),
+        )
         service_cmd._rcd_install(
             label="agent",
             run_args=build_agent_args(),
@@ -327,3 +334,19 @@ class TestRcdInstallRestartsARunningService:
         assert ("hle_agent", "start") in calls
         assert ("hle_agent", "restart") not in calls
 
+    def test_the_restart_cannot_be_hung_up_with_the_callers_session(self, monkeypatch):
+        # Stopping the agent can drop the operator's session; a restart tied to
+        # it would die between stop and start and leave the firewall unreachable.
+        seen: dict[str, object] = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            seen.update(kwargs)
+            return self._Result(0)
+
+        monkeypatch.setattr(service_cmd.subprocess, "run", fake_run)
+        service_cmd._rcd_restart_outside_session("hle_agent")
+        assert seen["argv"] == ["service", "hle_agent", "restart"]
+        assert seen["start_new_session"] is True
+        for stream in ("stdin", "stdout", "stderr"):
+            assert seen[stream] is subprocess.DEVNULL

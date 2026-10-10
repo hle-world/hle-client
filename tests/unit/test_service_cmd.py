@@ -931,9 +931,7 @@ class TestSystemdInstallRestartsARunningService:
         assert ("restart", "hle-ha.service") in args
         # `enable --now` is the no-op this replaces.
         assert not any("--now" in a for a in args)
-        assert args.index(("enable", "hle-ha.service")) < args.index(
-            ("restart", "hle-ha.service")
-        )
+        assert args.index(("enable", "hle-ha.service")) < args.index(("restart", "hle-ha.service"))
         assert "Started" in " ".join(_ANSI.sub("", capsys.readouterr().out).split())
 
 
@@ -976,4 +974,3 @@ class TestLaunchdInstallRestartsARunningService:
     def test_a_system_daemon_is_kickstarted_in_the_system_domain(self, tmp_path, monkeypatch):
         calls = self._install(tmp_path, monkeypatch, user_mode=False)
         assert calls[-1] == ("kickstart", "-k", "system/world.hle.agent")
-
