@@ -2,10 +2,6 @@
 
 ## v2610.6 — 2026-10-10
 
-<!-- TODO: Fill in release notes before merging -->
-
-## Unreleased
-
 ### Fixed
 
 - pfSense: the agent now starts again after a reboot. pfSense only runs
