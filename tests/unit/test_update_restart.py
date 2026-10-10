@@ -9,11 +9,17 @@ gap open until somebody acted on it.
 from __future__ import annotations
 
 import re
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import click
+import pytest
 from click.testing import CliRunner
 
+from hle_client import update_cmd
 from hle_client.cli import main
+from hle_client.errors import HleError
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -191,3 +197,95 @@ class TestUpgradeIsVerified:
         out = plain(result.output)
         assert "Updated to 9999.1" in out
         assert "is not installed" not in out
+
+
+class TestRefreshRunsTheNewClient:
+    """The rebuild must be done by the new binary, not the process upgrading.
+
+    The old code stamps its own ``__version__`` and writes the old service
+    format, so a service-format fix in release N never reaches someone updating
+    to N. With a side-by-side layout ``current/bin/hle`` is the new code and can
+    do the rebuild correctly.
+    """
+
+    def _layout(self, tmp_path):
+        exe = tmp_path / "hle" / "current" / "bin" / "hle"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!fake\n")
+        return tmp_path / "hle", exe
+
+    def _restart(self, home, services, *, run=None, scope=None):
+        ctx = click.Context(click.Command("update"))
+        with (
+            patch("hle_client.update_cmd.subprocess.run") as mock_run,
+            patch("hle_client.service_cmd.installed_services", return_value=list(services)),
+            patch(
+                "hle_client.service_cmd.service_spec",
+                return_value={"run_args": ["tunnel", "create"]},
+            ),
+            patch("hle_client.service_cmd.installed_scope", return_value=scope),
+            patch("hle_client.service_cmd.refresh_service", return_value="refreshed") as refresh,
+        ):
+            if run is None:
+                mock_run.return_value.returncode = 0
+            else:
+                mock_run.side_effect = run
+            update_cmd._restart_services(ctx, yes=True, home=home, new_version="9999.1")
+        return mock_run, refresh
+
+    def test_each_service_is_refreshed_by_the_new_binary(self, tmp_path):
+        home, exe = self._layout(tmp_path)
+        services = [("hle-agent.service", False), ("hle_ha", True)]
+        mock_run, refresh = self._restart(home, services)
+        assert [c.args[0] for c in mock_run.call_args_list] == [
+            [str(exe), "daemon", "refresh", "hle-agent.service", "--name", "hle-agent.service"],
+            [str(exe), "daemon", "refresh", "hle_ha", "--name", "hle_ha"],
+        ]
+        # The old process never rebuilds anything on this path.
+        refresh.assert_not_called()
+
+    def test_exit_code_zero_is_reported_as_rebuilt(self, tmp_path, capsys):
+        home, _ = self._layout(tmp_path)
+        self._restart(home, [("hle-agent.service", False)])
+        out = plain(capsys.readouterr().out)
+        assert "rebuilt and started" in out
+
+    def test_a_nonzero_exit_is_reported_as_failed(self, tmp_path, capsys):
+        home, _ = self._layout(tmp_path)
+        run = [SimpleNamespace(returncode=1, stdout=b"Error: could not write the unit\n")]
+        with pytest.raises(HleError, match="still on the old"):
+            self._restart(home, [("hle-agent.service", False)], run=run)
+        out = plain(capsys.readouterr().out)
+        assert "failed" in out
+        assert "rebuilt and started" not in out
+        # The child's output was captured; on a failure it is the evidence.
+        assert "could not write the unit" in out
+
+    def test_a_timeout_is_reported_as_failed_not_retried(self, tmp_path):
+        home, _ = self._layout(tmp_path)
+        run = [subprocess.TimeoutExpired(cmd="hle", timeout=120)]
+        with pytest.raises(HleError):
+            self._restart(home, [("hle-agent.service", False)], run=run)
+
+    def test_a_duplicate_in_the_other_scope_is_rebuilt_in_process(self, tmp_path):
+        # `daemon refresh` picks a scope itself; when it would pick the other
+        # copy, the in-process path rebuilds this one in its own scope.
+        home, _ = self._layout(tmp_path)
+        mock_run, refresh = self._restart(home, [("hle-agent.service", True)], scope=False)
+        mock_run.assert_not_called()
+        refresh.assert_called_once_with("hle-agent.service", True)
+
+    def test_without_a_layout_it_refreshes_in_process(self, tmp_path):
+        home, exe = self._layout(tmp_path)
+        exe.unlink()  # no current/bin/hle: no layout to run
+        mock_run, refresh = self._restart(home, [("hle-agent.service", False)])
+        mock_run.assert_not_called()
+        refresh.assert_called_once_with("hle-agent.service", False)
+
+    def test_a_new_binary_that_will_not_start_falls_back(self, tmp_path):
+        home, _ = self._layout(tmp_path)
+        mock_run, refresh = self._restart(
+            home, [("hle-agent.service", False)], run=[FileNotFoundError()]
+        )
+        mock_run.assert_called_once()
+        refresh.assert_called_once_with("hle-agent.service", False)

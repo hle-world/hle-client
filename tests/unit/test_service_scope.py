@@ -103,6 +103,30 @@ class TestRefreshRespectsScope:
         refresh.assert_not_called()
 
 
+class TestRefreshByInstalledName:
+    """`hle update` runs the new client as `daemon refresh SVC --name SVC`,
+    with SVC exactly as `installed_services` reported it. That has to land on
+    the same service on every platform — an rc.d name read back as a label
+    became `hle_hle_agent`, which is not installed."""
+
+    def test_the_update_argv_targets_the_installed_service(self):
+        for plat, svc in (
+            ("linux", "hle-agent.service"),
+            ("darwin", "world.hle.agent"),
+            ("freebsd", "hle_agent"),
+        ):
+            with (
+                patch.object(service_cmd, "_require_supported", return_value=plat),
+                patch.object(service_cmd, "current_platform", return_value=plat),
+                patch.object(service_cmd, "installed_scope", return_value=False) as scope,
+                patch.object(service_cmd, "refresh_service", return_value="refreshed") as refresh,
+            ):
+                result = CliRunner().invoke(main, ["daemon", "refresh", svc, "--name", svc])
+            assert result.exit_code == 0, (plat, result.output)
+            scope.assert_called_once_with(svc)
+            refresh.assert_called_once_with(svc, False)
+
+
 class TestLaunchdListsBothScopes:
     def _dirs(self, tmp_path: Path):
         agents = tmp_path / "LaunchAgents"
