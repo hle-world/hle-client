@@ -750,7 +750,12 @@ def _systemd_install(
                 "(or reinstall with --system)"
             )
     if start:
-        result = _systemctl(user_mode, "enable", "--now", uname)
+        # `enable --now` is a no-op on a unit that is already running, so a
+        # refresh left the old process (and the old code) serving traffic until
+        # the next reboot. `restart` also starts a stopped unit, so a fresh
+        # install behaves the same while a reinstall picks up the new file.
+        _systemctl(user_mode, "enable", uname)
+        result = _systemctl(user_mode, "restart", uname)
         if result.returncode == 0:
             console.print(f"[green]Started[/green] {uname}")
         else:
@@ -957,6 +962,11 @@ def _launchd_install(
         _launchctl("unload", str(path))
         result = _launchctl("load", "-w", str(path))
         if result.returncode == 0:
+            # `load` on an already-loaded job is a no-op, so a refresh could
+            # leave the old process (and its old code) running. `kickstart -k`
+            # restarts it, so the newly written plist is what actually runs.
+            domain = f"gui/{os.getuid()}" if user_mode else "system"
+            _launchctl("kickstart", "-k", f"{domain}/{plabel}")
             console.print(f"[green]Loaded[/green] {plabel}")
         else:
             console.print(f"[yellow]Wrote plist but failed to load {plabel}.[/yellow]")
@@ -1200,6 +1210,26 @@ def _service_cmd(*args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(["service", *args], check=False)  # noqa: S603 — argv built internally
 
 
+def _rcd_restart_outside_session(svc: str) -> subprocess.CompletedProcess[bytes]:
+    """``service <svc> restart`` in its own session, with no terminal attached.
+
+    On a firewall the agent usually carries the tunnel the operator reached the
+    box through. Stopping it drops their session, and a restart that belongs to
+    that session is hung up between the stop and the start — leaving the agent
+    down and the box unreachable (see ``restart_service``). A new session and no
+    inherited stdio means the hangup, and a closed pipe, cannot reach it; it
+    still runs to completion so the exit code is real.
+    """
+    return subprocess.run(  # noqa: S603 — argv built internally
+        ["service", svc, "restart"],
+        check=False,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _sysrc(assignment: str, *flags: str) -> subprocess.CompletedProcess[bytes]:
     """Run sysrc, with any extra ``flags`` placed before the assignment.
 
@@ -1325,7 +1355,14 @@ def _rcd_install(
     else:
         _sysrc(f"{svc}_enable=YES")
     if start:
-        result = _service_cmd(svc, "start")
+        # `service <svc> start` is a no-op when it is already running, so a
+        # refresh left the previous release serving. Restart a running service
+        # so it picks up the rebuilt script; start a stopped one (a fresh
+        # install) as before.
+        if _rcd_running(svc):
+            result = _rcd_restart_outside_session(svc)
+        else:
+            result = _service_cmd(svc, "start")
         if result.returncode == 0 and _rcd_settles(svc):
             console.print(f"[green]Started[/green] {svc}")
         else:
