@@ -1338,6 +1338,9 @@ def _rcd_install(
 def _rcd_uninstall(*, label: str, name: str | None) -> None:
     svc = rc_service_name(label, name)
     _service_cmd(svc, "stop")
+    # Installs before the pfSense boot hook set the flag in rc.conf, so clear
+    # both places on pfSense.
+    _sysrc(f"-x {svc}_enable")
     if is_pfsense():
         _sysrc(f"-x {svc}_enable", "-f", str(_RC_CONF_LOCAL))
         hook = _rcd_path(f"{svc}.sh")
@@ -1346,8 +1349,6 @@ def _rcd_uninstall(*, label: str, name: str | None) -> None:
         except PermissionError:
             raise HleError(f"Permission denied removing {hook}.", hint="Re-run as root.") from None
         console.print(f"[green]Removed[/green] {hook}")
-    else:
-        _sysrc(f"-x {svc}_enable")
     path = _rcd_path(svc)
     try:
         path.unlink(missing_ok=True)
