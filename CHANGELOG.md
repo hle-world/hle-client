@@ -2,16 +2,16 @@
 
 ## v2610.7 — 2026-10-10
 
-<!-- TODO: Fill in release notes before merging -->
-
-## Unreleased
-
 ### Fixed
 
 - `hle update` and re-running the installer now restart the agent onto the new
   version. Before, the service file was rewritten but an already-running agent
   kept running the previous release until the next reboot, and service fixes in
   a new release only applied after a second `hle daemon refresh`.
+- The update is carried out by the client you are updating *from*, so this fix
+  takes effect from your next update onwards. Updating from 2610.6 or older,
+  finish with `hle daemon restart --all` (and on pfSense, `hle daemon refresh
+  --agent` once, which adds the boot hook from 2610.6).
 
 ## v2610.6 — 2026-10-10
 
