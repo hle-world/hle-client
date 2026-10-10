@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -891,3 +892,85 @@ class TestStatusWarnsAboutLingering:
         assert result.exit_code == 0, result.output
         out = " ".join(_ANSI.sub("", result.output).split())
         assert "sudo loginctl enable-linger e2e" in out
+
+
+class TestSystemdInstallRestartsARunningService:
+    """A reinstall must restart, not silently no-op on a running unit.
+
+    `systemctl enable --now <unit>` does nothing to a unit that is already
+    running, so `hle update` and the installer re-run rewrote the unit and left
+    the old process — and its old code — serving traffic until the next reboot.
+    """
+
+    def _install(self, tmp_path, monkeypatch, *, user_mode):
+        calls: list[tuple[bool, tuple[str, ...]]] = []
+
+        def fake(user_mode_arg, *args):
+            calls.append((user_mode_arg, args))
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "_unit_path_in_other_scope", lambda *a: None)
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
+        monkeypatch.setattr(service_cmd, "_systemctl", fake)
+        monkeypatch.setattr(service_cmd.getpass, "getuser", lambda: "u")
+        service_cmd._systemd_install(
+            label="ha",
+            run_args=["tunnel", "create", "ha", "http://localhost:8123"],
+            name=None,
+            user_mode=user_mode,
+            run_as=None,
+            start=True,
+        )
+        return calls
+
+    def test_it_enables_then_restarts(self, tmp_path, monkeypatch, capsys):
+        calls = self._install(tmp_path, monkeypatch, user_mode=False)
+        args = [a for _, a in calls]
+        assert ("enable", "hle-ha.service") in args
+        assert ("restart", "hle-ha.service") in args
+        # `enable --now` is the no-op this replaces.
+        assert not any("--now" in a for a in args)
+        assert args.index(("enable", "hle-ha.service")) < args.index(("restart", "hle-ha.service"))
+        assert "Started" in " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+
+
+class TestLaunchdInstallRestartsARunningService:
+    """`launchctl load` on an already-loaded job does not restart it.
+
+    The install unloads first, but a job loaded under a definition launchctl no
+    longer matches can survive that; `kickstart -k` restarts whatever is
+    running so the freshly written plist is what actually executes.
+    """
+
+    def _install(self, tmp_path, monkeypatch, *, user_mode):
+        calls: list[tuple[str, ...]] = []
+
+        def fake(*args):
+            calls.append(args)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(service_cmd, "_launchd_dir", lambda user_mode: tmp_path)
+        monkeypatch.setattr(service_cmd, "_launchd_log_dir", lambda user_mode: str(tmp_path))
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
+        monkeypatch.setattr(service_cmd, "_launchctl", fake)
+        monkeypatch.setattr(service_cmd.getpass, "getuser", lambda: "u")
+        service_cmd._launchd_install(
+            label="agent",
+            run_args=["agent", "run"],
+            name=None,
+            user_mode=user_mode,
+            run_as=None,
+            start=True,
+        )
+        return calls
+
+    def test_a_user_agent_is_kickstarted_after_load(self, tmp_path, monkeypatch):
+        calls = self._install(tmp_path, monkeypatch, user_mode=True)
+        assert [c[0] for c in calls] == ["unload", "load", "kickstart"]
+        assert calls[1][:2] == ("load", "-w")
+        assert calls[2] == ("kickstart", "-k", f"gui/{os.getuid()}/world.hle.agent")
+
+    def test_a_system_daemon_is_kickstarted_in_the_system_domain(self, tmp_path, monkeypatch):
+        calls = self._install(tmp_path, monkeypatch, user_mode=False)
+        assert calls[-1] == ("kickstart", "-k", "system/world.hle.agent")
