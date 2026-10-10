@@ -59,6 +59,11 @@ _SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 _LAUNCHD_LABEL_PREFIX = "world.hle"
 # FreeBSD keeps ports/packages rc scripts here, separate from base system rc.d.
 _RCD_DIR = Path("/usr/local/etc/rc.d")
+# pfSense marks itself here; its content starts with "pfSense". OPNsense and
+# plain FreeBSD either lack the file or name a different platform.
+_PLATFORM_FILE = Path("/etc/platform")
+# pfSense keeps local service settings here, not in the global rc.conf.
+_RC_CONF_LOCAL = Path("/etc/rc.conf.local")
 
 # Label used for the agent's unit/plist when the user doesn't override it.
 AGENT_LABEL = "agent"
@@ -1048,6 +1053,21 @@ def _launchd_list(*, user_mode: bool | None) -> None:
 # --------------------------------------------------------------------------- #
 # rc.d backend (FreeBSD, pfSense, OPNsense)
 # --------------------------------------------------------------------------- #
+def is_pfsense() -> bool:
+    """Whether this is pfSense rather than plain FreeBSD or OPNsense.
+
+    pfSense ships ``/etc/platform`` with content starting ``pfSense``. It
+    matters here because pfSense does not run rcorder over package rc.d
+    scripts at boot — it runs only ``rc.d/*.sh`` — so the rc.d service needs a
+    shell wrapper to ever start. OPNsense and FreeBSD run the rc.d script
+    itself and are left alone.
+    """
+    try:
+        return _PLATFORM_FILE.read_text(errors="replace").startswith("pfSense")
+    except OSError:
+        return False
+
+
 def rc_service_name(label: str, name: str | None = None) -> str:
     """rc.d script name for a label.
 
@@ -1159,12 +1179,36 @@ def _rcd_path(svc: str) -> Path:
     return _RCD_DIR / svc
 
 
+def render_pfsense_boot_hook(svc: str) -> str:
+    """The ``/usr/local/etc/rc.d/<svc>.sh`` wrapper pfSense runs at boot.
+
+    pfSense does not run rcorder for package rc.d scripts: it runs only
+    ``rc.d/*.sh``, each with ``start``. The rc.d script stays the real service;
+    this wrapper exists only to hand the boot call to it.
+    """
+    return (
+        "#!/bin/sh\n"
+        "# pfSense runs only rc.d/*.sh at boot; hand off to the rc.d service.\n"
+        'case "$1" in\n'
+        f'  start|stop|restart) exec {_rcd_path(svc)} "$1" ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+
+
 def _service_cmd(*args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(["service", *args], check=False)  # noqa: S603 — argv built internally
 
 
-def _sysrc(assignment: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["sysrc", assignment], check=False)  # noqa: S603 — argv built internally
+def _sysrc(assignment: str, *flags: str) -> subprocess.CompletedProcess[bytes]:
+    """Run sysrc, with any extra ``flags`` placed before the assignment.
+
+    pfSense passes ``-f /etc/rc.conf.local`` here: it keeps local service
+    settings in that file and rewrites the global rc.conf.
+    """
+    return subprocess.run(  # noqa: S603 — argv built internally
+        ["sysrc", *flags, assignment], check=False
+    )
 
 
 def _rcd_running(svc: str) -> bool:
@@ -1263,7 +1307,23 @@ def _rcd_install(
         ) from None
 
     console.print(f"[green]Wrote[/green] {path}")
-    _sysrc(f"{svc}_enable=YES")
+    if is_pfsense():
+        # pfSense never runs the rc.d script itself at boot — only rc.d/*.sh.
+        # Without the hook the agent is installed, enabled and never started.
+        hook = _rcd_path(f"{svc}.sh")
+        try:
+            _write_service_file(hook, render_pfsense_boot_hook(svc), private=False, mode=0o755)
+        except PermissionError:
+            raise HleError(
+                f"Permission denied writing {hook}.",
+                hint="Re-run as root (rc.d has no per-user services).",
+            ) from None
+        console.print(f"[green]Wrote[/green] {hook} (pfSense boot hook)")
+        # pfSense rewrites the global rc.conf, so the enable flag belongs in
+        # rc.conf.local or it does not survive the next config change.
+        _sysrc(f"{svc}_enable=YES", "-f", str(_RC_CONF_LOCAL))
+    else:
+        _sysrc(f"{svc}_enable=YES")
     if start:
         result = _service_cmd(svc, "start")
         if result.returncode == 0 and _rcd_settles(svc):
@@ -1278,7 +1338,17 @@ def _rcd_install(
 def _rcd_uninstall(*, label: str, name: str | None) -> None:
     svc = rc_service_name(label, name)
     _service_cmd(svc, "stop")
+    # Installs before the pfSense boot hook set the flag in rc.conf, so clear
+    # both places on pfSense.
     _sysrc(f"-x {svc}_enable")
+    if is_pfsense():
+        _sysrc(f"-x {svc}_enable", "-f", str(_RC_CONF_LOCAL))
+        hook = _rcd_path(f"{svc}.sh")
+        try:
+            hook.unlink(missing_ok=True)
+        except PermissionError:
+            raise HleError(f"Permission denied removing {hook}.", hint="Re-run as root.") from None
+        console.print(f"[green]Removed[/green] {hook}")
     path = _rcd_path(svc)
     try:
         path.unlink(missing_ok=True)
@@ -1292,11 +1362,21 @@ def _rcd_status(*, label: str, name: str | None) -> None:
     _service_cmd(svc, "status")
 
 
+def _rcd_scripts() -> list[Path]:
+    """Installed rc.d service scripts, excluding pfSense's ``.sh`` boot hooks.
+
+    The hook is a companion to a service, not a service: counting it as one
+    would make ``hle daemon list`` and ``hle update`` try to refresh and
+    restart a shell wrapper that carries no spec.
+    """
+    return [p for p in _RCD_DIR.glob("hle_*") if p.suffix != ".sh"]
+
+
 def _rcd_list() -> None:
     if not _RCD_DIR.exists():
         console.print("No hle services installed.")
         return
-    found = sorted(p.name for p in _RCD_DIR.glob("hle_*"))
+    found = sorted(p.name for p in _rcd_scripts())
     if not found:
         console.print("No hle services installed.")
         return
@@ -1323,7 +1403,7 @@ def installed_services() -> list[tuple[str, bool]]:
     if plat == "freebsd":
         if not _RCD_DIR.exists():
             return []
-        return sorted((p.name, False) for p in _RCD_DIR.glob("hle_*"))
+        return sorted((p.name, False) for p in _rcd_scripts())
     if plat == "darwin":
         # From the plists, not `launchctl list`: that only answers for the
         # calling session's domain, and reported everything as system scope,
