@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `hle agent enroll --name NAME` enrolls this machine using the account key you're
+  logged in with: no dashboard trip. The agent gets its own tunnel-scoped key. The
+  installer accepts `--agent --name NAME` too. Needs HLE server v2610.17 or newer.
+
 ## v2610.7 — 2026-10-10
 
 ### Fixed
