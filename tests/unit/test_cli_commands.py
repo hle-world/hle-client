@@ -497,11 +497,80 @@ class TestAgentCli:
         assert "elsewhere.toml" in result.output
         assert "~/.config/hle/agent.toml" not in result.output
 
-    def test_enroll_rejects_bad_token(self) -> None:
+    def test_enroll_rejects_bad_token(self, tmp_path, monkeypatch) -> None:
+        self._agent_cfg(tmp_path, monkeypatch)
         runner = CliRunner()
         result = runner.invoke(main, ["agent", "enroll", "hle_notanagent"])
         assert result.exit_code == 1
         assert "Invalid agent token" in result.output
+
+    def _agent_cfg(self, tmp_path: Path, monkeypatch, *, token: str | None = None) -> Path:
+        cfg = tmp_path / "agent.toml"
+        if token is not None:
+            cfg.write_text(f'token = "{token}"\n')
+        monkeypatch.setenv("HLE_AGENT_CONFIG", str(cfg))
+        monkeypatch.delenv("HLE_AGENT_TOKEN", raising=False)
+        return cfg
+
+    def test_enroll_name_saves_the_token_without_echoing_it(self, tmp_path, monkeypatch) -> None:
+        cfg = self._agent_cfg(tmp_path, monkeypatch)
+        token = "hle_" + "c" * 32
+        client = AsyncMock()
+        client.enroll_agent = AsyncMock(
+            return_value={"agent_id": 7, "name": "laptop", "token": token}
+        )
+        with patch("hle_client.api.ApiClient", return_value=client), _patch_key():
+            result = CliRunner().invoke(main, ["agent", "enroll", "--name", "laptop"])
+        assert result.exit_code == 0, result.output
+        assert "Enrolled agent 'laptop' (id 7)" in result.output
+        assert "hle agent run" in result.output
+        assert token in cfg.read_text()
+        assert token not in result.output
+        client.enroll_agent.assert_awaited_once_with("laptop")
+
+    def test_enroll_token_and_name_are_mutually_exclusive(self, tmp_path, monkeypatch) -> None:
+        self._agent_cfg(tmp_path, monkeypatch)
+        result = CliRunner().invoke(
+            main, ["agent", "enroll", "hle_" + "a" * 32, "--name", "laptop"]
+        )
+        assert result.exit_code == 2
+        assert "not both" in result.output
+
+    def test_enroll_name_without_a_key_says_to_log_in(self, tmp_path, monkeypatch) -> None:
+        self._agent_cfg(tmp_path, monkeypatch)
+        monkeypatch.delenv("HLE_API_KEY", raising=False)
+        with patch("hle_client.config.load_api_key", return_value=None):
+            result = CliRunner().invoke(main, ["agent", "enroll", "--name", "laptop"])
+        assert result.exit_code == 3
+        assert "Not logged in" in result.output
+
+    def test_enroll_name_refuses_when_already_enrolled(self, tmp_path, monkeypatch) -> None:
+        self._agent_cfg(tmp_path, monkeypatch, token="hle_" + "a" * 32)
+        client = AsyncMock()
+        with patch("hle_client.api.ApiClient", return_value=client), _patch_key():
+            result = CliRunner().invoke(main, ["agent", "enroll", "--name", "laptop"])
+        assert result.exit_code == 1
+        assert "already enrolled" in result.output
+        client.enroll_agent.assert_not_called()
+
+    def test_enroll_name_force_replaces_the_token(self, tmp_path, monkeypatch) -> None:
+        cfg = self._agent_cfg(tmp_path, monkeypatch, token="hle_" + "a" * 32)
+        token = "hle_" + "d" * 32
+        client = AsyncMock()
+        client.enroll_agent = AsyncMock(
+            return_value={"agent_id": 9, "name": "laptop", "token": token}
+        )
+        with patch("hle_client.api.ApiClient", return_value=client), _patch_key():
+            result = CliRunner().invoke(main, ["agent", "enroll", "--name", "laptop", "--force"])
+        assert result.exit_code == 0, result.output
+        assert token in cfg.read_text()
+
+    def test_enroll_token_refuses_when_already_enrolled(self, tmp_path, monkeypatch) -> None:
+        cfg = self._agent_cfg(tmp_path, monkeypatch, token="hle_" + "a" * 32)
+        result = CliRunner().invoke(main, ["agent", "enroll", "hle_" + "b" * 32])
+        assert result.exit_code == 1
+        assert "already enrolled" in result.output
+        assert "hle_" + "b" * 32 not in cfg.read_text()
 
     def test_status_no_token(self, tmp_path: Path) -> None:
         """ "No token" is the answer, not a failure — exit 0, like `auth status`.

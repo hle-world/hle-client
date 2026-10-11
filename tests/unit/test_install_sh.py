@@ -12,6 +12,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 INSTALL_SH = Path(__file__).resolve().parents[2] / "install.sh"
 
 
@@ -288,3 +290,97 @@ class TestEnsureVenvSupport:
         result = _run_ensure_venv(env)
         assert result.returncode == 1
         assert "python venv package" in result.stderr
+
+
+def _run_parse(*args: str) -> subprocess.CompletedProcess[str]:
+    source = INSTALL_SH.read_text()
+    funcs = "\n\n".join(
+        _extract_function(source, name) for name in ("validate_agent_name", "parse_args")
+    )
+    body = (
+        "usage() { :; }\n"
+        'parse_args "$@"\n'
+        'printf "AGENT=%s NAME=%s SET=%s TOKEN=%s\\n" '
+        '"$AGENT" "$AGENT_NAME" "$AGENT_NAME_SET" "$AGENT_TOKEN"'
+    )
+    return subprocess.run(  # noqa: S603 — fixed argv, local script
+        ["sh", "-c", f"{funcs}\n{body}", "install.sh", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+class TestAgentNameArg:
+    """`--name NAME` parses like the other flags and is validated before use."""
+
+    def test_name_implies_agent(self):
+        result = _run_parse("--name", "laptop")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "AGENT=1 NAME=laptop SET=1 TOKEN=\n"
+
+    def test_name_equals_form(self):
+        result = _run_parse("--name=laptop")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "AGENT=1 NAME=laptop SET=1 TOKEN=\n"
+
+    def test_without_name_nothing_is_set(self):
+        result = _run_parse("--agent")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "AGENT=1 NAME= SET=0 TOKEN=\n"
+
+    @pytest.mark.parametrize("value", ["", "   ", "x" * 101])
+    def test_blank_whitespace_or_overlong_names_are_refused(self, value):
+        result = _run_parse("--name", value)
+        assert result.returncode == 1
+        assert "Invalid agent name" in result.stderr
+
+    def test_token_and_name_together_are_refused(self):
+        result = _run_parse("--token", "hle_x", "--name", "laptop")
+        assert result.returncode == 1
+        assert "not both" in result.stderr
+
+
+def _run_agent_enroll(
+    tmp_path: Path, *, name: str = "laptop", enrolled: bool = False
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    log = tmp_path / "hle.log"
+    source = INSTALL_SH.read_text()
+    funcs = _extract_function(source, "agent_enroll")
+    body = (
+        "info() { :; }\n"
+        "warn() { :; }\n"
+        "has_tty() { return 1; }\n"
+        f"LOG='{log}'\n"
+        "hle() {\n"
+        '    echo "$@" >> "$LOG"\n'
+        '    if [ "$1" = "agent" ] && [ "$2" = "status" ]; then\n'
+        f"        return {0 if enrolled else 1}\n"
+        "    fi\n"
+        "    return 0\n"
+        "}\n"
+        "AGENT_TOKEN=''\n"
+        f"AGENT_NAME='{name}'\n"
+        "agent_enroll\n"
+    )
+    result = subprocess.run(  # noqa: S603 — fixed argv, local script
+        ["sh", "-c", f"{funcs}\n{body}", "install.sh"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    logged = log.read_text() if log.exists() else ""
+    return result, logged
+
+
+class TestAgentEnrollName:
+    def test_name_runs_enroll_with_the_name(self, tmp_path):
+        result, logged = _run_agent_enroll(tmp_path, name="laptop")
+        assert result.returncode == 0, result.stderr
+        assert "agent enroll --name laptop" in logged
+        assert "--token" not in logged
+
+    def test_already_enrolled_keeps_the_token_and_does_not_enroll(self, tmp_path):
+        result, logged = _run_agent_enroll(tmp_path, name="laptop", enrolled=True)
+        assert result.returncode == 0, result.stderr
+        assert logged.strip() == "agent status"

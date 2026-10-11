@@ -11,6 +11,8 @@ hle agent  [group]  hidden=False  help='Run a multi-tunnel agent controlled from
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent enroll  [command]  hidden=True  help='Save an agent enrollment token. Now: hle auth login --agent-token.'
     argument token                        name=token type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
+    option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --force                      name=force type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle agent list  [command]  hidden=False  help="List the agents on your account, and whether they're online."
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=HLE_API_KEY default_set=False hidden=False

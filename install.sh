@@ -8,6 +8,9 @@
 #   # Install the agent and run it as a service (prompts for the token):
 #   curl -fsSL https://get.hle.world | sh -s -- --agent
 #
+#   # Enroll with the account key this machine is logged in with:
+#   curl -fsSL https://get.hle.world | sh -s -- --agent --name laptop
+#
 #   # Fully unattended (CI, cloud-init, Ansible):
 #   curl -fsSL https://get.hle.world | sh -s -- --agent --token hle_xxxxx
 set -e
@@ -19,6 +22,8 @@ MIN_PYTHON_MINOR=11
 
 AGENT=0
 AGENT_TOKEN=""
+AGENT_NAME=""
+AGENT_NAME_SET=0
 INSTALL_SERVICE=1
 SERVICE_SCOPE=""   # "", "--user", or "--system"; empty lets the CLI auto-detect
 SYSTEM_LINK=""     # set when hle was linked into a directory already on PATH
@@ -34,6 +39,9 @@ Options:
   --agent           Enroll this machine as an HLE agent and run it as a service
   --token <token>   Agent token (hle_...) from the dashboard; implies --agent.
                     Without it, --agent prompts on the terminal.
+  --name <name>     With --agent: enroll using your saved account key, naming
+                    the agent <name>; implies --agent. Mutually exclusive with
+                    --token. Needs no terminal prompt.
   --no-service      With --agent: enroll only, don't install a service
   --no-modify-path  Don't add ~/.local/bin to your shell's PATH
   --reinstall       Rebuild from scratch instead of upgrading in place
@@ -45,23 +53,50 @@ Without --agent this installs the CLI only, exactly as before.
 EOF
 }
 
+# An agent name is matched by the server: non-blank and at most 100 characters.
+validate_agent_name() {
+    [ -n "$1" ] || return 1
+    [ "${#1}" -le 100 ] || return 1
+    [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ] || return 1
+    return 0
+}
+
 # Parse arguments
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --version) VERSION="$2"; shift 2 ;;
-        --version=*) VERSION="${1#*=}"; shift ;;
-        --agent) AGENT=1; shift ;;
-        --token) AGENT_TOKEN="$2"; AGENT=1; shift 2 ;;
-        --token=*) AGENT_TOKEN="${1#*=}"; AGENT=1; shift ;;
-        --no-service) INSTALL_SERVICE=0; shift ;;
-        --no-modify-path) MODIFY_PATH=0; shift ;;
-        --reinstall) REINSTALL=1; shift ;;
-        --user) SERVICE_SCOPE="--user"; shift ;;
-        --system) SERVICE_SCOPE="--system"; shift ;;
-        -h|--help) usage; exit 0 ;;
-        *) echo "Unknown option: $1"; usage; exit 1 ;;
-    esac
-done
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --version) VERSION="$2"; shift 2 ;;
+            --version=*) VERSION="${1#*=}"; shift ;;
+            --agent) AGENT=1; shift ;;
+            --token) AGENT_TOKEN="$2"; AGENT=1; shift 2 ;;
+            --token=*) AGENT_TOKEN="${1#*=}"; AGENT=1; shift ;;
+            --name) AGENT_NAME="$2"; AGENT_NAME_SET=1; AGENT=1; shift 2 ;;
+            --name=*) AGENT_NAME="${1#*=}"; AGENT_NAME_SET=1; AGENT=1; shift ;;
+            --no-service) INSTALL_SERVICE=0; shift ;;
+            --no-modify-path) MODIFY_PATH=0; shift ;;
+            --reinstall) REINSTALL=1; shift ;;
+            --user) SERVICE_SCOPE="--user"; shift ;;
+            --system) SERVICE_SCOPE="--system"; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) echo "Unknown option: $1"; usage; exit 1 ;;
+        esac
+    done
+
+    if [ "$AGENT_NAME_SET" -eq 1 ]; then
+        if [ -n "$AGENT_TOKEN" ]; then
+            echo "Pass either --token or --name, not both" >&2
+            usage
+            exit 1
+        fi
+        if ! validate_agent_name "$AGENT_NAME"; then
+            echo "Invalid agent name: '$AGENT_NAME'" >&2
+            usage
+            exit 1
+        fi
+    fi
+}
+
+parse_args "$@"
 
 if [ -n "$VERSION" ]; then
     INSTALL_SPEC="${PACKAGE}==${VERSION}"
@@ -481,6 +516,14 @@ agent_enroll() {
     # against a new one abandons the agent identity the dashboard knows.
     if hle agent status >/dev/null 2>&1; then
         info "This machine is already enrolled — keeping its existing agent token."
+        return 0
+    fi
+
+    # --name borrows the account key the machine is logged in with, so there is
+    # nothing to prompt for. If it is not logged in, `hle agent enroll --name`
+    # says so and fails, which is the message we want.
+    if [ -n "$AGENT_NAME" ]; then
+        hle agent enroll --name "$AGENT_NAME" || return 1
         return 0
     fi
 
