@@ -554,9 +554,14 @@ class AgentClient:
             update_cap = update_capability(support.method) if support.supported else None
             if update_cap is not None:
                 capabilities.append(update_cap)
-                # Stage B is only useful to an install that can be swapped at
-                # all: the successor runs from the newly staged version. Without
-                # the capability the relay keeps issuing Stage A updates.
+            # `handover` says the relay may treat this process as one that can
+            # take over (or hand over) a running identity. For a self-updatable
+            # install it enables Stage B, where the successor runs from the
+            # newly staged version, so it is tied to `update_cap`. A handover
+            # group needs it for successor admission instead: a Kubernetes
+            # operator pod is replaced by the Deployment, not by a self-update,
+            # so it advertises handover even though it cannot swap itself.
+            if update_cap is not None or self._handover_group is not None:
                 capabilities.append(HANDOVER_CAPABILITY)
             capabilities.append(CAPABILITY_FRAGMENTATION)
             hello = AgentHello(
