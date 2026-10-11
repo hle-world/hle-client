@@ -1,5 +1,9 @@
 # Changelog
 
+## v2610.8 — 2026-10-11
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## Unreleased
 
 ### Added
