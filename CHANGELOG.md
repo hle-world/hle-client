@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Kubernetes operator: an agent-mode pod now advertises handover, so a rolling upgrade or `kubectl rollout restart` hands the tunnels to the new pod instead of wedging with 'token already in use'.
+
 ## v2610.8 — 2026-10-11
 
 ### Added
