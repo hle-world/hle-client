@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2610.9 — 2026-10-11
 
 ### Fixed
 
