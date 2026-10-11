@@ -80,6 +80,33 @@ class TestApiClientMethods:
             result = await client.delete_access_rule("app-x7k", 1)
         assert result["message"] == "ok"
 
+    async def test_enroll_agent_posts_the_name(self, client: ApiClient) -> None:
+        token = "hle_" + "a" * 32
+        mock_response = httpx.Response(
+            201,
+            json={"agent_id": 3, "name": "laptop", "token": token},
+            request=httpx.Request("POST", "https://hle.world/api/agents/enroll"),
+        )
+        with patch(
+            "httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response
+        ) as post:
+            result = await client.enroll_agent("laptop")
+        assert result == {"agent_id": 3, "name": "laptop", "token": token}
+        assert post.await_args.args[0] == "https://hle.world/api/agents/enroll"
+        assert post.await_args.kwargs["json"] == {"name": "laptop"}
+
+    async def test_enroll_agent_error_propagation(self, client: ApiClient) -> None:
+        mock_response = httpx.Response(
+            409,
+            json={"detail": "Agent 'laptop' already exists"},
+            request=httpx.Request("POST", "https://hle.world/api/agents/enroll"),
+        )
+        with (
+            patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await client.enroll_agent("laptop")
+
     async def test_error_propagation_401(self, client: ApiClient) -> None:
         mock_response = httpx.Response(
             401,
