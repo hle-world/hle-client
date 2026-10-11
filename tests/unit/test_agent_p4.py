@@ -10,7 +10,9 @@ from dataclasses import replace
 import pytest
 
 from hle_client.agent import AgentClient, handover_group_from_env
+from hle_client.agent_update import UpdateSupport
 from hle_common.agent_protocol import (
+    HANDOVER_CAPABILITY,
     AllowedUser,
     DeclaredAccess,
     DeclaredEndpoint,
@@ -215,13 +217,17 @@ class TestEndpointStatuses:
 
 
 class TestHandoverGroup:
-    async def _hello(self, monkeypatch) -> dict:
+    async def _hello(self, monkeypatch, support: UpdateSupport | None = None) -> dict:
         import hle_client.agent as agent_mod
 
         ws = _FakeWs(_WELCOME)
         monkeypatch.setattr(agent_mod.websockets, "connect", lambda *a, **k: ws)
         monkeypatch.setattr(agent_mod, "active_providers", list)
-        client = AgentClient("hlea_test", tunnel_factory=FakeTunnel)
+        client = AgentClient(
+            "hlea_test",
+            tunnel_factory=FakeTunnel,
+            support_probe=(lambda: support) if support is not None else None,
+        )
 
         async def no_discovery(_ws) -> None:
             return None
@@ -237,6 +243,26 @@ class TestHandoverGroup:
     async def test_unset_is_null(self, monkeypatch):
         monkeypatch.delenv("HLE_HANDOVER_GROUP", raising=False)
         assert (await self._hello(monkeypatch))["handover_group"] is None
+
+    async def test_a_group_advertises_handover_without_self_update(self, monkeypatch):
+        # The operator's container pip install cannot self-update, but the
+        # Deployment replaces the pod, so the new pod must still advertise
+        # handover or every rollout wedges with "token already in use".
+        monkeypatch.setenv("HLE_HANDOVER_GROUP", "hle/hle-operator")
+        unsupported = UpdateSupport(False, "pip", "unsupported:pip")
+        hello = await self._hello(monkeypatch, support=unsupported)
+        assert HANDOVER_CAPABILITY in hello["capabilities"]
+
+    async def test_no_group_and_no_self_update_omits_handover(self, monkeypatch):
+        monkeypatch.delenv("HLE_HANDOVER_GROUP", raising=False)
+        unsupported = UpdateSupport(False, "pip", "unsupported:pip")
+        hello = await self._hello(monkeypatch, support=unsupported)
+        assert HANDOVER_CAPABILITY not in hello["capabilities"]
+
+    async def test_self_update_still_advertises_handover(self, monkeypatch):
+        monkeypatch.delenv("HLE_HANDOVER_GROUP", raising=False)
+        hello = await self._hello(monkeypatch, support=UpdateSupport(True, "venv"))
+        assert HANDOVER_CAPABILITY in hello["capabilities"]
 
     @pytest.mark.parametrize("value", ["Hle/Op", "-lead", "trail-", "has space", "x" * 129, "a/b!"])
     def test_invalid_is_unset_with_one_warning(self, value, caplog):
