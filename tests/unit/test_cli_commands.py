@@ -572,6 +572,17 @@ class TestAgentCli:
         assert "already enrolled" in result.output
         assert "hle_" + "b" * 32 not in cfg.read_text()
 
+    def test_login_agent_token_refuses_then_force_replaces(self, tmp_path, monkeypatch) -> None:
+        cfg = self._agent_cfg(tmp_path, monkeypatch, token="hle_" + "a" * 32)
+        new = "hle_" + "b" * 32
+        result = CliRunner().invoke(main, ["auth", "login", "--agent-token", new])
+        assert result.exit_code == 1
+        assert "already enrolled" in result.output
+        assert new not in cfg.read_text()
+        result = CliRunner().invoke(main, ["auth", "login", "--agent-token", new, "--force"])
+        assert result.exit_code == 0, result.output
+        assert new in cfg.read_text()
+
     def test_status_no_token(self, tmp_path: Path) -> None:
         """ "No token" is the answer, not a failure — exit 0, like `auth status`.
 

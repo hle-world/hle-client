@@ -506,7 +506,9 @@ refresh_existing_services() {
 # It is never written to disk by this script, nor echoed back.
 agent_enroll() {
     if [ -n "$AGENT_TOKEN" ]; then
-        hle agent enroll "$AGENT_TOKEN" || return 1
+        # --force: an explicit --token on a re-run replaces the saved one, as it
+        # always did; `hle agent enroll` now refuses to overwrite without it.
+        hle agent enroll --force "$AGENT_TOKEN" || return 1
         return 0
     fi
 

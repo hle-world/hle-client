@@ -368,8 +368,13 @@ def auth() -> None:
     flag_value="",
     help="Agent enrollment token to save instead. Alone, prompts for it.",
 )
+@click.option(
+    "--force", is_flag=True, default=False, help="With --agent-token: replace an existing token."
+)
 @click.pass_context
-def login(ctx: click.Context, api_key: str | None, agent_token: str | None = None) -> None:
+def login(
+    ctx: click.Context, api_key: str | None, agent_token: str | None = None, force: bool = False
+) -> None:
     """Save a credential for this machine.
 
     One place to put a credential, whichever kind you were given. An agent
@@ -385,7 +390,7 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
       hle auth login --agent-token          Same, pasting the token at a prompt
     """
     if agent_token is not None:
-        _save_agent_token(ctx, agent_token or None)
+        _save_agent_token(ctx, agent_token or None, force=force)
         return
 
     if api_key is None:

@@ -40,6 +40,7 @@ hle auth  [group]  hidden=False  help='Manage API key authentication.'
 hle auth login  [command]  hidden=False  help='Save a credential for this machine.'
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --agent-token                name=agent_token type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
+    option   --force                      name=force type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle auth logout  [command]  hidden=False  help='Remove the saved API key from ~/.config/hle/config.toml.'
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False

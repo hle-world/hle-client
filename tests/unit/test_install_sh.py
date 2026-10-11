@@ -299,6 +299,7 @@ def _run_parse(*args: str) -> subprocess.CompletedProcess[str]:
     )
     body = (
         "usage() { :; }\n"
+        "AGENT=0; AGENT_TOKEN=''; AGENT_NAME=''; AGENT_NAME_SET=0\n"
         'parse_args "$@"\n'
         'printf "AGENT=%s NAME=%s SET=%s TOKEN=%s\\n" '
         '"$AGENT" "$AGENT_NAME" "$AGENT_NAME_SET" "$AGENT_TOKEN"'
@@ -371,6 +372,25 @@ def _run_agent_enroll(
     )
     logged = log.read_text() if log.exists() else ""
     return result, logged
+
+
+class TestAgentEnrollToken:
+    def test_token_rerun_passes_force_so_it_still_replaces(self, tmp_path):
+        log = tmp_path / "hle.log"
+        funcs = _extract_function(INSTALL_SH.read_text(), "agent_enroll")
+        body = (
+            f"LOG='{log}'\n"
+            'hle() { echo "$@" >> "$LOG"; }\n'
+            "AGENT_TOKEN='hle_tok'\nAGENT_NAME=''\nagent_enroll\n"
+        )
+        result = subprocess.run(  # noqa: S603 — fixed argv, local script
+            ["sh", "-c", f"{funcs}\n{body}", "install.sh"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert log.read_text().strip() == "agent enroll --force hle_tok"
 
 
 class TestAgentEnrollName:
