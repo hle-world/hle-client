@@ -374,23 +374,39 @@ def _run_agent_enroll(
     return result, logged
 
 
+def _run_token_enroll(tmp_path: Path, *, client_has_force: bool) -> tuple[int, str, str]:
+    log = tmp_path / "hle.log"
+    funcs = _extract_function(INSTALL_SH.read_text(), "agent_enroll")
+    help_text = "--name TEXT  --force" if client_has_force else "--name TEXT"
+    body = (
+        f"LOG='{log}'\n"
+        "hle() {\n"
+        '    if [ "$3" = "--help" ]; then echo "' + help_text + '"; return 0; fi\n'
+        '    echo "$@" >> "$LOG"\n'
+        "}\n"
+        "AGENT_TOKEN='hle_tok'\nAGENT_NAME=''\nagent_enroll\n"
+    )
+    result = subprocess.run(  # noqa: S603 — fixed argv, local script
+        ["sh", "-c", f"{funcs}\n{body}", "install.sh"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stderr, log.read_text().strip()
+
+
 class TestAgentEnrollToken:
     def test_token_rerun_passes_force_so_it_still_replaces(self, tmp_path):
-        log = tmp_path / "hle.log"
-        funcs = _extract_function(INSTALL_SH.read_text(), "agent_enroll")
-        body = (
-            f"LOG='{log}'\n"
-            'hle() { echo "$@" >> "$LOG"; }\n'
-            "AGENT_TOKEN='hle_tok'\nAGENT_NAME=''\nagent_enroll\n"
-        )
-        result = subprocess.run(  # noqa: S603 — fixed argv, local script
-            ["sh", "-c", f"{funcs}\n{body}", "install.sh"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert result.returncode == 0, result.stderr
-        assert log.read_text().strip() == "agent enroll --force hle_tok"
+        code, err, logged = _run_token_enroll(tmp_path, client_has_force=True)
+        assert code == 0, err
+        assert logged == "agent enroll --force hle_tok"
+
+    def test_an_older_pinned_client_without_force_still_enrolls(self, tmp_path):
+        # `--version` can install a client that predates --force; passing it
+        # there would fail the whole install with "no such option".
+        code, err, logged = _run_token_enroll(tmp_path, client_has_force=False)
+        assert code == 0, err
+        assert logged == "agent enroll hle_tok"
 
 
 class TestAgentEnrollName:
