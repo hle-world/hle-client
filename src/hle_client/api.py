@@ -169,6 +169,22 @@ class ApiClient:
             result: list[dict[str, Any]] = resp.json()
             return result
 
+    async def enroll_agent(self, name: str) -> dict[str, Any]:
+        """Enroll a new agent on the account, returning its id, name and token.
+
+        The token comes back exactly once, at creation. It is not stored here;
+        the caller writes it where this machine keeps its agent credential.
+        """
+        async with self._client_ctx() as client:
+            resp = await client.post(
+                f"{self._base_url}/api/agents/enroll",
+                headers=self._headers,
+                json={"name": name},
+            )
+            resp.raise_for_status()
+            result: dict[str, Any] = resp.json()
+            return result
+
     async def list_access_rules(self, subdomain: str) -> list[dict[str, Any]]:
         """List access rules for a subdomain."""
         async with self._client_ctx() as client:

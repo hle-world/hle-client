@@ -368,8 +368,13 @@ def auth() -> None:
     flag_value="",
     help="Agent enrollment token to save instead. Alone, prompts for it.",
 )
+@click.option(
+    "--force", is_flag=True, default=False, help="With --agent-token: replace an existing token."
+)
 @click.pass_context
-def login(ctx: click.Context, api_key: str | None, agent_token: str | None = None) -> None:
+def login(
+    ctx: click.Context, api_key: str | None, agent_token: str | None = None, force: bool = False
+) -> None:
     """Save a credential for this machine.
 
     One place to put a credential, whichever kind you were given. An agent
@@ -385,7 +390,7 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
       hle auth login --agent-token          Same, pasting the token at a prompt
     """
     if agent_token is not None:
-        _save_agent_token(ctx, agent_token or None)
+        _save_agent_token(ctx, agent_token or None, force=force)
         return
 
     if api_key is None:
@@ -401,8 +406,25 @@ def login(ctx: click.Context, api_key: str | None, agent_token: str | None = Non
     console.print("[green]Saved[/green] to ~/.config/hle/config.toml")
 
 
-def _save_agent_token(ctx: click.Context, token: str | None) -> None:
+_ALREADY_ENROLLED = (
+    "This machine is already enrolled as an agent. "
+    "Pass --force to replace the saved token, or run 'hle agent logout' first."
+)
+_NOT_LOGGED_IN = (
+    "Not logged in — run `hle auth login` first, or enroll with a token "
+    "from Connections → Agents → New"
+)
+
+
+def _refuse_if_enrolled(force: bool) -> None:
+    """Refuse to replace an existing agent token unless ``--force`` was given."""
+    if not force and config.load_agent_token():
+        raise HleError(_ALREADY_ENROLLED)
+
+
+def _save_agent_token(ctx: click.Context, token: str | None, *, force: bool = False) -> None:
     """Validate and save an agent enrollment token, prompting when none was given."""
+    _refuse_if_enrolled(force)
     if token is None:
         console.print(
             "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
@@ -414,6 +436,20 @@ def _save_agent_token(ctx: click.Context, token: str | None) -> None:
     console.print(f"[green]Enrolled[/green] — token saved to {saved}")
     console.print(
         "Start the agent with: [cyan]hle agent run[/cyan]  (or: hle daemon install agent)"
+    )
+
+
+def _enroll_with_name(ctx: click.Context, name: str, *, force: bool = False) -> None:
+    """Enroll this machine from the account key — no dashboard token needed."""
+    _refuse_if_enrolled(force)
+    if not resolve_api_key(ctx):
+        raise AuthError(_NOT_LOGGED_IN)
+
+    enrolled = asyncio.run(ops_agents.enroll_named(api(ctx), name))
+    console.print(
+        f"[green]Enrolled agent[/green] '{enrolled.name}' (id {enrolled.agent_id}). "
+        "Start it with: [cyan]hle agent run[/cyan]   "
+        "(or as a service: hle daemon install agent)"
     )
 
 
@@ -612,10 +648,22 @@ def agent() -> None:
 # takes it as an option, so it cannot simply resolve to the same command.
 @agent.command(hidden=True)
 @click.argument("token", required=False)
+@click.option(
+    "--name",
+    default=None,
+    help="Enroll using the account key you're logged in with, naming the agent. "
+    "Needs --force to replace an existing token.",
+)
+@click.option("--force", is_flag=True, default=False, help="Replace an existing agent token.")
 @click.pass_context
-def enroll(ctx: click.Context, token: str | None) -> None:
+def enroll(ctx: click.Context, token: str | None, name: str | None, force: bool) -> None:
     """Save an agent enrollment token. Now: hle auth login --agent-token."""
-    _save_agent_token(ctx, token)
+    if token is not None and name is not None:
+        raise UsageError("Pass either a TOKEN or --name, not both.")
+    if name is not None:
+        _enroll_with_name(ctx, name, force=force)
+        return
+    _save_agent_token(ctx, token, force=force)
 
 
 @agent.command()
