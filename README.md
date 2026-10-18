@@ -67,11 +67,12 @@ hle status
 ## CLI Usage
 
 The CLI has one shape: `hle <noun> <verb>`. The nouns are `tunnel`, `agent`,
-`daemon`, `forward` and `auth`, and the verbs are the same wherever they
-apply: `list`, `get`, `create`, `set`, `delete`. Older spellings (`hle expose`, <!-- docs-guard: allow cli-pre-noun-verb -->
-`hle config`, `hle service`, `hle fp`, and verbs such as `access add`, <!-- docs-guard: allow cli-pre-noun-verb -->
-`pin status`, `share revoke`, `auth-mode --set`, `daemon uninstall --label`,
-`agent enroll`) still work but are not listed in `--help`.
+`daemon`, `firepuncher` and `auth`, and the verbs are the same wherever they
+apply: `list`, `get`, `create`, `set`, `delete`. `hle fp` is a short alias for
+`hle firepuncher`. Older spellings (`hle expose`, `hle config`, `hle service`, <!-- docs-guard: allow cli-pre-noun-verb -->
+`hle forward`, and verbs such as `access add`, `pin status`, `share revoke`, <!-- docs-guard: allow cli-pre-noun-verb -->
+`auth-mode --set`, `daemon uninstall --label`, `agent enroll`) still work but
+are not listed in `--help`.
 
 Every command that reads a resource accepts `-o json`.
 
@@ -219,16 +220,16 @@ alive), and exits 1 with a one-line reason otherwise. A Kubernetes
 For an agent that survives reboots, install it as a service instead:
 `hle daemon install agent`.
 
-### `hle forward`
+### `hle firepuncher`
 
 Forward TCP ports from a remote agent to this machine, e.g. SSH into a box
-that has no public address.
+that has no public address. `hle fp` is the short alias.
 
 ```bash
-hle forward rpi 22 --port 9922        # then: ssh -p 9922 root@localhost
-hle forward nas 192.168.1.50:5432     # Postgres on the agent's LAN
-hle forward rpi 22 nas:445            # Two forwards, one command
-hle forward rpi 22 -- ssh -p '{port}' me@127.0.0.1   # Run a command, tear down on exit
+hle firepuncher rpi 22 --port 9922        # then: ssh -p 9922 root@localhost
+hle firepuncher nas 192.168.1.50:5432     # Postgres on the agent's LAN
+hle firepuncher rpi 22 nas:445            # Two forwards, one command
+hle firepuncher rpi 22 -- ssh -p '{port}' me@127.0.0.1   # Run a command, tear down on exit
 ```
 
 The first argument is the agent name (see `hle agent list`); each target is a
@@ -255,7 +256,7 @@ sudo hle daemon install tunnel prox https://192.168.2.200:8006 --zone pr.t00t.us
 sudo hle daemon install agent
 
 # A permanent forward
-hle daemon install forward rpi 22 --port 9922 --user
+hle daemon install firepuncher rpi 22 --port 9922 --user
 
 hle daemon list                     # Installed hle services, in both scopes
 hle daemon status tv                # One service's status

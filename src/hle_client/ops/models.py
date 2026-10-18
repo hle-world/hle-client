@@ -333,7 +333,7 @@ def kind_from_spec(spec: dict[str, Any] | None) -> str:
     head = args[0]
     if head == "agent":
         return "agent"
-    if head in ("fp", "forward"):
+    if head in ("fp", "forward", "firepuncher"):
         return "forward"
     if head in ("expose", "tunnel", "webhook"):
         return "tunnel"

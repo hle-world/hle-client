@@ -1,12 +1,12 @@
-"""`hle forward <agent> <target>` — the flags were arguments in disguise.
+"""`hle firepuncher <agent> <target>` — the flags were arguments in disguise.
 
 `--agent` and `--to` were both required, which is a flag you must always pass:
 an argument wearing a costume. They still work, because they are in scripts and
 unit files, but the documented form is positional now.
 
-The subtlety is the trailing command. `hle forward rpi 22 -- ssh …` puts the
-agent, the targets and the command in one bucket, and only the `--` separates
-them.
+The subtlety is the trailing command. `hle firepuncher rpi 22 -- ssh …` puts
+the agent, the targets and the command in one bucket, and only the `--`
+separates them.
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ class TestTheDocumentedExamplesParse:
         # which is exactly far enough to prove the arguments were understood,
         # and not so far that the test needs a relay.
         with patch("hle_client.config.load_api_key", return_value=None):
-            result = CliRunner().invoke(main, ["forward", *argv], env={"HLE_API_KEY": ""})
+            result = CliRunner().invoke(main, ["firepuncher", *argv], env={"HLE_API_KEY": ""})
         assert "No agent given" not in result.output
         assert "No target given" not in result.output
         assert "No API key" in result.output
