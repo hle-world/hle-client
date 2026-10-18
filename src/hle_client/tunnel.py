@@ -207,9 +207,6 @@ def to_tunnel_config(
 # Hard limits to protect against a malicious or compromised relay server.
 WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB — control-plane WebSocket message limit
 MAX_WS_STREAMS = 100
-# Chunked HTTP responses stream at most this many at once per endpoint, so a
-# single endpoint cannot reserve the whole process-wide byte budget.
-MAX_CHUNKED_STREAMS_PER_ENDPOINT = 16
 # RFC 6455: close reason is encoded in UTF-8 and limited to 123 bytes.
 _WS_CLOSE_REASON_MAX = 123
 
@@ -483,14 +480,6 @@ class Tunnel:
     _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _active_chunked: dict[str, asyncio.Task[None]] = field(
         default_factory=dict, init=False, repr=False
-    )
-    # Caps concurrent chunked streams for this endpoint (see
-    # MAX_CHUNKED_STREAMS_PER_ENDPOINT). The byte budget is process-wide; this
-    # is what stops one endpoint taking all of it.
-    _chunked_slots: asyncio.Semaphore = field(
-        default_factory=lambda: asyncio.Semaphore(MAX_CHUNKED_STREAMS_PER_ENDPOINT),
-        init=False,
-        repr=False,
     )
     _log_handler: _DiagnosticLogHandler | None = field(default=None, init=False, repr=False)
 
@@ -1139,70 +1128,67 @@ class Tunnel:
         budget = get_chunk_budget()
 
         try:
-            # One endpoint must not reserve the whole process-wide budget, so
-            # cap how many of its responses stream at once. Streams over the
-            # cap wait here rather than being failed.
-            async with self._chunked_slots:
-                stream = self._proxy.stream_http(
-                    method=req.method,
-                    path=req.path,
-                    headers=req.headers,
-                    body=body,
-                    query_string=req.query_string,
-                    budget=budget,
-                )
-                try:
-                    while True:
-                        try:
-                            status_code, resp_headers, chunk = await anext(stream)
-                        except StopAsyncIteration:
-                            break
-                        if status_code is not None:
-                            # First yield: send START. Strip + report any
-                            # synthetic upstream-error marker before it
-                            # reaches the browser.
-                            headers_out = resp_headers or {}
-                            reason = self._pop_upstream_error(headers_out)
-                            if reason is not None:
-                                self._emit_upstream_error(req, status_code, reason)
-                            start = HttpResponseStart(
-                                request_id=req.request_id,
-                                status_code=status_code,
-                                headers=headers_out,
-                            )
-                            start_msg = ProtocolMessage(
-                                type=MessageType.HTTP_RESPONSE_START,
-                                tunnel_id=self._tunnel_id,
-                                request_id=req.request_id,
-                                payload=start.model_dump(),
-                            )
-                            await ws.send(start_msg.model_dump_json())
-                        elif chunk is not None:
-                            # Body chunk. Serialise once, then drop every
-                            # intermediate copy before awaiting the send so
-                            # only the frame string is alive across it.
-                            encoded = base64.b64encode(chunk).decode("ascii")
-                            ch = HttpResponseChunk(
-                                request_id=req.request_id,
-                                chunk_index=chunk_index,
-                                data=encoded,
-                            )
-                            chunk_msg = ProtocolMessage(
-                                type=MessageType.HTTP_RESPONSE_CHUNK,
-                                tunnel_id=self._tunnel_id,
-                                request_id=req.request_id,
-                                payload=ch.model_dump(),
-                            )
-                            frame = chunk_msg.model_dump_json()
-                            del encoded, ch, chunk_msg, chunk
-                            await ws.send(frame)
-                            chunk_index += 1
-                finally:
-                    # Closing the generator releases any budget still held for
-                    # the in-flight chunk and stops the upstream read — also
-                    # when this task is cancelled.
-                    with contextlib.suppress(Exception):
-                        await stream.aclose()
+            # No cap on concurrent streams: the process-wide byte budget bounds
+            # memory, and streams over it wait (backpressure) instead of failing.
+            stream = self._proxy.stream_http(
+                method=req.method,
+                path=req.path,
+                headers=req.headers,
+                body=body,
+                query_string=req.query_string,
+                budget=budget,
+            )
+            try:
+                while True:
+                    try:
+                        status_code, resp_headers, chunk = await anext(stream)
+                    except StopAsyncIteration:
+                        break
+                    if status_code is not None:
+                        # First yield: send START. Strip + report any synthetic
+                        # upstream-error marker before it reaches the browser.
+                        headers_out = resp_headers or {}
+                        reason = self._pop_upstream_error(headers_out)
+                        if reason is not None:
+                            self._emit_upstream_error(req, status_code, reason)
+                        start = HttpResponseStart(
+                            request_id=req.request_id,
+                            status_code=status_code,
+                            headers=headers_out,
+                        )
+                        start_msg = ProtocolMessage(
+                            type=MessageType.HTTP_RESPONSE_START,
+                            tunnel_id=self._tunnel_id,
+                            request_id=req.request_id,
+                            payload=start.model_dump(),
+                        )
+                        await ws.send(start_msg.model_dump_json())
+                    elif chunk is not None:
+                        # Body chunk. Serialise once, then drop every
+                        # intermediate copy before awaiting the send so only
+                        # the frame string is alive across it.
+                        encoded = base64.b64encode(chunk).decode("ascii")
+                        ch = HttpResponseChunk(
+                            request_id=req.request_id,
+                            chunk_index=chunk_index,
+                            data=encoded,
+                        )
+                        chunk_msg = ProtocolMessage(
+                            type=MessageType.HTTP_RESPONSE_CHUNK,
+                            tunnel_id=self._tunnel_id,
+                            request_id=req.request_id,
+                            payload=ch.model_dump(),
+                        )
+                        frame = chunk_msg.model_dump_json()
+                        del encoded, ch, chunk_msg, chunk
+                        await ws.send(frame)
+                        chunk_index += 1
+            finally:
+                # Closing the generator releases any budget still held for the
+                # in-flight chunk and stops the upstream read, also when this
+                # task is cancelled.
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
 
             # Send END
             end = HttpResponseEnd(request_id=req.request_id)

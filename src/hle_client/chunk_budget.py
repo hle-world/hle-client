@@ -24,10 +24,12 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
-# 64 MiB. At 512 KiB chunks and ~4x per in-flight chunk that is roughly a
-# couple of hundred megabytes of transient copies at worst — bounded, and well
-# under the 256 MiB the operator pod used to be limited to.
-DEFAULT_CHUNK_BUDGET_BYTES = 64 * 1024 * 1024
+# 8 MiB of raw chunk bytes in flight, process-wide. A send completes once the
+# frame is in the local socket buffer (TCP handles the relay RTT), so this is
+# not a bandwidth limit: one stream still saturates a fast link. More buffering
+# would only add latency and memory. Benchmark (100 parallel downloads): peak
+# RSS growth 346 MB with no budget and 512 KiB chunks, 76 MB with this default.
+DEFAULT_CHUNK_BUDGET_BYTES = 8 * 1024 * 1024
 CHUNK_BUDGET_ENV = "HLE_CHUNK_BUDGET_BYTES"
 
 
@@ -84,10 +86,17 @@ class ChunkBudget:
         try:
             await waiter
         except BaseException:
-            # Cancelled while queued: withdraw the request. If it had already
-            # been granted the await would have returned, not raised.
-            with contextlib.suppress(ValueError):
-                self._waiters.remove((amount, waiter))
+            if waiter.done() and not waiter.cancelled():
+                # Granted, but the task was cancelled before it resumed: the
+                # bytes were already taken off the budget, so hand them back.
+                self.release(amount)
+            else:
+                # Cancelled while queued: withdraw the request.
+                with contextlib.suppress(ValueError):
+                    self._waiters.remove((amount, waiter))
+                # Our place in the queue may have been blocking smaller
+                # requests behind it.
+                self._grant_waiters()
             raise
         return amount
 

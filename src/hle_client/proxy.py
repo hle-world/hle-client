@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 # Headers to strip when forwarding HTTP requests to the local service.
 _HOP_BY_HOP_HEADERS = frozenset({"transfer-encoding", "connection", "upgrade", "accept-encoding"})
 
-# How much of the upstream body to read per chunk. The tunnel's byte budget
-# reserves the same amount before each read, so the two must agree.
-DEFAULT_HTTP_CHUNK_SIZE = 512 * 1024  # 512 KiB
+# How much of the upstream body to read per chunk. Small chunks keep per-stream
+# memory low and let streams from different tunnels interleave on the relay link.
+DEFAULT_HTTP_CHUNK_SIZE = 64 * 1024  # 64 KiB
 HTTP_CHUNK_SIZE_ENV = "HLE_HTTP_CHUNK_SIZE"
 
 
@@ -419,10 +419,11 @@ class LocalProxy:
         Subsequent yields:
             ``(None, None, chunk_bytes)`` — body segments.
 
-        When ``budget`` is given, a slot is reserved before each upstream read
-        and released once the consumer asks for the next chunk (i.e. after it
-        has sent the current one). That bounds how much is in flight across
-        every stream in the process and applies backpressure to the read.
+        When ``budget`` is given, each chunk's bytes are reserved right after
+        it is read and released once the consumer asks for the next chunk
+        (i.e. after it has sent the current one). That bounds how much is in
+        flight across every stream in the process and applies backpressure to
+        the read; idle streams hold nothing.
         """
         if not self._http_client:
             raise RuntimeError("Proxy not started — call start() first")
@@ -455,14 +456,12 @@ class LocalProxy:
                 resp_headers = _collect_response_headers(response.headers.raw)
                 yield (response.status_code, resp_headers, None)
 
-                aiter = response.aiter_bytes(chunk_size)
-                while True:
+                async for chunk in response.aiter_bytes(chunk_size):
+                    # Reserve what was actually read, after the read: an idle
+                    # stream (SSE, long-poll) then holds no budget, and a stream
+                    # waiting here reads nothing more upstream (backpressure).
                     if budget is not None:
-                        held = await budget.acquire(chunk_size)
-                    try:
-                        chunk = await anext(aiter)
-                    except StopAsyncIteration:
-                        break
+                        held = await budget.acquire(len(chunk))
                     yield (None, None, chunk)
                     # Drop this frame's raw copy before the consumer asks for
                     # the next one, so it is not held alongside the new chunk.

@@ -1,9 +1,9 @@
 """Tests for the process-wide chunked-response byte budget.
 
 The budget is what stops many concurrent downloads from growing memory without
-bound: every stream reserves bytes before reading the next upstream chunk and
-releases them once the chunk has been sent, and a stream that cannot get budget
-waits instead of failing.
+bound: every stream reserves a chunk's bytes as soon as it is read and releases
+them once the chunk has been sent, and a stream that cannot get budget waits
+(reading nothing more upstream) instead of failing.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from hle_client.chunk_budget import (
     get_chunk_budget,
     reset_chunk_budget,
 )
-from hle_client.tunnel import MAX_CHUNKED_STREAMS_PER_ENDPOINT, Tunnel, TunnelConfig
+from hle_client.tunnel import Tunnel, TunnelConfig
 from hle_common.models import ProxiedHttpRequest
 from hle_common.protocol import MessageType, ProtocolMessage
 
@@ -141,6 +141,31 @@ class TestChunkBudgetUnit:
             await waiter
         assert budget.in_flight == 1000
 
+    async def test_cancelled_after_grant_returns_budget(self):
+        """Granted, then cancelled before resuming: the bytes come back."""
+        budget = ChunkBudget(1000)
+        await budget.acquire(1000)
+        waiter = asyncio.create_task(budget.acquire(600))
+        await asyncio.sleep(0)
+        budget.release(1000)  # grants the waiter (600 reserved)...
+        waiter.cancel()  # ...but it is cancelled before it runs
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert budget.in_flight == 0
+
+    async def test_cancelled_head_waiter_unblocks_smaller_ones(self):
+        budget = ChunkBudget(1000)
+        await budget.acquire(800)
+        big = asyncio.create_task(budget.acquire(900))
+        await asyncio.sleep(0)
+        small = asyncio.create_task(budget.acquire(100))
+        await asyncio.sleep(0)
+        assert not small.done()  # FIFO: queued behind the big request
+        big.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await big
+        assert await asyncio.wait_for(small, timeout=1) == 100
+
     def test_non_positive_capacity_rejected(self):
         with pytest.raises(ValueError):
             ChunkBudget(0)
@@ -176,9 +201,6 @@ class TestChunkedResponseBudget:
 
         tunnel = _tunnel()
         tunnel._tunnel_id = "t-budget"
-        # Bypass the per-endpoint cap so the process-wide budget is the only
-        # limiter; the cap has its own test below.
-        tunnel._chunked_slots = asyncio.Semaphore(1000)
         tunnel._proxy._http_client = _FakeClient([CHUNK, CHUNK])
 
         budget = get_chunk_budget()
@@ -228,9 +250,7 @@ class TestChunkedResponseBudget:
         ws = AsyncMock()
         ws.send = AsyncMock(side_effect=send)
 
-        task = asyncio.create_task(
-            tunnel._handle_http_request_chunked(ws, _request("req-cancel"))
-        )
+        task = asyncio.create_task(tunnel._handle_http_request_chunked(ws, _request("req-cancel")))
         await asyncio.wait_for(entered.wait(), timeout=5)
         assert budget.in_flight > 0
 
@@ -238,9 +258,10 @@ class TestChunkedResponseBudget:
         await asyncio.gather(task, return_exceptions=True)
         assert budget.in_flight == 0
 
-    async def test_one_endpoint_cannot_exceed_its_stream_cap(self):
+    async def test_streams_are_not_capped_per_endpoint(self):
+        """Many long-lived streams on one endpoint all start: no connection cap."""
         tunnel = _tunnel()
-        tunnel._tunnel_id = "t-cap"
+        tunnel._tunnel_id = "t-nocap"
 
         release = asyncio.Event()
         active = 0
@@ -251,7 +272,7 @@ class TestChunkedResponseBudget:
             active += 1
             max_active = max(max_active, active)
             try:
-                yield (200, {"content-type": "text/plain"}, None)
+                yield (200, {"content-type": "text/event-stream"}, None)
                 await release.wait()
                 yield (None, None, b"payload")
             finally:
@@ -263,14 +284,48 @@ class TestChunkedResponseBudget:
             ws, _ = _mock_ws()
             await tunnel._handle_http_request_chunked(ws, _request(f"req-{index}"))
 
-        tasks = [asyncio.create_task(run_one(i)) for i in range(40)]
-        for _ in range(1000):
-            if max_active >= MAX_CHUNKED_STREAMS_PER_ENDPOINT:
+        tasks = [asyncio.create_task(run_one(i)) for i in range(200)]
+        for _ in range(2000):
+            if max_active >= 200:
                 break
             await asyncio.sleep(0)
-        assert max_active == MAX_CHUNKED_STREAMS_PER_ENDPOINT
+        assert max_active == 200
 
         release.set()
         await asyncio.gather(*tasks)
-        assert max_active == MAX_CHUNKED_STREAMS_PER_ENDPOINT
         assert active == 0
+
+    async def test_idle_streams_hold_no_budget(self, monkeypatch):
+        """An open stream waiting on upstream (SSE, long-poll) reserves nothing."""
+        monkeypatch.setenv(chunk_budget.CHUNK_BUDGET_ENV, str(1024 * 1024))
+        reset_chunk_budget()
+        budget = get_chunk_budget()
+
+        release = asyncio.Event()
+
+        class _IdleResponse(_FakeResponse):
+            async def aiter_bytes(self, chunk_size: int):
+                await release.wait()
+                yield b"late"
+
+        class _IdleClient(_FakeClient):
+            def stream(self, **kwargs: object) -> _FakeStream:
+                return _FakeStream(_IdleResponse([]))
+
+        tunnel = _tunnel()
+        tunnel._tunnel_id = "t-idle"
+        tunnel._proxy._http_client = _IdleClient([])
+
+        tasks = []
+        for i in range(50):
+            ws, _ = _mock_ws()
+            tasks.append(
+                asyncio.create_task(tunnel._handle_http_request_chunked(ws, _request(f"i-{i}")))
+            )
+        for _ in range(200):
+            await asyncio.sleep(0)
+        assert budget.in_flight == 0
+
+        release.set()
+        await asyncio.gather(*tasks)
+        assert budget.in_flight == 0
