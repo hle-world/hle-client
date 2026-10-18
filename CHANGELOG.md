@@ -1,10 +1,8 @@
 # Changelog
 
-## v2610.11 — 2026-10-18
-
-<!-- TODO: Fill in release notes before merging -->
-
 ## Unreleased
+
+## v2610.11 — 2026-10-18
 
 ### Fixed
 
