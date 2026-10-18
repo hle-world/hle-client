@@ -1,6 +1,6 @@
-"""``hle fp`` — firepuncher: forward a remote agent's TCP port to a local one.
+"""``hle firepuncher`` — forward a remote agent's TCP port to a local one.
 
-    hle fp --agent rpi --to localhost:22 --port 9922
+    hle firepuncher --agent rpi --to localhost:22 --port 9922
     ssh -p 9922 root@localhost
 
 The connection is private end to end: this client authenticates to the relay
@@ -184,7 +184,7 @@ def _split_positionals(
     targets: tuple[str, ...],
     command: tuple[str, ...],
 ) -> tuple[str | None, tuple[str, ...], tuple[str, ...]]:
-    """Read `hle forward <agent> <target>...` out of the trailing arguments.
+    """Read `hle firepuncher <agent> <target>...` out of the trailing arguments.
 
     The command already collects everything after its options so that
     ``-- ssh ...`` can be passed through untouched, which means the positional
@@ -203,7 +203,7 @@ def _split_positionals(
         leading.append(rest.pop(0))
     # `--` cannot be relied on to still be here: with ignore_unknown_options,
     # Click drops it unless the next token looks like an option, so
-    # `hle forward rpi 22 -- ssh me@host` arrives with no separator at all.
+    # `hle firepuncher rpi 22 -- ssh me@host` arrives with no separator at all.
     # A target has a recognisable shape (a bare port, or host:port); the first
     # argument that does not have it is where the command begins.
     while rest and rest[0] != "--" and _looks_like_target(rest[0]):
@@ -537,7 +537,7 @@ async def _read_loop(ws: websockets.ClientConnection, client: FpLocalClient) -> 
 
 
 @click.command(
-    "fp",
+    "firepuncher",
     context_settings={"ignore_unknown_options": True},
 )
 @click.option("--agent", default=None, help="Agent to forward through (or the first argument)")
@@ -591,14 +591,14 @@ def fp(
 
     \b
     Examples:
-      hle forward rpi 22 --port 9922        # then: ssh -p 9922 root@localhost
-      hle forward nas 192.168.1.50:5432     # postgres on the agent's LAN
-      hle forward rpi 22 nas:445            # two forwards, one command
+      hle firepuncher rpi 22 --port 9922        # then: ssh -p 9922 root@localhost
+      hle firepuncher nas 192.168.1.50:5432     # postgres on the agent's LAN
+      hle firepuncher rpi 22 nas:445            # two forwards, one command
 
     \b
     Run a command and tear the forwards down when it exits:
-      hle forward rpi 22 -- ssh -p '{port}' me@127.0.0.1
-      hle forward rpi 22 5432 -- ./backup.sh
+      hle firepuncher rpi 22 -- ssh -p '{port}' me@127.0.0.1
+      hle firepuncher rpi 22 5432 -- ./backup.sh
 
     \b
     In the command, {port} is the first local port and {port1}, {port2}, ...
@@ -613,12 +613,12 @@ def fp(
     agent, targets, command = _split_positionals(agent, targets, command)
     if not agent:
         raise click.UsageError(
-            "No agent given. Name it first: hle forward <agent> <target>\n"
+            "No agent given. Name it first: hle firepuncher <agent> <target>\n"
             "Run 'hle agent list' to see the agents on your account."
         )
     if not targets:
         raise click.UsageError(
-            f"No target given. hle forward {agent} <port|host:port>\n"
+            f"No target given. hle firepuncher {agent} <port|host:port>\n"
             "The target is a port on the agent's side, e.g. 22 or 192.168.1.50:5432."
         )
 

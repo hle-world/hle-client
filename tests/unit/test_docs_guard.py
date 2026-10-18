@@ -88,7 +88,7 @@ class TestSharedRetiredClaims:
             "hle expose --service http://localhost:8123 --label ha",
             "hle --debug expose --service http://x",
             "sudo hle service install --agent",
-            "hle fp --agent box --to 22",
+            "hle forward --agent box --to 22",
             "hle config access add ha you@example.com",
             "hle service status --agent",
             "hle config show ha",
@@ -106,7 +106,8 @@ class TestSharedRetiredClaims:
             "Open Connections → Agents → New",
             "hle tunnel create ha http://localhost:8123",
             "hle daemon install agent --system",
-            "hle forward create box 22",
+            "hle firepuncher create box 22",
+            "hle fp --agent box --to 22",
             "Saved to ~/.config/hle/config.toml",
             "The hle_tunnel_token cookie",
             # Plain words, not commands (hle#487's generated help said these).

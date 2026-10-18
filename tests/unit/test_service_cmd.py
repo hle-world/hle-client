@@ -37,13 +37,13 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 class TestBuildFpArgs:
     def test_minimal(self):
         """The current grammar, not the legacy `fp --agent A --to T`."""
-        assert build_fp_args(agent="rpi", target="22") == ["forward", "rpi", "22"]
+        assert build_fp_args(agent="rpi", target="22") == ["firepuncher", "rpi", "22"]
 
     def test_full(self):
         assert build_fp_args(
             agent="rpi", target="localhost:22", bind_port=9922, bind_host="127.0.0.1"
         ) == [
-            "forward",
+            "firepuncher",
             "rpi",
             "localhost:22",
             "--port",
