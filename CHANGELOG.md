@@ -7,6 +7,13 @@
 - The agent stops its tunnel endpoints cleanly when a stop signal arrives while it
   is waiting to reconnect to the relay, instead of leaving them to close with 1011
   during shutdown and drop in-flight browser WebSockets abruptly.
+- pfSense: an agent installed before the boot hook (2610.6) now repairs itself
+  instead of staying down after a reboot. `hle update`, an installer re-run,
+  `hle daemon refresh` and the agent's own startup all re-write the
+  `/usr/local/etc/rc.d/<svc>.sh` hook and move the enable flag to
+  `rc.conf.local`; `hle daemon status` and `hle daemon list` warn when a service
+  has no hook. The rc.d script also refuses to start and logs one line when its
+  venv interpreter is missing, instead of respawning forever.
 
 ## v2610.9 — 2026-10-11
 

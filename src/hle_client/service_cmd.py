@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -64,6 +65,9 @@ _RCD_DIR = Path("/usr/local/etc/rc.d")
 _PLATFORM_FILE = Path("/etc/platform")
 # pfSense keeps local service settings here, not in the global rc.conf.
 _RC_CONF_LOCAL = Path("/etc/rc.conf.local")
+# The global file. pfSense rewrites it from config.xml, so a flag an older
+# install wrote here does not survive; ensure_pfsense_boot_hook moves it out.
+_RC_CONF = Path("/etc/rc.conf")
 
 # Label used for the agent's unit/plist when the user doesn't override it.
 AGENT_LABEL = "agent"
@@ -1170,6 +1174,22 @@ def render_rc_script(
         # env(1) above, which would put them in daemon(8)'s process arguments;
         # rc.subr's `su -m` keeps the environment. The script is 0700 then.
         *(f"export {key}={_rc_quote(value)}" for key, value in sorted((env or {}).items())),
+        "",
+        # A venv that was moved or rebuilt leaves the launcher behind with a
+        # shebang pointing at an interpreter that is gone. `-x` still passes,
+        # so daemon(8) -r respawns it every second and nothing says why. Run
+        # the command once, log the one line that names the fix, refuse to
+        # start, instead of a restart loop that reads as success.
+        f'start_precmd="{svc}_check_interpreter"',
+        f"{svc}_check_interpreter()",
+        "{",
+        '    if ! "${hle_command}" --version >/dev/null 2>&1; then',
+        '        echo "venv interpreter missing — re-run the installer" >> "${logfile}"',
+        "        return 1",
+        "    fi",
+        "    return 0",
+        "}",
+        "",
         'run_rc_command "$1"',
         "",
     ]
@@ -1204,6 +1224,187 @@ def render_pfsense_boot_hook(svc: str) -> str:
         "  *) exit 0 ;;\n"
         "esac\n"
     )
+
+
+def _rc_conf_sets(path: Path, var: str, value: str = "YES") -> bool:
+    """Whether ``path`` already assigns ``var`` the given value.
+
+    ``sysrc`` writes ``var="YES"``; a hand-edited file may use single quotes or
+    none. Reading the file is what makes :func:`ensure_pfsense_boot_hook`
+    idempotent: when the flag is already where it belongs, no ``sysrc`` runs
+    and nothing is printed.
+    """
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return False
+    pattern = re.compile(
+        rf"""^\s*{re.escape(var)}\s*=\s*['"]?{re.escape(value)}['"]?\s*(?:#.*)?$""",
+        re.MULTILINE,
+    )
+    return pattern.search(text) is not None
+
+
+def ensure_pfsense_boot_hook(svc: str) -> bool:
+    """Make pfSense start ``svc`` at boot, healing an install older than 2610.6.
+
+    Installs before the boot hook wrote only the rc.d script and an enable flag,
+    and pfSense runs just ``rc.d/*.sh`` at boot — so those agents were enabled,
+    healthy-looking and never started after a reboot. This is the one place that
+    repairs it: it (re)writes the ``<svc>.sh`` wrapper, moves the enable flag to
+    ``rc.conf.local`` (pfSense rewrites the global ``rc.conf``), and clears a
+    stale flag left in ``rc.conf``.
+
+    Idempotent and silent when there is nothing to do: it also runs from
+    ``hle agent run`` on every start, not only from an install or a refresh.
+    Returns whether anything changed.
+    """
+    changed = False
+    hook = _rcd_path(f"{svc}.sh")
+    body = render_pfsense_boot_hook(svc)
+    current: str | None
+    try:
+        current = hook.read_text(errors="replace")
+    except OSError:
+        current = None
+    if current != body:
+        try:
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            _write_service_file(hook, body, private=False, mode=0o755)
+        except PermissionError:
+            raise HleError(
+                f"Permission denied writing {hook}.",
+                hint="Re-run as root (rc.d has no per-user services).",
+            ) from None
+        changed = True
+    var = f"{svc}_enable"
+    if not _rc_conf_sets(_RC_CONF_LOCAL, var):
+        _sysrc(f"{var}=YES", "-f", str(_RC_CONF_LOCAL))
+        changed = True
+    if _rc_conf_sets(_RC_CONF, var):
+        _sysrc(f"-x {var}")
+        changed = True
+    if changed:
+        console.print(f"[green]Wrote[/green] {hook} (pfSense boot hook)")
+    return changed
+
+
+def ensure_agent_boot_hook() -> None:
+    """Heal the pfSense boot hook from the agent's own startup.
+
+    A dashboard remote update replaces the code and restarts the agent in
+    place; it never touches the service files. On a pfSense install from before
+    the hook, that leaves the agent running now and absent after the next
+    reboot. Running as root with the agent installed as a service, repair the
+    hook here, where the agent can do it for itself.
+    """
+    if current_platform() != "freebsd" or not is_pfsense():
+        return
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    svc = rc_service_name(AGENT_LABEL)
+    if not _rcd_path(svc).exists():
+        return
+    try:
+        ensure_pfsense_boot_hook(svc)
+    except (HleError, OSError):
+        logger.warning("Could not heal the pfSense boot hook for %s", svc)
+
+
+def _pfsense_boot_hook_warning(svc: str) -> None:
+    """One line when pfSense would not start ``svc`` at boot.
+
+    The rc.d script exists and is enabled, so every manager reports it healthy;
+    the missing companion ``.sh`` is the only sign it will be absent after a
+    reboot.
+    """
+    if not is_pfsense() or _rcd_path(f"{svc}.sh").exists():
+        return
+    label = svc.removeprefix("hle_")
+    console.print(
+        f"[yellow]{svc} will not start after a reboot — run "
+        f"`hle daemon refresh {label}`[/yellow]"
+    )
+
+
+def _rc_default(text: str, svc: str, key: str) -> str | None:
+    """The value a generated rc script gives ``<svc>_<key>`` by default.
+
+    The installer writes ``: ${<svc>_<key>:='value'}``; reading it back is what
+    lets a spec be reconstructed for a service that never carried one.
+    """
+    match = re.search(
+        rf"^: \${{{re.escape(svc)}_{re.escape(key)}:=(.*)}}$", text, re.MULTILINE
+    )
+    if match is None:
+        return None
+    raw = match.group(1)
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        quote = raw[0]
+        value = raw[1:-1]
+        if quote == "'":
+            # _rc_quote escapes an embedded quote as '\''.
+            value = value.replace("'\\''", "'")
+        return value
+    return raw
+
+
+def _rc_run_args(text: str) -> list[str] | None:
+    """The argv after ``${hle_command}`` in a generated rc script, if readable.
+
+    The installer single-quotes each argument, which is ordinary shell quoting,
+    so the same reader that splits a shell word list reads it back — and a
+    hand-edited script that no longer parses reads as None rather than wrong.
+    """
+    marker = "${hle_command} "
+    for line in text.splitlines():
+        index = line.find(marker)
+        if index == -1:
+            continue
+        tail = line[index + len(marker) :].rstrip()
+        if tail.endswith('"'):
+            tail = tail[:-1]
+        try:
+            return shlex.split(tail) or None
+        except ValueError:
+            return None
+    return None
+
+
+def _legacy_agent_spec(name: str, user_mode: bool) -> dict[str, Any] | None:
+    """A spec read back from the agent's rc.d script when it predates stamping.
+
+    Only the well-known agent is reconstructed. ``hle daemon refresh`` then
+    rebuilds the script from this instead of merely restarting the old one,
+    which is what carries the pfSense boot-hook heal — and any other service
+    fix — onto a box installed before the client recorded how.
+    """
+    if user_mode or current_platform() != "freebsd":
+        return None
+    if name != rc_service_name(AGENT_LABEL):
+        return None
+    path = _rcd_path(name)
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    if parse_service_spec(text) is not None:
+        return None
+    run_args = _rc_run_args(text)
+    if not run_args or run_args[:2] != ["agent", "run"]:
+        return None
+    return {
+        "version": __version__,
+        "label": AGENT_LABEL,
+        "run_args": run_args,
+        "name": None,
+        "run_as": _rc_default(text, name, "user") or None,
+        "description": "HLE agent (dashboard-managed tunnels)",
+        "restart": "always",
+        "agent_config": _rc_default(text, name, "config") or None,
+        "home": _rc_default(text, name, "home") or None,
+        "user_mode": False,
+    }
 
 
 def _service_cmd(*args: str) -> subprocess.CompletedProcess[bytes]:
@@ -1312,6 +1513,7 @@ def _rcd_install(
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    home: str | None = None,
 ) -> None:
     svc = rc_service_name(label, name)
     script = render_rc_script(
@@ -1325,6 +1527,7 @@ def _rcd_install(
         description=description,
         restart=restart,
         spec=spec,
+        home=home,
     )
     path = _rcd_path(svc)
     try:
@@ -1340,18 +1543,7 @@ def _rcd_install(
     if is_pfsense():
         # pfSense never runs the rc.d script itself at boot — only rc.d/*.sh.
         # Without the hook the agent is installed, enabled and never started.
-        hook = _rcd_path(f"{svc}.sh")
-        try:
-            _write_service_file(hook, render_pfsense_boot_hook(svc), private=False, mode=0o755)
-        except PermissionError:
-            raise HleError(
-                f"Permission denied writing {hook}.",
-                hint="Re-run as root (rc.d has no per-user services).",
-            ) from None
-        console.print(f"[green]Wrote[/green] {hook} (pfSense boot hook)")
-        # pfSense rewrites the global rc.conf, so the enable flag belongs in
-        # rc.conf.local or it does not survive the next config change.
-        _sysrc(f"{svc}_enable=YES", "-f", str(_RC_CONF_LOCAL))
+        ensure_pfsense_boot_hook(svc)
     else:
         _sysrc(f"{svc}_enable=YES")
     if start:
@@ -1397,6 +1589,7 @@ def _rcd_uninstall(*, label: str, name: str | None) -> None:
 def _rcd_status(*, label: str, name: str | None) -> None:
     svc = rc_service_name(label, name)
     _service_cmd(svc, "status")
+    _pfsense_boot_hook_warning(svc)
 
 
 def _rcd_scripts() -> list[Path]:
@@ -1419,6 +1612,7 @@ def _rcd_list() -> None:
         return
     for svc in found:
         console.print(svc)
+        _pfsense_boot_hook_warning(svc)
 
 
 # --------------------------------------------------------------------------- #
@@ -1587,6 +1781,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             agent_config=spec.get("agent_config"),
             spec=stamped,
             env=env,
+            home=spec.get("home"),
         )
     elif plat == "darwin":
         _launchd_install(
@@ -1676,9 +1871,21 @@ def refresh_service(name: str, user_mode: bool) -> str:
     could not fix that, because the thing being restarted was wrong.
 
     Without a spec there is nothing to rebuild from, so this falls back to a
-    plain restart rather than inventing arguments.
+    plain restart rather than inventing arguments — but a pfSense agent from
+    before the boot hook is still rebuilt, because its spec can be read back
+    from the rc.d script, and its hook is healed either way.
     """
+    if current_platform() == "freebsd" and is_pfsense():
+        # `hle update` and an installer re-run restart the agent without
+        # touching service files. Heal the pre-2610.6 boot hook here too, so a
+        # reboot after the upgrade starts the agent.
+        try:
+            ensure_pfsense_boot_hook(name)
+        except (HleError, OSError):
+            logger.warning("Could not heal the pfSense boot hook for %s", name)
     spec = service_spec(name, user_mode)
+    if spec is None:
+        spec = _legacy_agent_spec(name, user_mode)
     if spec is None:
         return "restarted" if restart_service(name, user_mode) else "failed"
     try:
