@@ -496,6 +496,59 @@ class TestFatalCloses:
         assert hello.hostname == "mimos"
 
 
+class TestStopDuringBackoff:
+    """A stop that lands in the reconnect backoff must still stop the tunnels.
+
+    The backoff wait sits outside the try/finally that tears the endpoints down,
+    so a SIGTERM there used to unwind with the tunnels still up: the relay then
+    closed them with 1011 during asyncio teardown instead of a clean 1000, and
+    in-flight browser WebSockets were dropped abruptly.
+    """
+
+    async def test_cancelling_during_backoff_stops_every_endpoint(self, monkeypatch):
+        client, created = _make_client()
+        await client.reconcile([_spec("tv"), _spec("nas")])
+        await asyncio.sleep(0)
+        assert [t.connected for t in created] == [True, True]
+
+        backoff_entered = asyncio.Event()
+
+        async def fake_connect_once() -> None:
+            raise ConnectionError("relay went away")
+
+        async def blocking_sleep(seconds: float) -> None:
+            backoff_entered.set()
+            await asyncio.Event().wait()  # cancelled here, in the backoff
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(asyncio, "sleep", blocking_sleep)
+
+        task = asyncio.create_task(client.run())
+        await backoff_entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert client._endpoints == {}
+        assert [t.disconnect_calls for t in created] == [1, 1]
+        assert [t.connected for t in created] == [False, False]
+
+    async def test_a_normal_shutdown_stops_each_endpoint_once(self, monkeypatch):
+        client, created = _make_client()
+        await client.reconcile([_spec("tv"), _spec("nas")])
+        await asyncio.sleep(0)
+
+        async def fake_connect_once() -> None:
+            client._registered = True
+            client._running = False  # ask run() to return
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        await client.run()
+
+        assert client._endpoints == {}
+        assert [t.disconnect_calls for t in created] == [1, 1]
+
+
 class _FakeWs:
     """A control connection that answers the hello with a welcome, then ends."""
 

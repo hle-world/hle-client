@@ -566,6 +566,36 @@ class TestReplacedDuringUpdate:
         assert stopped == []
         assert client._running is True
 
+    async def test_a_replaced_hold_keeps_live_endpoints_instead_of_stopping_them(
+        self, tmp_path, monkeypatch
+    ):
+        client, _, tunnels = make_agent(tmp_path, spawner=lambda argv, *, env=None: FakeProc())
+        await client.reconcile([EndpointSpec(id=1, label="ha", service_url="http://x")])
+        await asyncio.sleep(0)
+        assert tunnels[0].connected is True
+        client._update_in_flight = True
+        stopped: list[bool] = []
+
+        async def fake_stop_all() -> None:
+            stopped.append(True)
+
+        async def fake_connect_once() -> None:
+            client._registered = True
+            raise self._closed(close_codes.REPLACED, "overlap")
+
+        monkeypatch.setattr(client, "_connect_once", fake_connect_once)
+        monkeypatch.setattr(client, "_stop_all", fake_stop_all)
+
+        await client.run()
+
+        # The successor owns the tunnels now, so the run must not stop them.
+        assert client._handover_done is True
+        assert stopped == []
+        assert tunnels[0].connected is True
+        client._endpoints["ha"].task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await client._endpoints["ha"].task
+
     async def test_wait_for_successor_control_returns_when_the_successor_fails(self):
         client = AgentClient("hlea_x")
         client._running = True
