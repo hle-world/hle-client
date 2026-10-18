@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
+
+    from hle_client.chunk_budget import ChunkBudget, LayeredBudget
 
 import httpx
 
@@ -19,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 # Headers to strip when forwarding HTTP requests to the local service.
 _HOP_BY_HOP_HEADERS = frozenset({"transfer-encoding", "connection", "upgrade", "accept-encoding"})
+
+# How much of the upstream body to read per chunk. Small chunks keep per-stream
+# memory low and let streams from different tunnels interleave on the relay link.
+DEFAULT_HTTP_CHUNK_SIZE = 64 * 1024  # 64 KiB
+HTTP_CHUNK_SIZE_ENV = "HLE_HTTP_CHUNK_SIZE"
+
+
+def upstream_chunk_size() -> int:
+    """The upstream body read size, from ``HLE_HTTP_CHUNK_SIZE`` or the default."""
+    try:
+        size = int(os.environ.get(HTTP_CHUNK_SIZE_ENV, str(DEFAULT_HTTP_CHUNK_SIZE)))
+    except ValueError:
+        size = DEFAULT_HTTP_CHUNK_SIZE
+    return size if size > 0 else DEFAULT_HTTP_CHUNK_SIZE
+
 
 # Headers to strip from responses before sending back through the tunnel.
 _STRIP_RESPONSE_HEADERS = frozenset(
@@ -391,7 +408,8 @@ class LocalProxy:
         headers: dict[str, str],
         body: bytes | None = None,
         query_string: str = "",
-    ) -> AsyncIterator[tuple[int | None, dict[str, str | list[str]] | None, bytes | None]]:
+        budget: ChunkBudget | LayeredBudget | None = None,
+    ) -> AsyncGenerator[tuple[int | None, dict[str, str | list[str]] | None, bytes | None], None]:
         """Stream an HTTP response from the local service in chunks.
 
         Yields
@@ -400,6 +418,12 @@ class LocalProxy:
             ``(status_code, response_headers, None)`` — metadata only.
         Subsequent yields:
             ``(None, None, chunk_bytes)`` — body segments.
+
+        When ``budget`` is given, each chunk's bytes are reserved right after
+        it is read and released once the consumer asks for the next chunk
+        (i.e. after it has sent the current one). That bounds how much is in
+        flight across every stream in the process and applies backpressure to
+        the read; idle streams hold nothing.
         """
         if not self._http_client:
             raise RuntimeError("Proxy not started — call start() first")
@@ -418,7 +442,8 @@ class LocalProxy:
         tls_extensions = self._tls_extensions()
         extra: dict[str, Any] = {"extensions": tls_extensions} if tls_extensions else {}
 
-        chunk_size = int(os.environ.get("HLE_HTTP_CHUNK_SIZE", "524288"))
+        chunk_size = upstream_chunk_size()
+        held = 0
 
         try:
             async with self._http_client.stream(
@@ -432,7 +457,21 @@ class LocalProxy:
                 yield (response.status_code, resp_headers, None)
 
                 async for chunk in response.aiter_bytes(chunk_size):
+                    # Reserve what was actually read, after the read: an idle
+                    # stream (SSE, long-poll) then holds no budget, and a stream
+                    # waiting here reads nothing more upstream (backpressure).
+                    # The read itself is outside the budget by design; it is
+                    # bounded per connection (one chunk plus the socket layer's
+                    # read buffer, a few hundred KiB).
+                    if budget is not None:
+                        held = await budget.acquire(len(chunk))
                     yield (None, None, chunk)
+                    # Drop this frame's raw copy before the consumer asks for
+                    # the next one, so it is not held alongside the new chunk.
+                    del chunk
+                    if budget is not None and held:
+                        budget.release(held)
+                        held = 0
         except httpx.ConnectError as exc:
             exc_str = str(exc).lower()
             if "ssl" in exc_str or "certificate" in exc_str or "tls" in exc_str:
@@ -461,3 +500,6 @@ class LocalProxy:
             logger.error("HTTP error forwarding %s %s: %s", method, url, exc)
             yield (502, _upstream_error_headers(exc), None)
             yield (None, None, b"Bad Gateway: unexpected error")
+        finally:
+            if budget is not None and held:
+                budget.release(held)

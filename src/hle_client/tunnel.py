@@ -24,6 +24,7 @@ import websockets.exceptions
 
 from hle_client import __version__
 from hle_client import config as hle_config
+from hle_client.chunk_budget import LayeredBudget, endpoint_budget, get_chunk_budget
 from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event, render_notice
@@ -480,6 +481,9 @@ class Tunnel:
     _active_chunked: dict[str, asyncio.Task[None]] = field(
         default_factory=dict, init=False, repr=False
     )
+    # This endpoint's byte share of the process-wide chunk budget (created on
+    # first chunked response, so it binds to the running loop's budget).
+    _chunk_budget: LayeredBudget | None = field(default=None, init=False, repr=False)
     _log_handler: _DiagnosticLogHandler | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -1124,50 +1128,75 @@ class Tunnel:
             body = base64.b64decode(req.body)
 
         chunk_index = 0
+        shared = get_chunk_budget()
+        if self._chunk_budget is None or self._chunk_budget.shared is not shared:
+            self._chunk_budget = endpoint_budget(shared)
+        budget = self._chunk_budget
 
         try:
-            async for status_code, resp_headers, chunk in self._proxy.stream_http(
+            # No cap on concurrent streams: the byte budget bounds memory, and
+            # streams over it wait (backpressure) instead of failing. This
+            # endpoint can hold at most half the process budget, so other
+            # tunnels served by the same process are never starved.
+            stream = self._proxy.stream_http(
                 method=req.method,
                 path=req.path,
                 headers=req.headers,
                 body=body,
                 query_string=req.query_string,
-            ):
-                if status_code is not None:
-                    # First yield: send START. Strip + report any synthetic
-                    # upstream-error marker before it reaches the browser.
-                    headers_out = resp_headers or {}
-                    reason = self._pop_upstream_error(headers_out)
-                    if reason is not None:
-                        self._emit_upstream_error(req, status_code, reason)
-                    start = HttpResponseStart(
-                        request_id=req.request_id,
-                        status_code=status_code,
-                        headers=headers_out,
-                    )
-                    start_msg = ProtocolMessage(
-                        type=MessageType.HTTP_RESPONSE_START,
-                        tunnel_id=self._tunnel_id,
-                        request_id=req.request_id,
-                        payload=start.model_dump(),
-                    )
-                    await ws.send(start_msg.model_dump_json())
-                elif chunk is not None:
-                    # Body chunk
-                    encoded = base64.b64encode(chunk).decode("ascii")
-                    ch = HttpResponseChunk(
-                        request_id=req.request_id,
-                        chunk_index=chunk_index,
-                        data=encoded,
-                    )
-                    chunk_msg = ProtocolMessage(
-                        type=MessageType.HTTP_RESPONSE_CHUNK,
-                        tunnel_id=self._tunnel_id,
-                        request_id=req.request_id,
-                        payload=ch.model_dump(),
-                    )
-                    await ws.send(chunk_msg.model_dump_json())
-                    chunk_index += 1
+                budget=budget,
+            )
+            try:
+                while True:
+                    try:
+                        status_code, resp_headers, chunk = await anext(stream)
+                    except StopAsyncIteration:
+                        break
+                    if status_code is not None:
+                        # First yield: send START. Strip + report any synthetic
+                        # upstream-error marker before it reaches the browser.
+                        headers_out = resp_headers or {}
+                        reason = self._pop_upstream_error(headers_out)
+                        if reason is not None:
+                            self._emit_upstream_error(req, status_code, reason)
+                        start = HttpResponseStart(
+                            request_id=req.request_id,
+                            status_code=status_code,
+                            headers=headers_out,
+                        )
+                        start_msg = ProtocolMessage(
+                            type=MessageType.HTTP_RESPONSE_START,
+                            tunnel_id=self._tunnel_id,
+                            request_id=req.request_id,
+                            payload=start.model_dump(),
+                        )
+                        await ws.send(start_msg.model_dump_json())
+                    elif chunk is not None:
+                        # Body chunk. Serialise once, then drop every
+                        # intermediate copy before awaiting the send so only
+                        # the frame string is alive across it.
+                        encoded = base64.b64encode(chunk).decode("ascii")
+                        ch = HttpResponseChunk(
+                            request_id=req.request_id,
+                            chunk_index=chunk_index,
+                            data=encoded,
+                        )
+                        chunk_msg = ProtocolMessage(
+                            type=MessageType.HTTP_RESPONSE_CHUNK,
+                            tunnel_id=self._tunnel_id,
+                            request_id=req.request_id,
+                            payload=ch.model_dump(),
+                        )
+                        frame = chunk_msg.model_dump_json()
+                        del encoded, ch, chunk_msg, chunk
+                        await ws.send(frame)
+                        chunk_index += 1
+            finally:
+                # Closing the generator releases any budget still held for the
+                # in-flight chunk and stops the upstream read, also when this
+                # task is cancelled.
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
 
             # Send END
             end = HttpResponseEnd(request_id=req.request_id)
