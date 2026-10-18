@@ -97,7 +97,7 @@ hle daemon install agent  [command]  hidden=False  help='Install the dashboard-d
     option   --user                       name=user_mode type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
     option   --name                       name=name type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-hle daemon install forward  [command]  hidden=False  help='Install a permanent forward from a remote port to this machine.'
+hle daemon install firepuncher  [command]  hidden=False  help='Install a permanent forward from a remote port to this machine.'
     argument agent_name                   name=agent_name type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     argument target                       name=target type=text required=True multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --port                       name=fp_port type=integer required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
@@ -181,7 +181,7 @@ hle expose  [command]  hidden=True  help='Expose a local service to the internet
     option   --allow                      name=allow type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --events                     name=events type=choice required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-hle forward  [command]  hidden=False  help='Forward TCP ports from a remote agent to this machine.'
+hle firepuncher  [command]  hidden=False  help='Forward TCP ports from a remote agent to this machine.'
     option   --agent                      name=agent type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --to                         name=targets type=text required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --port                       name=bind_ports type=integer required=False multiple=True nargs=1 flag=False envvar=None default_set=True hidden=False
@@ -340,9 +340,11 @@ hle webhook  [command]  hidden=True  help='Forward incoming webhooks to a local 
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 ALIASES
   hle : config -> tunnel
-  hle : fp -> forward
+  hle : forward -> firepuncher  hidden
+  hle : fp -> firepuncher
   hle : service -> daemon
   hle daemon : uninstall -> delete  hidden
+  hle daemon install : forward -> firepuncher  hidden
   hle tunnel : auth-mode -> set  hidden
   hle tunnel : show -> get
   hle tunnel access : add -> create  hidden

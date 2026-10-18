@@ -85,8 +85,8 @@ TUNNEL_CREATE = ["tunnel", "create"]
 # Set in every generated unit, plist and rc script. A service runs whatever
 # argv it was installed with until it is refreshed, and one written by an
 # older client may still use a renamed spelling; the "`hle fp` is now `hle
-# forward`" note then landed in the service log on every start, where nobody
-# who could act on it would read it.
+# firepuncher`" note then landed in the service log on every start, where
+# nobody who could act on it would read it.
 _QUIET_ENV = ("HLE_NO_DEPRECATION_WARNINGS", "1")
 
 
@@ -311,13 +311,13 @@ def build_fp_args(
     relay_host: str | None = None,
     relay_port: int | None = None,
 ) -> list[str]:
-    """Build the ``forward AGENT TARGET`` argv (no secrets) for the service definition.
+    """Build the ``firepuncher AGENT TARGET`` argv (no secrets) for the service definition.
 
-    ``fp --agent A --to T`` before; ``daemon refresh`` rewrites those units.
-    The API key is read at runtime from the running user's config or
-    ``HLE_API_KEY``, never written into the unit.
+    ``fp --agent A --to T`` before, then ``forward``; ``daemon refresh``
+    rewrites those units. The API key is read at runtime from the running
+    user's config or ``HLE_API_KEY``, never written into the unit.
     """
-    args = ["forward", agent, target]
+    args = ["firepuncher", agent, target]
     if bind_port:
         args += ["--port", str(bind_port)]
     if bind_host:
@@ -1753,10 +1753,15 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
         env = expose_env(tunnel)
     else:
         # Agent and forward stamps carry only argv, which is replayed — with a
-        # forward's legacy `fp` head renamed. `forward` is the same command
-        # object, so every argv `fp` accepted parses identically; rebuilding it
-        # instead would have to reproduce repeated --to/--port pairs exactly.
-        run_args = ["forward", *stamped_args[1:]] if stamped_args[:1] == ["fp"] else stamped_args
+        # forward's legacy `fp`/`forward` head renamed to the canonical
+        # `firepuncher`. It is the same command object, so every argv those
+        # accepted parses identically; rebuilding it instead would have to
+        # reproduce repeated --to/--port pairs exactly.
+        run_args = (
+            ["firepuncher", *stamped_args[1:]]
+            if stamped_args[:1] in (["fp"], ["forward"])
+            else stamped_args
+        )
     name = spec.get("name")
     user_mode = bool(spec.get("user_mode"))
     stamped = {**spec, **extra_stamp, "version": __version__, "run_args": run_args}
@@ -1970,15 +1975,15 @@ def service() -> None:
     """
 
 
-@service.group("install", cls=ModeGroup)
+@service.group("install", cls=ModeGroup, hidden_aliases={"forward": "firepuncher"})
 def install_group() -> None:
     """Install and start a background service.
 
     \b
     One of three things, each with only the options that apply to it:
-      tunnel   a single tunnel, always up
-      agent    the dashboard-driven agent, serving every endpoint you declare
-      forward  a firepuncher forward, so a remote port is always local
+      tunnel       a single tunnel, always up
+      agent        the dashboard-driven agent, serving every endpoint you declare
+      firepuncher  a firepuncher forward, so a remote port is always local
 
     The old flag form (--agent, --fp, --service/--label) still works.
     """
@@ -1997,7 +2002,7 @@ def install_group() -> None:
     "fp_mode",
     is_flag=True,
     default=False,
-    help="Install a firepuncher forward (`hle fp`) — needs --agent-name and --to",
+    help="Install a firepuncher forward (`hle firepuncher`) — needs --agent-name and --to",
 )
 @click.option("--agent-name", default=None, help="fp mode: agent to forward through")
 @click.option("--to", "fp_target", default=None, metavar="HOST:PORT", help="fp mode: target")
@@ -2045,7 +2050,7 @@ def install(
     \b
       --service/--label  →  hle daemon install tunnel <label> <url>
       --agent            →  hle daemon install agent
-      --fp               →  hle daemon install forward <agent> <target>
+      --fp               →  hle daemon install firepuncher <agent> <target>
 
     Credentials are never written into the service file. They are read at
     runtime from the running user's ~/.config/hle/ (config.toml for the API key,
@@ -2072,7 +2077,7 @@ def install(
         if not agent_name or not fp_target:
             raise UsageError(
                 "--agent-name and --to are required with --fp.",
-                hint="Example: hle daemon install forward rpi 22 --port 9922",
+                hint="Example: hle daemon install firepuncher rpi 22 --port 9922",
             )
         label = label or fp_label(agent_name, fp_target)
         run_args = build_fp_args(
@@ -2207,7 +2212,7 @@ def install_agent(ctx: click.Context, /, **kwargs: Any) -> None:
     ctx.invoke(install, agent_mode=True, **kwargs)
 
 
-@install_group.command("forward")
+@install_group.command("firepuncher")
 @click.argument("agent_name")
 @click.argument("target")
 @click.option("--port", "fp_port", default=None, type=int, help="Local port to bind")
@@ -2216,13 +2221,13 @@ def install_agent(ctx: click.Context, /, **kwargs: Any) -> None:
 @click.option("--relay-port", default=None, type=int, help="Relay port (default 443)")
 @_scope_options
 @click.pass_context
-def install_forward(ctx: click.Context, /, agent_name: str, target: str, **kwargs: Any) -> None:
+def install_firepuncher(ctx: click.Context, /, agent_name: str, target: str, **kwargs: Any) -> None:
     """Install a permanent forward from a remote port to this machine.
 
     \b
     Example:
-      hle daemon install forward rpi 22 --port 9922
-      hle daemon install forward rpi 192.168.1.50:8006 --port 8006
+      hle daemon install firepuncher rpi 22 --port 9922
+      hle daemon install firepuncher rpi 192.168.1.50:8006 --port 8006
     """
     ctx.invoke(install, fp_mode=True, agent_name=agent_name, fp_target=target, **kwargs)
 

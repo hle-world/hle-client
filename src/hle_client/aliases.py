@@ -8,7 +8,8 @@ person it broke.
 So the old names still resolve. They are hidden from ``--help``, so the shape
 being taught is the new one, and they print a single line to stderr naming the
 replacement — stderr because a script parsing stdout must not start seeing
-advice mixed into its data.
+advice mixed into its data. A short spelling worth keeping is not a legacy one,
+though, so a group can also advertise a visible alias beside its command.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ _GLOBAL_FLAGS = {"-q", "--quiet", "--no-color", "--no-input", "--debug"}
 def hoist_global_options(args: list[str]) -> list[str]:
     """Move root-level options to the front, wherever the user put them.
 
-    Everything after ``--`` is left exactly as it is: ``hle forward box
+    Everything after ``--`` is left exactly as it is: ``hle firepuncher box
     10.0.0.5:22 -- ssh -q me@host`` passes ``-q`` to ssh, and it must keep
     doing that.
     """
@@ -90,8 +91,12 @@ class AliasedGroup(click.Group):
     inside a noun (``access add`` for ``access create``): they resolve just as
     well and print nothing, because there are far more of them, they sit in
     units and scripts nobody reads the stderr of, and a nag per verb would be
-    noise rather than guidance. Both are in ``self.aliases`` so every walker of
-    the tree sees every spelling; ``self.silent`` says which ones stay quiet.
+    noise rather than guidance. ``visible_aliases`` are short spellings that
+    stay advertised: silent like a hidden alias, but listed next to their
+    command in ``--help``, because a name being taught needs no apology. All
+    are in ``self.aliases`` so every walker of the tree sees every spelling;
+    ``self.silent`` says which ones stay quiet and ``self.visible_aliases``
+    which ones are still shown.
     """
 
     def __init__(
@@ -99,11 +104,18 @@ class AliasedGroup(click.Group):
         *args: Any,
         aliases: dict[str, str] | None = None,
         hidden_aliases: dict[str, str] | None = None,
+        visible_aliases: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.aliases: dict[str, str] = {**(aliases or {}), **(hidden_aliases or {})}
-        self.silent: frozenset[str] = frozenset(hidden_aliases or ())
+        self.aliases: dict[str, str] = {
+            **(aliases or {}),
+            **(visible_aliases or {}),
+            **(hidden_aliases or {}),
+        }
+        self.visible_aliases: frozenset[str] = frozenset(visible_aliases or ())
+        self.hidden_alias_names: frozenset[str] = frozenset(hidden_aliases or ())
+        self.silent: frozenset[str] = self.visible_aliases | self.hidden_alias_names
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         command = super().get_command(ctx, cmd_name)
@@ -133,8 +145,40 @@ class AliasedGroup(click.Group):
         # own command back rather than a name they have never seen.
         return name, command, rest
 
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        """List the commands, with any advertised short alias beside its name.
 
-class ModeGroup(click.Group):
+        The alias resolves in ``get_command`` rather than being registered as a
+        second command, so it never shows up as a row of its own — the group
+        would list the same command twice and drift the moment one moved. Here
+        it is attached to the command it names instead: ``firepuncher (fp)``.
+        """
+        commands: list[tuple[str, click.Command]] = []
+        for subcommand in self.list_commands(ctx):
+            command = self.get_command(ctx, subcommand)
+            if command is None or command.hidden:
+                continue
+            commands.append((subcommand, command))
+        if not commands:
+            return
+
+        advertised: dict[str, list[str]] = {}
+        for alias in sorted(self.visible_aliases):
+            head = self.aliases[alias].split()[0]
+            advertised.setdefault(head, []).append(alias)
+
+        width = formatter.width or 80
+        limit = width - 6 - max(len(name) for name, _ in commands)
+        rows: list[tuple[str, str]] = []
+        for subcommand, command in commands:
+            aliases = advertised.get(subcommand)
+            label = f"{subcommand} ({', '.join(aliases)})" if aliases else subcommand
+            rows.append((label, command.get_short_help_str(limit)))
+        with formatter.section("Commands"):
+            formatter.write_dl(rows)
+
+
+class ModeGroup(AliasedGroup):
     """A group whose subcommands replace a flag that switched modes.
 
     ``hle service install`` carried twenty flags across three mutually

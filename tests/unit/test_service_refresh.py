@@ -242,14 +242,28 @@ class TestRefreshForwardStamps:
             assert refresh_service("hle-fp-rpi-22.service", True) == "refreshed"
         return install.call_args.kwargs
 
-    def test_a_legacy_fp_unit_is_renamed_to_forward(self):
+    def test_a_legacy_fp_unit_is_renamed_to_firepuncher(self):
         """Every start of an `fp` unit wrote the rename note to its log."""
         kwargs = self._refresh(["fp", "--agent", "rpi", "--to", "22", "--port", "9922"])
-        assert kwargs["run_args"] == ["forward", "--agent", "rpi", "--to", "22", "--port", "9922"]
+        assert kwargs["run_args"] == [
+            "firepuncher",
+            "--agent",
+            "rpi",
+            "--to",
+            "22",
+            "--port",
+            "9922",
+        ]
         assert kwargs["spec"]["run_args"] == kwargs["run_args"]
 
-    def test_a_forward_unit_is_left_as_it_is(self):
-        argv = ["forward", "rpi", "22", "--port", "9922"]
+    def test_a_forward_unit_is_renamed_to_firepuncher(self):
+        """#151's name is an alias now; a refresh moves the unit off it."""
+        kwargs = self._refresh(["forward", "rpi", "22", "--port", "9922"])
+        assert kwargs["run_args"] == ["firepuncher", "rpi", "22", "--port", "9922"]
+        assert kwargs["spec"]["run_args"] == kwargs["run_args"]
+
+    def test_a_firepuncher_unit_is_left_as_it_is(self):
+        argv = ["firepuncher", "rpi", "22", "--port", "9922"]
         assert self._refresh(argv)["run_args"] == argv
 
 

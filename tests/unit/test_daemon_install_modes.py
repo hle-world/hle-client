@@ -27,15 +27,20 @@ def install_group():
 
 
 class TestTheModesAreCommands:
-    @pytest.mark.parametrize("mode", ["tunnel", "agent", "forward"])
+    @pytest.mark.parametrize("mode", ["tunnel", "agent", "firepuncher"])
     def test_each_mode_exists(self, mode, install_group):
         assert mode in install_group.commands
 
     def test_help_lists_them(self, install_group):
         result = CliRunner().invoke(main, ["daemon", "install", "--help"])
         assert result.exit_code == 0
-        for mode in ("tunnel", "agent", "forward"):
+        for mode in ("tunnel", "agent", "firepuncher"):
             assert mode in result.output
+
+    def test_the_old_forward_name_is_a_hidden_alias(self, install_group):
+        """Units installed by #151 exec `daemon install forward`; keep them running."""
+        ctx = click.Context(install_group)
+        assert install_group.get_command(ctx, "forward") is install_group.commands["firepuncher"]
 
     def test_a_mode_only_shows_its_own_options(self):
         """ "fp mode:" prefixes existed because one command carried three."""
@@ -92,8 +97,9 @@ class TestModesForwardToTheSameImplementation:
         impl = self._invoke(["agent"])
         assert impl.call_args.kwargs["agent_mode"] is True
 
-    def test_forward_sets_fp_mode_and_its_target(self):
-        impl = self._invoke(["forward", "rpi", "22", "--port", "9922"])
+    @pytest.mark.parametrize("spelling", ["firepuncher", "forward"])
+    def test_forward_sets_fp_mode_and_its_target(self, spelling):
+        impl = self._invoke([spelling, "rpi", "22", "--port", "9922"])
         assert impl.call_args.kwargs["fp_mode"] is True
         assert impl.call_args.kwargs["agent_name"] == "rpi"
         assert impl.call_args.kwargs["fp_target"] == "22"

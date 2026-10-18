@@ -161,7 +161,7 @@ _HONOURS_VIA_OWN_MECHANISM = (
     "hle expose",
     "hle webhook",
     "hle tunnel webhook",
-    "hle forward",
+    "hle firepuncher",
 )
 _NOT_APPLICABLE = ("hle auth login",)
 
@@ -264,7 +264,7 @@ def test_root_api_key_reaches_the_tunnel_config(path: str, monkeypatch: pytest.M
 
 
 def test_root_api_key_reaches_forward(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`forward` hands the key to its relay loop; capture it there."""
+    """`firepuncher` hands the key to its relay loop; capture it there."""
     captured: list[str] = []
 
     async def _fake_run_all(*, api_key: str, **_kw: Any) -> int:
@@ -276,7 +276,7 @@ def test_root_api_key_reaches_forward(monkeypatch: pytest.MonkeyPatch) -> None:
         patch("hle_client.fp_cmd._run_all", _fake_run_all),
         patch("hle_client.fp_cmd.shutdown.run", lambda coro: __import__("asyncio").run(coro)),
     ):
-        result = CliRunner().invoke(main, ["--api-key", _ROOT_KEY, "forward", "rpi", "22"])
+        result = CliRunner().invoke(main, ["--api-key", _ROOT_KEY, "firepuncher", "rpi", "22"])
     assert captured, result.output
     assert captured[0] == _ROOT_KEY
 
