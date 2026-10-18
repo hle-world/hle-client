@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://get.hle.world | sh
-#   curl -fsSL https://get.hle.world | sh -s -- --version 2610.10
+#   curl -fsSL https://get.hle.world | sh -s -- --version 2610.11
 #
 #   # Install the agent and run it as a service (prompts for the token):
 #   curl -fsSL https://get.hle.world | sh -s -- --agent
