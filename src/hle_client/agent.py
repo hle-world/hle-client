@@ -462,11 +462,20 @@ class AgentClient:
             reached_supervision = self._handover_done
         finally:
             # Runs on every exit, including a stop signal cancelling run() while
-            # an update is in flight, during the REPLACED hold, or between
-            # HANDOVER and supervision. The successor is in its own session, so
-            # the stop never reaches it; unless supervision is about to start,
-            # terminate it here or a second agent is left on the same identity.
+            # an update is in flight, during the REPLACED hold, between HANDOVER
+            # and supervision, or while the reconnect backoff is waiting. The
+            # successor is in its own session, so the stop never reaches it;
+            # unless supervision is about to start, terminate it here or a
+            # second agent is left on the same identity.
             self._disarm_watchdog()
+            # The inner finally only stops the tunnels when the loop ends on its
+            # own; a cancel that lands in the reconnect backoff skips it, so the
+            # run would unwind with the tunnels still up and the relay would drop
+            # them with 1011 during asyncio teardown. Stop them here unless a
+            # handover already handed them to the successor. _stop_all() is
+            # idempotent, so a run that already tore them down is unaffected.
+            if not self._handover_done:
+                await self._stop_all()
             if not reached_supervision:
                 await self._terminate_successor()
         if self._handover_done and self._successor_proc is not None:
