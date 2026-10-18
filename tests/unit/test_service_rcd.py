@@ -431,9 +431,17 @@ class TestEnsurePfSenseBootHook:
         (tmp_path / "rc.conf").write_text('hle_agent_enable="YES"\n')
         (tmp_path / "rc.conf.local").write_text('hle_agent_enable="YES"\n')
         assert service_cmd.ensure_pfsense_boot_hook("hle_agent") is True
-        assert ("-x hle_agent_enable",) in calls
+        assert ("hle_agent_enable", "-x") in calls
         # The local copy is already right, so it is not written again.
         assert ("hle_agent_enable=YES", "-f", str(tmp_path / "rc.conf.local")) not in calls
+
+    def test_sysrc_gets_the_unset_flag_as_its_own_argument(self, monkeypatch):
+        # "-x var" passed as one argv entry is not an option to sysrc(8); the
+        # flag would never be removed.
+        seen: list[list[str]] = []
+        monkeypatch.setattr(service_cmd.subprocess, "run", lambda argv, **kw: seen.append(argv))
+        service_cmd._sysrc("hle_agent_enable", "-x", "-f", "/etc/rc.conf.local")
+        assert seen == [["sysrc", "-x", "-f", "/etc/rc.conf.local", "hle_agent_enable"]]
 
     def test_it_reports_when_it_changes_something(self, tmp_path, monkeypatch, capsys):
         self._setup(tmp_path, monkeypatch)
@@ -550,9 +558,7 @@ class TestRefreshServiceHealsTheBootHook:
             )
         )
         built: list[dict] = []
-        monkeypatch.setattr(
-            service_cmd, "_install_from_spec", lambda spec, **k: built.append(spec)
-        )
+        monkeypatch.setattr(service_cmd, "_install_from_spec", lambda spec, **k: built.append(spec))
         assert service_cmd.refresh_service("hle_agent", False) == "refreshed"
         assert built and built[0]["label"] == "agent"
         assert built[0]["agent_config"] == "/home/admin/.config/hle/agent.toml"
@@ -628,4 +634,3 @@ class TestPfSenseBootHookWarnings:
         (tmp_path / "hle_agent").write_text("# service\n")
         service_cmd._rcd_status(label="agent", name=None)
         assert "will not start" not in capsys.readouterr().out
-

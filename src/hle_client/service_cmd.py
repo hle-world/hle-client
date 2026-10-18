@@ -1282,7 +1282,7 @@ def ensure_pfsense_boot_hook(svc: str) -> bool:
         _sysrc(f"{var}=YES", "-f", str(_RC_CONF_LOCAL))
         changed = True
     if _rc_conf_sets(_RC_CONF, var):
-        _sysrc(f"-x {var}")
+        _sysrc(var, "-x")
         changed = True
     if changed:
         console.print(f"[green]Wrote[/green] {hook} (pfSense boot hook)")
@@ -1322,8 +1322,7 @@ def _pfsense_boot_hook_warning(svc: str) -> None:
         return
     label = svc.removeprefix("hle_")
     console.print(
-        f"[yellow]{svc} will not start after a reboot — run "
-        f"`hle daemon refresh {label}`[/yellow]"
+        f"[yellow]{svc} will not start after a reboot — run `hle daemon refresh {label}`[/yellow]"
     )
 
 
@@ -1333,9 +1332,7 @@ def _rc_default(text: str, svc: str, key: str) -> str | None:
     The installer writes ``: ${<svc>_<key>:='value'}``; reading it back is what
     lets a spec be reconstructed for a service that never carried one.
     """
-    match = re.search(
-        rf"^: \${{{re.escape(svc)}_{re.escape(key)}:=(.*)}}$", text, re.MULTILINE
-    )
+    match = re.search(rf"^: \${{{re.escape(svc)}_{re.escape(key)}:=(.*)}}$", text, re.MULTILINE)
     if match is None:
         return None
     raw = match.group(1)
@@ -1569,9 +1566,9 @@ def _rcd_uninstall(*, label: str, name: str | None) -> None:
     _service_cmd(svc, "stop")
     # Installs before the pfSense boot hook set the flag in rc.conf, so clear
     # both places on pfSense.
-    _sysrc(f"-x {svc}_enable")
+    _sysrc(f"{svc}_enable", "-x")
     if is_pfsense():
-        _sysrc(f"-x {svc}_enable", "-f", str(_RC_CONF_LOCAL))
+        _sysrc(f"{svc}_enable", "-x", "-f", str(_RC_CONF_LOCAL))
         hook = _rcd_path(f"{svc}.sh")
         try:
             hook.unlink(missing_ok=True)
