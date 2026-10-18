@@ -31,6 +31,7 @@ from hle_client.fp_cmd import fp as fp_command
 from hle_client.ops import agents as ops_agents
 from hle_client.output import OUTPUT_FORMATS, TABLE, Output
 from hle_client.richcompat import Console
+from hle_client.service_cmd import ensure_agent_boot_hook
 from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import Tunnel, TunnelFatalError, to_tunnel_config
 from hle_client.tunnel_options import (
@@ -688,6 +689,10 @@ def run(
     events: str | None = None,
 ) -> None:
     """Run the agent: connect, fetch endpoints from the dashboard, and reconcile."""
+    # A dashboard remote update restarts the agent in place without touching
+    # service files; on a pre-2610.6 pfSense install that leaves it up now and
+    # down after the next reboot. Repair the boot hook before connecting.
+    ensure_agent_boot_hook()
     human = _start_events(ctx, events)
     token = token or config.load_agent_token()
     if not token:

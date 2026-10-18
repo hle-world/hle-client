@@ -7,6 +7,7 @@ covered here rather than discovered on a firewall.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from hle_client.service_cmd import (
     rc_service_name,
     render_rc_script,
 )
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class TestCurrentPlatform:
@@ -350,3 +353,284 @@ class TestRcdInstallRestartsARunningService:
         assert seen["start_new_session"] is True
         for stream in ("stdin", "stdout", "stderr"):
             assert seen[stream] is subprocess.DEVNULL
+
+
+class TestRcScriptInterpreterGuard:
+    """A venv whose interpreter is gone must not respawn every second.
+
+    ``-x`` says the launcher is executable even when its shebang points at a
+    python that no longer exists, so daemon(8) -r relaunches it forever while
+    the log stays silent. The rc script tests the command once and refuses to
+    start with one line naming the fix.
+    """
+
+    def _script(self, **kw):
+        params = {
+            "label": "agent",
+            "hle_path": "/opt/hle/current/bin/hle",
+            "run_args": build_agent_args(),
+            **kw,
+        }
+        return render_rc_script(**params)
+
+    def test_a_start_precmd_is_declared(self):
+        assert 'start_precmd="hle_agent_check_interpreter"' in self._script()
+
+    def test_the_precmd_runs_the_command_and_logs_the_fix(self):
+        script = self._script()
+        assert "hle_agent_check_interpreter()" in script
+        assert '"${hle_command}" --version' in script
+        assert "venv interpreter missing — re-run the installer" in script
+        assert '>> "${logfile}"' in script
+
+    def test_refusing_to_start_fails_the_precmd(self):
+        script = self._script()
+        body = script[script.index("hle_agent_check_interpreter()") :]
+        assert "return 1" in body
+        assert body.index("return 1") < body.index("return 0")
+
+    def test_the_precmd_precedes_run_rc_command(self):
+        script = self._script()
+        assert script.index("start_precmd=") < script.index('run_rc_command "$1"')
+
+
+class TestEnsurePfSenseBootHook:
+    def _setup(self, tmp_path, monkeypatch) -> list[tuple[str, ...]]:
+        calls: list[tuple[str, ...]] = []
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "_RC_CONF", tmp_path / "rc.conf")
+        monkeypatch.setattr(service_cmd, "_RC_CONF_LOCAL", tmp_path / "rc.conf.local")
+        monkeypatch.setattr(service_cmd, "_sysrc", lambda *a: calls.append(a))
+        return calls
+
+    def test_a_missing_hook_is_written_and_the_flag_set(self, tmp_path, monkeypatch):
+        calls = self._setup(tmp_path, monkeypatch)
+        assert service_cmd.ensure_pfsense_boot_hook("hle_agent") is True
+        hook = tmp_path / "hle_agent.sh"
+        assert hook.exists()
+        assert hook.stat().st_mode & 0o777 == 0o755
+        assert f'exec {tmp_path / "hle_agent"} "$1"' in hook.read_text()
+        assert ("hle_agent_enable=YES", "-f", str(tmp_path / "rc.conf.local")) in calls
+
+    def test_a_current_hook_and_flag_change_nothing(self, tmp_path, monkeypatch):
+        calls = self._setup(tmp_path, monkeypatch)
+        (tmp_path / "hle_agent.sh").write_text(service_cmd.render_pfsense_boot_hook("hle_agent"))
+        (tmp_path / "rc.conf.local").write_text('hle_agent_enable="YES"\n')
+        assert service_cmd.ensure_pfsense_boot_hook("hle_agent") is False
+        assert calls == []
+
+    def test_a_stale_hook_is_rewritten(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        (tmp_path / "hle_agent.sh").write_text("#!/bin/sh\n# stale\n")
+        assert service_cmd.ensure_pfsense_boot_hook("hle_agent") is True
+        assert "hand off to the rc.d service" in (tmp_path / "hle_agent.sh").read_text()
+
+    def test_a_stale_flag_is_moved_out_of_the_global_rc_conf(self, tmp_path, monkeypatch):
+        calls = self._setup(tmp_path, monkeypatch)
+        (tmp_path / "hle_agent.sh").write_text(service_cmd.render_pfsense_boot_hook("hle_agent"))
+        (tmp_path / "rc.conf").write_text('hle_agent_enable="YES"\n')
+        (tmp_path / "rc.conf.local").write_text('hle_agent_enable="YES"\n')
+        assert service_cmd.ensure_pfsense_boot_hook("hle_agent") is True
+        assert ("hle_agent_enable", "-x") in calls
+        # The local copy is already right, so it is not written again.
+        assert ("hle_agent_enable=YES", "-f", str(tmp_path / "rc.conf.local")) not in calls
+
+    def test_sysrc_gets_the_unset_flag_as_its_own_argument(self, monkeypatch):
+        # "-x var" passed as one argv entry is not an option to sysrc(8); the
+        # flag would never be removed.
+        seen: list[list[str]] = []
+        monkeypatch.setattr(service_cmd.subprocess, "run", lambda argv, **kw: seen.append(argv))
+        service_cmd._sysrc("hle_agent_enable", "-x", "-f", "/etc/rc.conf.local")
+        assert seen == [["sysrc", "-x", "-f", "/etc/rc.conf.local", "hle_agent_enable"]]
+
+    def test_it_reports_when_it_changes_something(self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch)
+        service_cmd.ensure_pfsense_boot_hook("hle_agent")
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "pfSense boot hook" in out
+
+
+class TestLegacyAgentSpec:
+    def _write_script(self, tmp_path, monkeypatch, **kw):
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
+        script = render_rc_script(
+            label="agent",
+            hle_path="/usr/local/bin/hle",
+            run_args=build_agent_args(),
+            home="/home/admin",
+            agent_config="/home/admin/.config/hle/agent.toml",
+            **kw,
+        )
+        (tmp_path / "hle_agent").write_text(script)
+        return script
+
+    def test_a_spec_is_read_back_from_the_script(self, tmp_path, monkeypatch):
+        self._write_script(tmp_path, monkeypatch)
+        spec = service_cmd._legacy_agent_spec("hle_agent", False)
+        assert spec is not None
+        assert spec["label"] == "agent"
+        assert spec["run_args"] == ["agent", "run"]
+        assert spec["agent_config"] == "/home/admin/.config/hle/agent.toml"
+        assert spec["home"] == "/home/admin"
+        assert spec["user_mode"] is False
+
+    def test_relay_arguments_are_preserved(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
+        (tmp_path / "hle_agent").write_text(
+            render_rc_script(
+                label="agent",
+                hle_path="/usr/local/bin/hle",
+                run_args=build_agent_args(relay_host="relay.example", relay_port=8443),
+            )
+        )
+        spec = service_cmd._legacy_agent_spec("hle_agent", False)
+        assert spec is not None
+        assert spec["run_args"] == [
+            "agent",
+            "run",
+            "--relay-host",
+            "relay.example",
+            "--relay-port",
+            "8443",
+        ]
+
+    def test_a_stamped_script_is_not_reconstructed(self, tmp_path, monkeypatch):
+        self._write_script(tmp_path, monkeypatch, spec=dict(_AGENT_SPEC))
+        assert service_cmd._legacy_agent_spec("hle_agent", False) is None
+
+    def test_a_tunnel_script_is_not_reconstructed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
+        (tmp_path / "hle_ha").write_text(
+            render_rc_script(
+                label="ha",
+                hle_path="/usr/local/bin/hle",
+                run_args=["tunnel", "create", "ha", "http://localhost:8123"],
+            )
+        )
+        assert service_cmd._legacy_agent_spec("hle_ha", False) is None
+
+    def test_a_non_freebsd_platform_is_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "linux")
+        assert service_cmd._legacy_agent_spec("hle_agent", False) is None
+
+
+class TestRefreshServiceHealsTheBootHook:
+    def test_a_spec_less_pfsense_agent_heals_before_restarting(self, monkeypatch):
+        healed: list[str] = []
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: True)
+        monkeypatch.setattr(
+            service_cmd, "ensure_pfsense_boot_hook", lambda svc: healed.append(svc) or True
+        )
+        monkeypatch.setattr(service_cmd, "service_spec", lambda *a, **k: None)
+        monkeypatch.setattr(service_cmd, "_legacy_agent_spec", lambda *a, **k: None)
+        monkeypatch.setattr(service_cmd, "restart_service", lambda *a, **k: True)
+        assert service_cmd.refresh_service("hle_agent", False) == "restarted"
+        assert healed == ["hle_agent"]
+
+    def test_a_freebsd_box_that_is_not_pfsense_is_untouched(self, monkeypatch):
+        healed: list[str] = []
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: False)
+        monkeypatch.setattr(
+            service_cmd, "ensure_pfsense_boot_hook", lambda svc: healed.append(svc) or True
+        )
+        monkeypatch.setattr(service_cmd, "service_spec", lambda *a, **k: None)
+        monkeypatch.setattr(service_cmd, "restart_service", lambda *a, **k: True)
+        assert service_cmd.refresh_service("hle_ha", False) == "restarted"
+        assert healed == []
+
+    def test_a_spec_less_pfsense_agent_is_rebuilt_from_its_script(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: True)
+        monkeypatch.setattr(service_cmd, "_sysrc", lambda *a: None)
+        (tmp_path / "hle_agent").write_text(
+            render_rc_script(
+                label="agent",
+                hle_path="/usr/local/bin/hle",
+                run_args=build_agent_args(),
+                home="/home/admin",
+                agent_config="/home/admin/.config/hle/agent.toml",
+            )
+        )
+        built: list[dict] = []
+        monkeypatch.setattr(service_cmd, "_install_from_spec", lambda spec, **k: built.append(spec))
+        assert service_cmd.refresh_service("hle_agent", False) == "refreshed"
+        assert built and built[0]["label"] == "agent"
+        assert built[0]["agent_config"] == "/home/admin/.config/hle/agent.toml"
+        # The heal ran first, so the box survives the next reboot too.
+        assert (tmp_path / "hle_agent.sh").exists()
+
+
+class TestAgentStartupHealsTheBootHook:
+    def _setup(self, tmp_path, monkeypatch, *, euid: int) -> list[str]:
+        healed: list[str] = []
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: True)
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: euid)
+        monkeypatch.setattr(
+            service_cmd, "ensure_pfsense_boot_hook", lambda svc: healed.append(svc) or True
+        )
+        return healed
+
+    def test_root_with_the_agent_installed_heals(self, tmp_path, monkeypatch):
+        healed = self._setup(tmp_path, monkeypatch, euid=0)
+        (tmp_path / "hle_agent").write_text("# service\n")
+        service_cmd.ensure_agent_boot_hook()
+        assert healed == ["hle_agent"]
+
+    def test_a_non_root_agent_does_not_touch_service_files(self, tmp_path, monkeypatch):
+        healed = self._setup(tmp_path, monkeypatch, euid=1000)
+        (tmp_path / "hle_agent").write_text("# service\n")
+        service_cmd.ensure_agent_boot_hook()
+        assert healed == []
+
+    def test_without_the_agent_service_nothing_happens(self, tmp_path, monkeypatch):
+        healed = self._setup(tmp_path, monkeypatch, euid=0)
+        service_cmd.ensure_agent_boot_hook()
+        assert healed == []
+
+
+class TestPfSenseBootHookWarnings:
+    def _pfsense(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: True)
+        monkeypatch.setattr(service_cmd, "_service_cmd", lambda *a: _Result(0))
+
+    def test_status_warns_when_the_hook_is_missing(self, tmp_path, monkeypatch, capsys):
+        self._pfsense(tmp_path, monkeypatch)
+        (tmp_path / "hle_agent").write_text("# service\n")
+        service_cmd._rcd_status(label="agent", name=None)
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "will not start after a reboot" in out
+        assert "hle daemon refresh agent" in out
+
+    def test_status_is_silent_when_the_hook_exists(self, tmp_path, monkeypatch, capsys):
+        self._pfsense(tmp_path, monkeypatch)
+        (tmp_path / "hle_agent").write_text("# service\n")
+        (tmp_path / "hle_agent.sh").write_text("#!/bin/sh\n")
+        service_cmd._rcd_status(label="agent", name=None)
+        assert "will not start" not in capsys.readouterr().out
+
+    def test_list_names_only_the_services_without_a_hook(self, tmp_path, monkeypatch, capsys):
+        self._pfsense(tmp_path, monkeypatch)
+        (tmp_path / "hle_agent").write_text("# service\n")
+        (tmp_path / "hle_ha").write_text("# service\n")
+        (tmp_path / "hle_ha.sh").write_text("#!/bin/sh\n")
+        service_cmd._rcd_list()
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
+        assert "hle_agent will not start after a reboot" in out
+        assert "hle_ha will not start" not in out
+
+    def test_a_non_pfsense_box_never_warns(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: False)
+        monkeypatch.setattr(service_cmd, "_service_cmd", lambda *a: _Result(0))
+        (tmp_path / "hle_agent").write_text("# service\n")
+        service_cmd._rcd_status(label="agent", name=None)
+        assert "will not start" not in capsys.readouterr().out
