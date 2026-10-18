@@ -2,8 +2,20 @@
 
 ## Unreleased
 
+## v2610.10 — 2026-10-18
+
 ### Changed
 
+- Memory stays bounded however many downloads run at once. Streamed HTTP
+  responses now draw from a process-wide byte budget (8 MiB by default,
+  `HLE_CHUNK_BUDGET_BYTES`) and read the upstream in 64 KiB chunks (was 512 KiB,
+  `HLE_HTTP_CHUNK_SIZE`). A stream over budget waits instead of failing, and
+  there is no cap on connections. Each tunnel can hold at most half the budget,
+  so one busy tunnel never starves the others in the same process. Before, a
+  client opening ~60 parallel downloads could grow memory without bound and get
+  a memory-limited process (such as the Kubernetes operator) OOM-killed, which
+  dropped every tunnel it served. In a benchmark, 100 parallel downloads went
+  from 346 MB to 76 MB of extra memory at the same throughput.
 - `hle firepuncher` is the canonical name again (it was renamed to `hle forward`
   in #151). `hle fp` is a visible short alias, shown beside the command in
   `--help`, and `hle forward` keeps working as a hidden alias, so existing daemon
