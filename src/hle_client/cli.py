@@ -55,11 +55,28 @@ logger = logging.getLogger(__name__)
 LEGACY_ALIASES = {
     "config": "tunnel",
     "service": "daemon",
-    "fp": "forward",
+}
+
+# Renamed back without a note: `forward` (#151's name) is exec'd by units on
+# every start, so it resolves silently and stays out of --help.
+HIDDEN_ALIASES = {
+    "forward": "firepuncher",
+}
+
+# Short spellings that stay advertised: silent, but listed next to the command
+# they name. `fp` is not a legacy name to be retired — it is how the command is
+# usually typed, and it needs no apology.
+VISIBLE_ALIASES = {
+    "fp": "firepuncher",
 }
 
 
-@click.group(cls=RootGroup, aliases=LEGACY_ALIASES)
+@click.group(
+    cls=RootGroup,
+    aliases=LEGACY_ALIASES,
+    hidden_aliases=HIDDEN_ALIASES,
+    visible_aliases=VISIBLE_ALIASES,
+)
 @click.version_option(version=__version__, prog_name="hle")
 @click.option("--debug", is_flag=True, default=False, help="Enable debug logging")
 @click.option(
@@ -548,9 +565,11 @@ main.add_command(config_group, name="tunnel")
 # `service` meant three unrelated things — the OS unit, the upstream URL, and
 # a discovered LAN service. The OS unit is the daemon.
 main.add_command(service_group, name="daemon")
-# clig.dev, in as many words: don't use abbreviation aliases. Nobody guesses
-# "firepuncher" from `fp`.
-main.add_command(fp_command, name="forward")
+# clig.dev, in as many words: don't use abbreviation aliases. But `fp` is how
+# this command has always been typed, and it is advertised beside the full name
+# (`hle fp` in --help), not hidden behind it. `forward` is the hidden alias, so
+# units written against #151's name keep running without a note.
+main.add_command(fp_command, name="firepuncher")
 main.add_command(update_command, name="update")
 
 
@@ -793,7 +812,7 @@ def agent_list(ctx: click.Context, api_key: str | None, as_json: bool) -> None:
     """List the agents on your account, and whether they're online.
 
     Unlike 'hle agent status', which only inspects this machine, this asks the
-    relay. The Name column is what 'hle forward' expects.
+    relay. The Name column is what 'hle firepuncher' expects.
     """
     import json as _json
 

@@ -204,7 +204,7 @@ def test_old_stamp_without_tunnel_key_is_still_read() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# build_fp_args -> `hle forward AGENT TARGET`
+# build_fp_args -> `hle firepuncher AGENT TARGET`
 # --------------------------------------------------------------------------- #
 
 
@@ -217,11 +217,11 @@ def test_build_fp_args_round_trips_through_forward() -> None:
         relay_host="relay.example.com",
         relay_port=8443,
     )
-    # The current grammar: positionals, under the name `forward`.
-    assert argv[:3] == ["forward", "rpi", "192.168.1.50:22"]
+    # The current grammar: positionals, under the name `firepuncher`.
+    assert argv[:3] == ["firepuncher", "rpi", "192.168.1.50:22"]
     assert main.get_command(click.Context(main), argv[0]) is fp
     ctx = _parses(fp, argv[1:])
-    # `forward` sorts positionals out in its callback; the parse keeps them raw.
+    # `firepuncher` sorts positionals out in its callback; the parse keeps them raw.
     agent, targets, _command = _split_positionals(
         ctx.params["agent"], ctx.params["targets"], ctx.params["command"]
     )

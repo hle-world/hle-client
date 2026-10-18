@@ -74,12 +74,15 @@ class TestEveryOldVerbResolves:
         assert result.exit_code == 0, result.output
         assert "note:" not in result.stderr
 
-    def test_the_renamed_nouns_still_say_what_to_type(self):
+    def test_the_firepuncher_aliases_say_nothing(self):
+        """`fp` is advertised and `forward` hidden; neither nags on use."""
         from hle_client import aliases
 
-        aliases._warned.clear()
-        result = CliRunner().invoke(main, ["fp", "--help"])
-        assert "`hle fp` is now `hle forward`" in result.stderr
+        for spelling in ("fp", "forward"):
+            aliases._warned.clear()
+            result = CliRunner().invoke(main, [spelling, "--help"])
+            assert result.exit_code == 0, result.output
+            assert "note:" not in result.stderr
 
     def test_agent_enroll_is_hidden_but_still_there(self):
         agent = _group(("agent",))

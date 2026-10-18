@@ -32,21 +32,39 @@ def _ctx() -> click.Context:
 
 
 class TestOneGrammar:
-    @pytest.mark.parametrize("noun", ["tunnel", "agent", "daemon", "forward", "auth"])
+    @pytest.mark.parametrize("noun", ["tunnel", "agent", "daemon", "firepuncher", "auth"])
     def test_the_nouns_are_what_help_lists(self, noun):
         result = CliRunner().invoke(main, ["--help"])
         assert result.exit_code == 0
         assert noun in result.output
 
-    @pytest.mark.parametrize("old", ["expose", "webhook", "preflight", "config", "service", "fp"])
+    @pytest.mark.parametrize(
+        "old", ["expose", "webhook", "preflight", "config", "service", "forward"]
+    )
     def test_the_old_spellings_are_not_advertised(self, old):
         """Hidden, not removed. Help teaches one shape."""
         result = CliRunner().invoke(main, ["--help"])
         assert f"  {old} " not in result.output
 
+    def test_the_short_alias_is_advertised_beside_its_command(self):
+        """`fp` is not a legacy spelling to retire — it is shown as an alias."""
+        result = CliRunner().invoke(main, ["--help"])
+        assert result.exit_code == 0
+        assert "firepuncher (fp)" in result.output
+
+    def test_the_canonical_name_runs(self):
+        result = CliRunner().invoke(main, ["firepuncher", "--help"])
+        assert result.exit_code == 0
+        assert "firepuncher" in result.output
+
     @pytest.mark.parametrize(
         ("old", "new"),
-        [("config", "tunnel"), ("service", "daemon"), ("fp", "forward")],
+        [
+            ("config", "tunnel"),
+            ("service", "daemon"),
+            ("fp", "firepuncher"),
+            ("forward", "firepuncher"),
+        ],
     )
     def test_the_old_group_names_still_resolve(self, old, new):
         assert main.get_command(_ctx(), old) is main.commands[new]
@@ -243,7 +261,7 @@ class TestTunnelHelpListsEveryMovedVerb:
 class TestEveryAliasResolves:
     """Every alias in every `AliasedGroup` in the tree, not just the root's.
 
-    `RootGroup`'s ``LEGACY_ALIASES`` (`cli.py:52`) and `config_group`'s
+    `RootGroup`'s ``LEGACY_ALIASES`` (`cli.py:55`) and `config_group`'s
     ``show -> get`` (`config_cmd.py:212`) are two separate alias tables; a
     test that only walked one of them would miss a broken alias in the other.
     """

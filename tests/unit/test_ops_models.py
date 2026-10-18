@@ -156,6 +156,8 @@ class TestDaemon:
         assert kind_from_spec({"run_args": ["agent", "run"]}) == "agent"
         assert kind_from_spec({"run_args": ["expose", "--service", "x"]}) == "tunnel"
         assert kind_from_spec({"run_args": ["fp", "rpi", "22"]}) == "forward"
+        assert kind_from_spec({"run_args": ["forward", "rpi", "22"]}) == "forward"
+        assert kind_from_spec({"run_args": ["firepuncher", "rpi", "22"]}) == "forward"
         assert kind_from_spec(None) == "unknown"
 
     def test_from_spec(self):

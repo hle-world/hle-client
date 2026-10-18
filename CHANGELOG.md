@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+
+- `hle firepuncher` is the canonical name again (it was renamed to `hle forward`
+  in #151). `hle fp` is a visible short alias, shown beside the command in
+  `--help`, and `hle forward` keeps working as a hidden alias, so existing daemon
+  units keep running. Neither prints a deprecation note. Newly generated units
+  exec `hle firepuncher …`, and `hle daemon refresh` rewrites old `fp`/`forward`
+  units to it. `hle daemon install firepuncher` is the canonical kind;
+  `hle daemon install forward` is a hidden alias there too. Protocol and message
+  names (`fp_*`, firepuncher internals) are unchanged.
+
 ### Fixed
 
 - The agent stops its tunnel endpoints cleanly when a stop signal arrives while it
