@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v2610.11 — 2026-10-18
+
 ### Fixed
 
 - Streaming throughput regression in 2610.10. The default upstream chunk size
