@@ -22,9 +22,13 @@ logger = logging.getLogger(__name__)
 # Headers to strip when forwarding HTTP requests to the local service.
 _HOP_BY_HOP_HEADERS = frozenset({"transfer-encoding", "connection", "upgrade", "accept-encoding"})
 
-# How much of the upstream body to read per chunk. Small chunks keep per-stream
-# memory low and let streams from different tunnels interleave on the relay link.
-DEFAULT_HTTP_CHUNK_SIZE = 64 * 1024  # 64 KiB
+# How much of the upstream body to read per chunk. Each chunk is one JSON frame
+# with a fixed per-frame cost on both ends, so small chunks cap per-stream
+# throughput. Measured through a real tunnel: 64 KiB ~21 Mbit/s, 256 KiB
+# ~66 Mbit/s, 512 KiB ~60 Mbit/s. Each active stream also holds one chunk
+# outside the byte budget, so peak RSS for 100 parallel downloads was 123 MB at
+# 64 KiB, 173 MB at 256 KiB and 285 MB at 512 KiB. 256 KiB is the balance.
+DEFAULT_HTTP_CHUNK_SIZE = 256 * 1024  # 256 KiB
 HTTP_CHUNK_SIZE_ENV = "HLE_HTTP_CHUNK_SIZE"
 
 

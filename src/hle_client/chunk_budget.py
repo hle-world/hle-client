@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 # frame is in the local socket buffer (TCP handles the relay RTT), so this is
 # not a bandwidth limit: one stream still saturates a fast link. More buffering
 # would only add latency and memory. Benchmark (100 parallel downloads): peak
-# RSS growth 346 MB with no budget and 512 KiB chunks, 76 MB with this default.
+# RSS growth 346 MB with no budget and 512 KiB chunks, 173 MB with this budget
+# and the 256 KiB default chunk size.
 DEFAULT_CHUNK_BUDGET_BYTES = 8 * 1024 * 1024
 CHUNK_BUDGET_ENV = "HLE_CHUNK_BUDGET_BYTES"
 

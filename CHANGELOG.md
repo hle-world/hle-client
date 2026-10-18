@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- Streaming throughput regression in 2610.10. The default upstream chunk size
+  drops from 64 KiB to 256 KiB, because each chunk is one frame with a fixed cost
+  on both ends. Measured through a real tunnel, one stream went from about 21 to
+  about 66 Mbit/s, back above 2610.9's speed. Memory stays bounded by the byte
+  budget (100 parallel downloads: 173 MB). `HLE_HTTP_CHUNK_SIZE` still overrides
+  it.
+
 ## v2610.10 — 2026-10-18
 
 ### Changed
