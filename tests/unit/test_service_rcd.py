@@ -10,13 +10,10 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
-from click.testing import CliRunner
 
 from hle_client import service_cmd
-from hle_client.cli import main
 from hle_client.service_cmd import (
     build_agent_args,
     current_platform,
@@ -599,26 +596,20 @@ class TestPfSenseBootHookWarnings:
         monkeypatch.setattr(service_cmd, "is_pfsense", lambda: True)
         monkeypatch.setattr(service_cmd, "_service_cmd", lambda *a: _Result(0))
 
-    def test_status_warns_when_the_hook_is_missing(self, tmp_path, monkeypatch):
+    def test_status_warns_when_the_hook_is_missing(self, tmp_path, monkeypatch, capsys):
         self._pfsense(tmp_path, monkeypatch)
-        monkeypatch.setattr(service_cmd, "_require_supported", lambda: "freebsd")
-        monkeypatch.setattr(service_cmd, "resolve_user_mode", lambda **k: False)
         (tmp_path / "hle_agent").write_text("# service\n")
-        with patch("hle_client.ops.daemon.status", new_callable=AsyncMock):
-            result = CliRunner().invoke(main, ["daemon", "status", "agent"])
-        out = " ".join(_ANSI.sub("", result.output).split())
+        service_cmd._rcd_status(label="agent", name=None)
+        out = " ".join(_ANSI.sub("", capsys.readouterr().out).split())
         assert "will not start after a reboot" in out
         assert "hle daemon refresh agent" in out
 
-    def test_status_is_silent_when_the_hook_exists(self, tmp_path, monkeypatch):
+    def test_status_is_silent_when_the_hook_exists(self, tmp_path, monkeypatch, capsys):
         self._pfsense(tmp_path, monkeypatch)
-        monkeypatch.setattr(service_cmd, "_require_supported", lambda: "freebsd")
-        monkeypatch.setattr(service_cmd, "resolve_user_mode", lambda **k: False)
         (tmp_path / "hle_agent").write_text("# service\n")
         (tmp_path / "hle_agent.sh").write_text("#!/bin/sh\n")
-        with patch("hle_client.ops.daemon.status", new_callable=AsyncMock):
-            result = CliRunner().invoke(main, ["daemon", "status", "agent"])
-        assert "will not start" not in result.output
+        service_cmd._rcd_status(label="agent", name=None)
+        assert "will not start" not in capsys.readouterr().out
 
     def test_list_names_only_the_services_without_a_hook(self, tmp_path, monkeypatch, capsys):
         self._pfsense(tmp_path, monkeypatch)
@@ -633,7 +624,8 @@ class TestPfSenseBootHookWarnings:
     def test_a_non_pfsense_box_never_warns(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
         monkeypatch.setattr(service_cmd, "is_pfsense", lambda: False)
+        monkeypatch.setattr(service_cmd, "_service_cmd", lambda *a: _Result(0))
         (tmp_path / "hle_agent").write_text("# service\n")
-        service_cmd._pfsense_boot_hook_warning("hle_agent")
+        service_cmd._rcd_status(label="agent", name=None)
         assert "will not start" not in capsys.readouterr().out
 

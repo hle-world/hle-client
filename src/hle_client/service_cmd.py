@@ -1589,6 +1589,7 @@ def _rcd_uninstall(*, label: str, name: str | None) -> None:
 def _rcd_status(*, label: str, name: str | None) -> None:
     svc = rc_service_name(label, name)
     _service_cmd(svc, "status")
+    _pfsense_boot_hook_warning(svc)
 
 
 def _rcd_scripts() -> list[Path]:
@@ -2360,11 +2361,6 @@ def status(
     label, name = _resolve_target(target, agent_mode, label, name)
     user_mode = resolve_user_mode(user_flag=user_mode, system_flag=system_mode)
     asyncio.run(ops_daemon.status(label, name=name, user_mode=user_mode))
-
-    if plat == "freebsd":
-        # pfSense runs only rc.d/*.sh at boot. Without the companion file the
-        # service is enabled, healthy now, and absent after a reboot.
-        _pfsense_boot_hook_warning(ops_daemon.service_name(label, name, plat=plat))
 
     if user_mode and plat == "linux":
         # "active (running)" is true and useless if the unit dies at logout.
