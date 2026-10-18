@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The agent stops its tunnel endpoints cleanly when a stop signal arrives while it
+  is waiting to reconnect to the relay, instead of leaving them to close with 1011
+  during shutdown and drop in-flight browser WebSockets abruptly.
+
 ## v2610.9 — 2026-10-11
 
 ### Fixed
