@@ -55,6 +55,11 @@ logger = logging.getLogger(__name__)
 LEGACY_ALIASES = {
     "config": "tunnel",
     "service": "daemon",
+}
+
+# Renamed back without a note: `forward` (#151's name) is exec'd by units on
+# every start, so it resolves silently and stays out of --help.
+HIDDEN_ALIASES = {
     "forward": "firepuncher",
 }
 
@@ -66,7 +71,12 @@ VISIBLE_ALIASES = {
 }
 
 
-@click.group(cls=RootGroup, aliases=LEGACY_ALIASES, visible_aliases=VISIBLE_ALIASES)
+@click.group(
+    cls=RootGroup,
+    aliases=LEGACY_ALIASES,
+    hidden_aliases=HIDDEN_ALIASES,
+    visible_aliases=VISIBLE_ALIASES,
+)
 @click.version_option(version=__version__, prog_name="hle")
 @click.option("--debug", is_flag=True, default=False, help="Enable debug logging")
 @click.option(
