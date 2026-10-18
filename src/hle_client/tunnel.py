@@ -24,7 +24,7 @@ import websockets.exceptions
 
 from hle_client import __version__
 from hle_client import config as hle_config
-from hle_client.chunk_budget import get_chunk_budget
+from hle_client.chunk_budget import LayeredBudget, endpoint_budget, get_chunk_budget
 from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event, render_notice
@@ -481,6 +481,9 @@ class Tunnel:
     _active_chunked: dict[str, asyncio.Task[None]] = field(
         default_factory=dict, init=False, repr=False
     )
+    # This endpoint's byte share of the process-wide chunk budget (created on
+    # first chunked response, so it binds to the running loop's budget).
+    _chunk_budget: LayeredBudget | None = field(default=None, init=False, repr=False)
     _log_handler: _DiagnosticLogHandler | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -1125,11 +1128,16 @@ class Tunnel:
             body = base64.b64decode(req.body)
 
         chunk_index = 0
-        budget = get_chunk_budget()
+        shared = get_chunk_budget()
+        if self._chunk_budget is None or self._chunk_budget.shared is not shared:
+            self._chunk_budget = endpoint_budget(shared)
+        budget = self._chunk_budget
 
         try:
-            # No cap on concurrent streams: the process-wide byte budget bounds
-            # memory, and streams over it wait (backpressure) instead of failing.
+            # No cap on concurrent streams: the byte budget bounds memory, and
+            # streams over it wait (backpressure) instead of failing. This
+            # endpoint can hold at most half the process budget, so other
+            # tunnels served by the same process are never starved.
             stream = self._proxy.stream_http(
                 method=req.method,
                 path=req.path,

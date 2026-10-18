@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    from hle_client.chunk_budget import ChunkBudget
+    from hle_client.chunk_budget import ChunkBudget, LayeredBudget
 
 import httpx
 
@@ -408,7 +408,7 @@ class LocalProxy:
         headers: dict[str, str],
         body: bytes | None = None,
         query_string: str = "",
-        budget: ChunkBudget | None = None,
+        budget: ChunkBudget | LayeredBudget | None = None,
     ) -> AsyncGenerator[tuple[int | None, dict[str, str | list[str]] | None, bytes | None], None]:
         """Stream an HTTP response from the local service in chunks.
 
@@ -460,6 +460,9 @@ class LocalProxy:
                     # Reserve what was actually read, after the read: an idle
                     # stream (SSE, long-poll) then holds no budget, and a stream
                     # waiting here reads nothing more upstream (backpressure).
+                    # The read itself is outside the budget by design; it is
+                    # bounded per connection (one chunk plus the socket layer's
+                    # read buffer, a few hundred KiB).
                     if budget is not None:
                         held = await budget.acquire(len(chunk))
                     yield (None, None, chunk)

@@ -130,6 +130,38 @@ class ChunkBudget:
             self._peak = in_flight
 
 
+class LayeredBudget:
+    """An endpoint's share of the process budget: both must have room.
+
+    The endpoint budget is acquired first, so a busy endpoint's surplus streams
+    queue on their own budget instead of in front of other tunnels on the
+    shared one. This caps bytes, not connections: any number of streams run,
+    but one endpoint can hold at most its share and the rest stays available
+    to every other tunnel in the process (a legacy operator serves them all).
+    """
+
+    def __init__(self, endpoint: ChunkBudget, shared: ChunkBudget) -> None:
+        self.endpoint = endpoint
+        self.shared = shared
+
+    async def acquire(self, amount: int) -> int:
+        got = await self.endpoint.acquire(amount)
+        try:
+            return await self.shared.acquire(got)
+        except BaseException:
+            self.endpoint.release(got)
+            raise
+
+    def release(self, amount: int) -> None:
+        self.shared.release(amount)
+        self.endpoint.release(amount)
+
+
+def endpoint_budget(shared: ChunkBudget) -> LayeredBudget:
+    """A per-endpoint view of ``shared`` capped at half of it."""
+    return LayeredBudget(ChunkBudget(max(1, shared.capacity // 2)), shared)
+
+
 _budget: ChunkBudget | None = None
 
 

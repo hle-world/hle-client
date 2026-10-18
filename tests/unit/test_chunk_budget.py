@@ -329,3 +329,56 @@ class TestChunkedResponseBudget:
         release.set()
         await asyncio.gather(*tasks)
         assert budget.in_flight == 0
+
+    async def test_busy_endpoint_cannot_starve_another(self, monkeypatch):
+        """One tunnel with many stuck streams holds at most half the budget."""
+        monkeypatch.setenv(chunk_budget.CHUNK_BUDGET_ENV, str(1024 * 1024))
+        reset_chunk_budget()
+        budget = get_chunk_budget()
+        chunk = b"x" * (64 * 1024)
+
+        busy = _tunnel()
+        busy._tunnel_id = "t-busy"
+        busy._proxy._http_client = _FakeClient([chunk, chunk])
+        quiet = _tunnel()
+        quiet._tunnel_id = "t-quiet"
+        quiet._proxy._http_client = _FakeClient([chunk])
+
+        stuck = asyncio.Event()
+
+        async def stuck_send(message: str) -> None:
+            if ProtocolMessage.model_validate_json(message).type == MessageType.HTTP_RESPONSE_CHUNK:
+                await stuck.wait()
+
+        busy_tasks = []
+        for i in range(100):
+            ws = AsyncMock()
+            ws.send = AsyncMock(side_effect=stuck_send)
+            busy_tasks.append(
+                asyncio.create_task(busy._handle_http_request_chunked(ws, _request(f"b-{i}")))
+            )
+        for _ in range(500):
+            await asyncio.sleep(0)
+        assert budget.in_flight <= budget.capacity // 2
+
+        ws_quiet, sent = _mock_ws()
+        await asyncio.wait_for(
+            quiet._handle_http_request_chunked(ws_quiet, _request("q-1")), timeout=2
+        )
+        assert len(sent) == 3  # START, chunk, END
+
+        stuck.set()
+        await asyncio.gather(*busy_tasks)
+        assert budget.in_flight == 0
+
+    async def test_layered_budget_releases_endpoint_share_on_cancel(self):
+        shared = ChunkBudget(1000)
+        await shared.acquire(1000)
+        layered = chunk_budget.endpoint_budget(shared)
+        waiter = asyncio.create_task(layered.acquire(300))
+        await asyncio.sleep(0)
+        assert layered.endpoint.in_flight == 300  # endpoint share taken, waiting on shared
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert layered.endpoint.in_flight == 0
