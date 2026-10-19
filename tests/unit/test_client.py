@@ -192,6 +192,47 @@ class TestLocalProxyForwardHttp:
         assert b"path must be relative" in body
         await proxy.stop()
 
+    async def test_rejects_dot_segment_paths_under_a_base_path(self):
+        proxy = _proxy("http://192.168.1.10:8080/public/")
+        await proxy.start()
+        proxy._http_client.request = AsyncMock(side_effect=AssertionError("must not forward"))
+
+        for path in ("/../x", "/./../x", "/%2e%2e/x", "/..%2fx"):
+            status, _, body = await proxy.forward_http(method="GET", path=path, headers={})
+            assert status == 400, path
+            assert b"escapes the service base path" in body, path
+        proxy._http_client.request.assert_not_awaited()
+        await proxy.stop()
+
+    async def test_relative_path_stays_under_a_base_path(self):
+        proxy = _proxy("http://192.168.1.10:8080/public/")
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response()
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        status, _, _ = await proxy.forward_http(method="GET", path="/a/b", headers={})
+
+        assert status == 200
+        assert proxy._http_client.request.call_args.kwargs["url"] == "/a/b"
+        # httpx merges the relative path into base_url, landing under the
+        # sub-path the owner exposed.
+        built = proxy._http_client.build_request("GET", "/a/b")
+        assert str(built.url) == "http://192.168.1.10:8080/public/a/b"
+        await proxy.stop()
+
+    async def test_stream_rejects_dot_segment_paths_under_a_base_path(self):
+        proxy = _proxy("http://192.168.1.10:8080/public/")
+        await proxy.start()
+
+        yields = [
+            item
+            async for item in proxy.stream_http(method="GET", path="/../x", headers={})
+        ]
+        assert yields[0][0] == 400
+        assert b"escapes the service base path" in (yields[1][2] or b"")
+        await proxy.stop()
+
     async def test_successful_get(self):
         proxy = _proxy()
         await proxy.start()

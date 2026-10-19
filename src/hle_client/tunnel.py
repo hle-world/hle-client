@@ -32,6 +32,7 @@ from hle_client.proxy import (
     UPSTREAM_ERROR_HEADER,
     LocalProxy,
     ProxyConfig,
+    safe_proxied_path,
     sni_hostname_for,
     upstream_verify,
 )
@@ -243,8 +244,13 @@ def _upstream_connect_diagnostics(url: str, exc: BaseException) -> dict[str, Any
     return diag
 
 
-def _build_local_ws_url(service_url: str, path: str) -> str:
+def _build_local_ws_url(service_url: str, path: str) -> str | None:
     """Join the local service URL and a WS path into a ``ws(s)://`` URL.
+
+    Returns ``None`` when *path* would escape the service URL's base path
+    (dot segments, encoded separators) — ``websockets`` does not normalise the
+    path the way httpx normalises the HTTP path, so the same guard is applied
+    here as in the HTTP proxy.
 
     ``path`` always starts with ``/``. The base has any trailing slash
     stripped first, otherwise a service URL like ``https://host:8006/`` would
@@ -254,8 +260,14 @@ def _build_local_ws_url(service_url: str, path: str) -> str:
     vncwebsocket answers HTTP 500, breaking every VM/CT console over the
     tunnel.
     """
+    path_only, sep, query = path.partition("?")
+    safe_path = safe_proxied_path(path_only, service_url)
+    if safe_path is None:
+        return None
+    if sep:
+        safe_path = f"{safe_path}?{query}"
     base = service_url.replace("http://", "ws://").replace("https://", "wss://")
-    return f"{base.rstrip('/')}{path}"
+    return f"{base.rstrip('/')}{safe_path}"
 
 
 def _build_ws_close_diagnostics(
@@ -1324,6 +1336,20 @@ class Tunnel:
             )
             origin_netloc = self.config.upstream_host
         local_ws_url = _build_local_ws_url(presented_url, open_req.path)
+        if local_ws_url is None:
+            logger.error("Rejecting WS path that escapes the service base path: %s", open_req.path[:100])
+            async with self._ws_streams_lock:
+                self._ws_streams.pop(stream_id, None)
+            close_msg = ProtocolMessage(
+                type=MessageType.WS_CLOSE,
+                tunnel_id=self._tunnel_id,
+                payload=WsStreamClose(
+                    stream_id=stream_id, code=1008, reason="invalid path"
+                ).model_dump(),
+            )
+            with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                await ws.send(close_msg.model_dump_json())
+            return
 
         # Strip WebSocket handshake and hop-by-hop headers — these belong to
         # the browser↔relay connection, not the client↔local service connection.
