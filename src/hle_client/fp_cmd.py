@@ -25,6 +25,7 @@ from hle_client import __version__, shutdown
 from hle_client.context import require_api_key
 from hle_client.errors import HleError
 from hle_client.firepuncher import FpLocalClient
+from hle_client.output import sanitize
 from hle_client.richcompat import Console
 from hle_common.fp_protocol import (
     LOCAL_NETWORKS,
@@ -312,7 +313,9 @@ async def _run(
     def notice(message: str, *, style: str = "yellow") -> None:
         nonlocal last_notice
         if message != last_notice:
-            console.print(f"[{style}]{message}[/{style}]")
+            # Close reasons and relay detail are server-controlled; keep them
+            # from carrying terminal escapes or rich markup into the line.
+            console.print(f"[{style}]{sanitize(message)}[/{style}]")
             last_notice = message
 
     async with server:
@@ -385,7 +388,7 @@ async def _run(
                 raise
             except websockets.exceptions.ConnectionClosed as exc:
                 if exc.rcvd is not None and exc.rcvd.code in _FATAL_CLOSE_CODES:
-                    raise HleError(exc.rcvd.reason or "rejected by relay") from None
+                    raise HleError(sanitize(exc.rcvd.reason or "rejected by relay")) from None
                 notice(f"Connection lost ({_close_reason(exc)})")
             except OSError as exc:
                 # DNS failure, no route, refused — typical when the laptop's

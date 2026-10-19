@@ -46,3 +46,32 @@ def test_unknown_level_falls_back_to_info(captured_console):
     object.__setattr__(notice, "level", "future-level")
     notices.render_notice(notice)
     assert "hi" in captured_console.getvalue()
+
+
+def test_server_text_is_inert(captured_console):
+    """A hostile relay cannot inject terminal escapes or a rich link.
+
+    The message carries an OSC 52 clipboard write and a rich ``[link=...]``;
+    both must reach the terminal as ordinary characters, not as instructions.
+    """
+    notices.render_notice(
+        NoticePayload(
+            code="x",
+            message="\x1b]52;c;ZXZpbA==\x07 [link=https://evil]click[/link]",
+        )
+    )
+    out = captured_console.getvalue()
+    assert "\x1b" not in out
+    assert "\x07" not in out
+    assert "[link=https://evil]click[/link]" in out
+
+
+def test_url_is_inert_too(captured_console):
+    """The URL is server-supplied as well, so it gets the same treatment."""
+    notices.render_notice(
+        NoticePayload(code="x", message="see", url="\x1b]0;spoof\x07[link=x]y[/link]")
+    )
+    out = captured_console.getvalue()
+    assert "\x1b" not in out
+    assert "\x07" not in out
+    assert "[link=x]y[/link]" in out

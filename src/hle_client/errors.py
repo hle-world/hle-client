@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hle_client.output import sanitize
+
 if TYPE_CHECKING:
     import httpx
 
@@ -121,7 +123,9 @@ def server_detail(exc: Any) -> str | None:
         detail = exc.response.json().get("detail")
     except Exception:  # noqa: BLE001 — an unparseable body is just "no detail"
         return None
-    return str(detail) if detail else None
+    # The relay wrote this, so treat it as hostile before it is shown: no
+    # terminal escapes, and rich markup prints literally rather than as a link.
+    return sanitize(str(detail)) if detail else None
 
 
 class ApiError(HleError):
@@ -161,7 +165,7 @@ class ApiError(HleError):
             return ConflictError(detail or "Email already in access list.", status=code)
         if code == 429:
             return HleError("Rate limited — try again shortly.", status=code)
-        text = detail or exc.response.text[:200]
+        text = detail or sanitize(exc.response.text[:200])
         return cls(f"Server returned {code}: {text}", status=code)
 
     @classmethod

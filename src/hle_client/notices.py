@@ -15,6 +15,7 @@ import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, TextIO
 
+from hle_client.output import sanitize
 from hle_client.richcompat import Console
 
 if TYPE_CHECKING:
@@ -129,7 +130,9 @@ def render_notice(
         code=notice.code,
     )
     glyph, colour = _GLYPHS.get(notice.level, _GLYPHS["info"])
-    line = f"[{colour}]{glyph}[/{colour}] {notice.message}"
+    # The relay chooses this text, so treat it as hostile: a terminal escape or
+    # a rich [link=...] the relay wrote must render as literal characters.
+    line = f"[{colour}]{glyph}[/{colour}] {sanitize(notice.message)}"
     if notice.url:
-        line += f" [dim]→ {notice.url}[/dim]"
+        line += f" [dim]→ {sanitize(notice.url)}[/dim]"
     (_err_console if _enabled else _console).print(line)

@@ -46,6 +46,10 @@ _STYLES = (
 )
 _TAG = re.compile(rf"\[/?(?:{_STYLES})(?:\s+(?:{_STYLES}))*\]|\[/\]")
 
+# C0 controls, DEL, and C1 controls. Newline and tab are ordinary layout and
+# stay; everything else is a byte a terminal acts on rather than shows.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
 TABLE = "table"
 JSON = "json"
 OUTPUT_FORMATS = (TABLE, JSON)
@@ -54,6 +58,36 @@ OUTPUT_FORMATS = (TABLE, JSON)
 def strip_markup(text: str) -> str:
     """Drop style tags, leaving the words."""
     return _TAG.sub("", text)
+
+
+def strip_control(text: str) -> str:
+    """Drop C0/C1 control characters, keeping newline and tab.
+
+    A server-controlled string reaches the terminal unchanged otherwise, and an
+    ESC byte lets a compromised relay rewrite the line, set the window title, or
+    write the clipboard (OSC 52). Newline and tab only affect layout.
+    """
+    return _CONTROL.sub("", text)
+
+
+def escape_markup(text: str) -> str:
+    """Make rich markup literal, so server text prints as written.
+
+    rich turns ``[link=...]`` into a clickable link whose destination the relay
+    chose. Escaping the brackets leaves the words. Without rich there is no
+    markup parser to fool, so the fallback strips tags rather than rendering
+    them and the text is already inert.
+    """
+    if HAVE_RICH:
+        from rich.markup import escape
+
+        return escape(text)
+    return text
+
+
+def sanitize(text: str) -> str:
+    """Make server-supplied text safe to print: no control bytes, literal markup."""
+    return escape_markup(strip_control(text))
 
 
 def color_enabled(explicit: bool | None = None, stream: Any = None) -> bool:
@@ -133,9 +167,9 @@ class Output:
         if not force and (self.quiet or self.json_mode):
             return
         if self._console is not None:
-            self._console.print(text)
+            self._console.print(strip_control(text))
         else:
-            print(strip_markup(text), file=self._stream)
+            print(strip_markup(strip_control(text)), file=self._stream)
 
     def error(self, text: str) -> None:
         """Write to stderr, regardless of quiet or output format.
@@ -145,9 +179,9 @@ class Output:
         the message cannot go there.
         """
         if HAVE_RICH and _RichConsole is not None:
-            _RichConsole(stderr=True, no_color=not self._color).print(text)
+            _RichConsole(stderr=True, no_color=not self._color).print(strip_control(text))
         else:
-            print(strip_markup(text), file=sys.stderr)
+            print(strip_markup(strip_control(text)), file=sys.stderr)
 
     def report(self, message: str, *, hint: str | None = None, payload: Any = None) -> None:
         """Render a failure: text with a hint, or one JSON object under ``-o json``.
@@ -188,11 +222,11 @@ class Output:
             for column in columns:
                 table.add_column(column)
             for row in rows:
-                table.add_row(*row)
+                table.add_row(*[strip_control(cell) for cell in row])
             self._console.print(table)
             return
 
-        plain_rows = [[strip_markup(cell) for cell in row] for row in rows]
+        plain_rows = [[strip_markup(strip_control(cell)) for cell in row] for row in rows]
         widths = [len(c) for c in columns]
         for row in plain_rows:
             for i, cell in enumerate(row[: len(widths)]):
