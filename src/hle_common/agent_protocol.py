@@ -363,6 +363,14 @@ class UpdateRequest(WireModel):
     # code HANDOVER once the successor is serving. Absent means Stage A: swap,
     # exit, and let the service manager relaunch the new version.
     successor_nonce: str | None = None
+    # Optional, absent from older relays. A move to an older release is refused
+    # unless the relay says so explicitly here (a deliberate rollback) or the
+    # operator allows it locally.
+    allow_downgrade: bool = False
+    # Optional sha256 of the wheel for `target_version`. When present the agent
+    # verifies the downloaded wheel against it before installing; when absent
+    # the update proceeds as before (unless the operator pinned a manifest).
+    wheel_sha256: str | None = None
 
 
 @dataclass(kw_only=True)

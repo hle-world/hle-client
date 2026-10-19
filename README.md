@@ -352,6 +352,20 @@ API key resolution order:
 2. `HLE_API_KEY` environment variable
 3. `~/.config/hle/config.toml`
 
+### Agent self-update policy
+
+An agent can also be told to update itself from the dashboard (the
+`update_request` control frame). That is on by default. An operator can refuse
+it on a host with `HLE_REMOTE_UPDATE=off` or `remote_update = false` in
+`~/.config/hle/agent.toml`; every update request is then refused with
+`refused:remote-update-disabled`. An update to an older release is refused with
+`refused:downgrade` unless `HLE_ALLOW_DOWNGRADE=true` (or
+`allow_downgrade = true` in `agent.toml`) is set, and never below the client's
+minimum supported release. To pin releases, point `HLE_UPDATE_MANIFEST` (or
+`update_manifest` in `agent.toml`) at a JSON object mapping each version to the
+sha256 of its wheel; the wheel is downloaded, hashed and only then installed, so
+a wheel swapped on a mirror or index is not activated.
+
 ### Kubernetes agents
 
 An agent running inside a cluster only tunnels to Kubernetes Services; a raw

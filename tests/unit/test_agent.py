@@ -591,7 +591,9 @@ class TestHelloContent:
         {"type": "welcome", "agent_public_id": "pub-1", "base_domain": "hle.world"}
     )
 
-    async def _hello_sent(self, monkeypatch, supported: bool = False, home=None) -> dict:
+    async def _hello_sent(
+        self, monkeypatch, supported: bool = False, home=None, remote_update=None
+    ) -> dict:
         import hle_client.agent as agent_mod
         from hle_client.agent_update import UpdateSupport
 
@@ -609,6 +611,7 @@ class TestHelloContent:
             tunnel_factory=FakeTunnel,
             support_probe=lambda: support,
             home=home,
+            remote_update=remote_update,
         )
 
         async def no_discovery(_ws) -> None:
@@ -644,6 +647,17 @@ class TestHelloContent:
         hello = await self._hello_sent(monkeypatch, home=tmp_path)
         assert hello["install_method"] == "brew"
         assert not [c for c in hello["capabilities"] if c.startswith("update:")]
+
+    async def test_remote_update_off_withholds_the_update_capability(self, monkeypatch, tmp_path):
+        import hle_client.agent as agent_mod
+
+        monkeypatch.setattr(agent_mod, "detect_install_method", lambda: "venv")
+        hello = await self._hello_sent(
+            monkeypatch, supported=True, home=tmp_path, remote_update=False
+        )
+        assert hello["install_method"] == "venv"
+        assert not [c for c in hello["capabilities"] if c.startswith("update:")]
+        assert "handover" not in hello["capabilities"]
 
     async def test_an_unknown_install_sends_null_not_a_guess(self, monkeypatch, tmp_path):
         import hle_client.agent as agent_mod

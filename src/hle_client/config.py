@@ -15,6 +15,7 @@ because hle-operator and hle-tui import it.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -48,6 +49,16 @@ AGENT_TOKEN_PREFIX = credentials.LEGACY_AGENT_TOKEN_PREFIX
 
 API_KEY_ENV = "HLE_API_KEY"
 AGENT_TOKEN_ENV = "HLE_AGENT_TOKEN"
+
+# Agent-side self-update policy. Read from the environment first, then from
+# agent.toml next to the token, so an operator can refuse remote updates on the
+# host itself rather than trusting the relay to.
+REMOTE_UPDATE_ENV = "HLE_REMOTE_UPDATE"
+ALLOW_DOWNGRADE_ENV = "HLE_ALLOW_DOWNGRADE"
+UPDATE_MANIFEST_ENV = "HLE_UPDATE_MANIFEST"
+
+_FALSEY = frozenset({"0", "false", "no", "off"})
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # Sources, as reported to people and to `-o json`.
 SOURCE_API_KEY_ENV = "HLE_API_KEY"
@@ -258,6 +269,89 @@ def remove_agent_token() -> bool:
         path.unlink()
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Agent self-update policy
+# ---------------------------------------------------------------------------
+
+
+def load_agent_settings() -> dict[str, object]:
+    """The agent.toml document, or {} when it is missing or unreadable.
+
+    The same file that holds the token; a malformed file degrades to defaults
+    rather than stopping the agent, exactly as the token reader does.
+    """
+    path = agent_config_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError):
+        logger.debug("Failed to read agent config from %s", path)
+        return {}
+    return {str(k): v for k, v in data.items()}
+
+
+def _env_flag(value: str | None) -> bool | None:
+    """True/False for a recognised flag spelling, None when unset or unknown."""
+    if value is None:
+        return None
+    token = value.strip().lower()
+    if token in _TRUTHY:
+        return True
+    if token in _FALSEY:
+        return False
+    return None
+
+
+def load_remote_update() -> bool:
+    """Whether this agent accepts remote self-update requests. Default on.
+
+    ``HLE_REMOTE_UPDATE=off`` (or ``remote_update = false`` in agent.toml)
+    refuses every update request, whatever the relay sends.
+    """
+    env = _env_flag(os.environ.get(REMOTE_UPDATE_ENV))
+    if env is not None:
+        return env
+    value = load_agent_settings().get("remote_update")
+    if isinstance(value, bool):
+        return value
+    return True
+
+
+def load_allow_downgrade() -> bool:
+    """Whether a remote update may move back to an older release. Default off."""
+    env = _env_flag(os.environ.get(ALLOW_DOWNGRADE_ENV))
+    if env is not None:
+        return env
+    value = load_agent_settings().get("allow_downgrade")
+    if isinstance(value, bool):
+        return value
+    return False
+
+
+def load_update_manifest() -> dict[str, str] | None:
+    """Pinned wheel digests, version -> sha256, or None when not configured.
+
+    A configured manifest that cannot be read is an error, not a silent
+    fall-back to unpinned installs: the operator asked for verification.
+    """
+    raw = os.environ.get(UPDATE_MANIFEST_ENV, "").strip()
+    if not raw:
+        value = load_agent_settings().get("update_manifest")
+        raw = str(value).strip() if value else ""
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not read update manifest {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"update manifest {path} is not a JSON object")
+    return {str(k): str(v) for k, v in data.items()}
 
 
 # ---------------------------------------------------------------------------
