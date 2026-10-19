@@ -155,6 +155,21 @@ class TunnelConfig:
         if self.service_url and "://" not in self.service_url:
             self.service_url = f"http://{self.service_url}"
 
+        # URL-embedded credentials (http://user:pass@host) are supported so
+        # upstream Basic auth keeps working, but the userinfo must not leave the
+        # host: the relay stores ``service_url`` with the tunnel and shows it in
+        # the dashboard and API. Move it into the local-only
+        # ``upstream_basic_auth`` and register the URL without it. An explicit
+        # ``upstream_basic_auth`` wins, but the URL is stripped either way.
+        if self.service_url:
+            parsed = urlparse(self.service_url)
+            if parsed.username is not None or parsed.password is not None:
+                if self.upstream_basic_auth is None:
+                    self.upstream_basic_auth = (parsed.username or "", parsed.password or "")
+                self.service_url = urlunparse(
+                    parsed._replace(netloc=parsed.netloc.rpartition("@")[2])
+                )
+
 
 def to_tunnel_config(
     spec: TunnelSpec,
@@ -995,6 +1010,14 @@ class Tunnel:
         """
         url = self.config.service_url
         verify = self.config.verify_ssl
+        # URL-embedded credentials were moved to upstream_basic_auth, so the
+        # probe must inject them itself to see the same response a forwarded
+        # request would.
+        probe_headers: dict[str, str] = {}
+        if self.config.upstream_basic_auth is not None:
+            uname, upass = self.config.upstream_basic_auth
+            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
+            probe_headers["authorization"] = f"Basic {token}"
         # A canonicalised in-cluster name may carry a trailing dot; verify the
         # certificate against the original host the dashboard configured.
         url_host = urlparse(url).hostname or ""
@@ -1012,9 +1035,9 @@ class Tunnel:
                 trust_env=self.config.trust_env,
             ) as client:
                 try:
-                    response = await client.head(url, extensions=extensions)
+                    response = await client.head(url, extensions=extensions, headers=probe_headers)
                 except httpx.HTTPError:
-                    response = await client.get(url, extensions=extensions)
+                    response = await client.get(url, extensions=extensions, headers=probe_headers)
             elapsed_ms = (time.monotonic() - start) * 1000
             data = _service_check_data(url, verify, elapsed_ms, response=response)
         except Exception as exc:
@@ -1358,10 +1381,11 @@ class Tunnel:
         # Build the local WS URL (see _build_local_ws_url for the trailing-
         # slash handling that keeps strict upstreams like Proxmox happy). When
         # the guard canonicalised the target, the URI keeps the authority the
-        # dashboard asked for — including any ``user:pass@`` so URL-embedded
-        # Basic auth is still sent — for the Host header, while the TCP
-        # connection is directed at the canonical name via websockets'
-        # ``host``/``port`` keywords.
+        # dashboard asked for for the Host header, while the TCP connection is
+        # directed at the canonical name via websockets' ``host``/``port``
+        # keywords. URL-embedded credentials were moved to
+        # ``upstream_basic_auth`` in TunnelConfig and are injected as a header
+        # below, so they never appear in the URL.
         parsed = urlparse(self.config.service_url)
         canonical_host = parsed.hostname or ""
         canonical_port = parsed.port
@@ -1369,18 +1393,7 @@ class Tunnel:
         # Origin never carries userinfo; strip it from the authority.
         origin_netloc = parsed.netloc.rpartition("@")[2]
         if self.config.upstream_host:
-            userinfo = ""
-            # ``is not None``: an empty username with a password (``:pass@``)
-            # is still userinfo and must be sent as Basic auth, as it is when
-            # the URL is passed through unchanged on a non-canonical target.
-            if parsed.username is not None:
-                userinfo = parsed.username
-                if parsed.password:
-                    userinfo += f":{parsed.password}"
-                userinfo += "@"
-            presented_url = urlunparse(
-                parsed._replace(netloc=f"{userinfo}{self.config.upstream_host}")
-            )
+            presented_url = urlunparse(parsed._replace(netloc=self.config.upstream_host))
             origin_netloc = self.config.upstream_host
         local_ws_url = _build_local_ws_url(presented_url, open_req.path)
         if local_ws_url is None:

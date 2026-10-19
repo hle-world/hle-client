@@ -12,6 +12,7 @@ from collections.abc import Callable
 from datetime import UTC
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 import click
 
@@ -236,6 +237,16 @@ def expose(
     tunnel_config = to_tunnel_config(spec, api_key=resolved_key)
     websocket = spec.websocket_enabled
 
+    parsed_service = urlparse(service if "://" in service else f"http://{service}")
+    if parsed_service.username is not None or parsed_service.password is not None:
+        human.print(
+            "[yellow]Warning:[/yellow] The service URL contains credentials. They are "
+            "used here as upstream Basic auth and are not sent to the relay.\n"
+            "         Use --upstream-basic-auth to set them explicitly instead."
+        )
+
+    # What gets shown and registered never carries URL credentials.
+    display_url = tunnel_config.service_url
     auth_specs = [_parse_auth_spec(s) for s in allow]
     on_registered_cb = None
     if auth_specs:
@@ -270,7 +281,7 @@ def expose(
             "listings.\n         Use HLE_API_KEY env var or ~/.config/hle/config.toml instead."
         )
 
-    human.print(f"\n[bold]HLE[/bold] v{__version__}  Exposing [cyan]{service}[/cyan]")
+    human.print(f"\n[bold]HLE[/bold] v{__version__}  Exposing [cyan]{display_url}[/cyan]")
     human.print("     Relay   [dim]hle.world[/dim]")
     if service_label:
         human.print(f"     Label   [dim]{service_label}[/dim]")

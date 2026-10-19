@@ -600,6 +600,49 @@ class TestTunnelRegistrationHandshake:
         assert tunnel._tunnel_id == "t-test-123"
         assert tunnel._public_url == "https://myapp-abc.hle.world"
 
+    async def test_registration_strips_url_embedded_credentials(self):
+        # The relay persists and displays ``service_url``, so credentials in
+        # ``--service`` must be moved to local upstream Basic auth before the
+        # registration frame is sent.
+        tunnel = _tunnel(
+            service_url="http://u:p@h:80/",
+            service_label="ha",
+            api_key="hle_testkey_creds",
+        )
+        assert tunnel.config.service_url == "http://h:80/"
+        assert tunnel.config.upstream_basic_auth == ("u", "p")
+
+        mock_ws = AsyncMock()
+        sent_messages: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent_messages.append(m))
+        ack = ProtocolMessage(
+            type=MessageType.TUNNEL_ACK,
+            payload={
+                "tunnel_id": "t-creds",
+                "subdomain": "ha-abc",
+                "public_url": "https://ha-abc.hle.world",
+                "websocket_enabled": True,
+                "user_code": "abc",
+                "service_label": "ha",
+            },
+        )
+        mock_ws.recv = AsyncMock(return_value=ack.model_dump_json())
+        mock_ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("hle_client.tunnel.websockets.connect", return_value=mock_ctx):
+            await tunnel._proxy.start()
+            await tunnel._connect_once()
+            await tunnel._proxy.stop()
+
+        reg_msg = ProtocolMessage.model_validate_json(sent_messages[0])
+        assert reg_msg.payload is not None
+        assert reg_msg.payload["service_url"] == "http://h:80/"
+        assert "u:p" not in sent_messages[0]
+
     async def test_wrong_ack_type_raises(self):
         tunnel = _tunnel(api_key="hle_testkey_for_bad_ack", service_label="test")
 
@@ -1150,16 +1193,21 @@ class TestTunnelWssTls:
         captured = await self._open(tunnel)
         assert captured["kwargs"]["proxy"] is None
 
-    async def test_url_embedded_credentials_are_kept_in_the_presented_url(self):
+    async def test_url_embedded_credentials_are_stripped_from_the_presented_url(self):
         tunnel = _tunnel(
             service_url="http://user:pass@web.apps.svc.cluster.local.:8000",
             upstream_host="web:8000",
         )
         captured = await self._open(tunnel, headers={"Origin": "https://x.hle.world"})
 
-        assert captured["url"] == "ws://user:pass@web:8000/ws"
+        # The credentials are moved to upstream_basic_auth, so they never appear
+        # in the presented URL (which becomes the upstream Host header) ...
+        assert captured["url"] == "ws://web:8000/ws"
         # Origin is rewritten to the local service and never carries userinfo.
         assert captured["kwargs"]["additional_headers"]["Origin"] == "http://web:8000"
+        # ... but they still reach the upstream as Basic auth.
+        expected = "Basic " + base64.b64encode(b"user:pass").decode()
+        assert captured["kwargs"]["additional_headers"]["authorization"] == expected
 
     async def test_ws_url_embedded_credentials_are_sent_as_basic_auth(self):
         import websockets
@@ -1224,6 +1272,42 @@ class TestTunnelWssTls:
         # upstream as Basic auth, exactly as it does without canonicalisation.
         expected = "Basic " + base64.b64encode(b":pass").decode()
         assert seen["auth"] == expected
+
+
+class TestUrlEmbeddedCredentialsReachUpstream:
+    """Credentials in ``--service`` reach the local service, never the relay."""
+
+    async def test_forwarded_request_carries_basic_auth(self):
+        seen: dict[str, str] = {}
+
+        async def handler(reader, writer):
+            request = await reader.readuntil(b"\r\n\r\n")
+            seen["request"] = request.decode("latin-1")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        tunnel = _tunnel(service_url=f"http://user:pass@127.0.0.1:{port}", service_label="x")
+        # Stripped before anything is registered ...
+        assert tunnel.config.service_url == f"http://127.0.0.1:{port}"
+        assert tunnel.config.upstream_basic_auth == ("user", "pass")
+
+        proxy = tunnel._proxy
+        await proxy.start()
+        try:
+            async with server:
+                status, _, body = await proxy.forward_http(method="GET", path="/", headers={})
+        finally:
+            await proxy.stop()
+
+        # ... but still sent upstream as Basic auth.
+        assert status == 200, body
+        request = seen["request"].lower()
+        assert "authorization: basic " in request
+        assert f"host: 127.0.0.1:{port}" in request
 
 
 class TestTlsVerificationForCanonicalNames:

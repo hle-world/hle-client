@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Security
+
+- Credentials embedded in `--service` (for example
+  `http://admin:pass@192.168.1.5`) no longer reach the relay. The client moves
+  the userinfo into the local-only upstream Basic auth and registers the URL
+  without it, so a server-side leak can no longer disclose homelab credentials.
+  `hle tunnel create` warns when the URL carries credentials and no longer echoes
+  them in its own output. Upstream requests still send `Authorization: Basic`.
+
 ## v2610.11 — 2026-10-18
 
 ### Fixed
