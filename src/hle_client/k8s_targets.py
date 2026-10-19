@@ -81,8 +81,8 @@ Settings (all environment variables, all with safe defaults):
     ``/var/run/secrets/kubernetes.io/serviceaccount/namespace``.
 ``HLE_FIREPUNCHER_ENABLED``
     Firepuncher is disabled on Kubernetes agents unless this is truthy. The
-    relay's forward rules allow loopback and link-local, which in a pod include
-    the API server and the metadata service.
+    relay's forward rules allow loopback and the private networks the pod sits
+    on, which include the API server.
 """
 
 from __future__ import annotations
@@ -224,9 +224,9 @@ def firepuncher_enabled(env: Mapping[str, str] | None = None) -> bool:
 
     Outside Kubernetes it is always available. Inside Kubernetes it is off
     unless ``HLE_FIREPUNCHER_ENABLED`` is truthy: the relay's forward rules
-    allow loopback and link-local addresses, which in a pod include the API
-    server and the cloud metadata service, and a relay must not be able to open
-    raw TCP to either through that door.
+    allow loopback and the private networks the pod sits on, which include the
+    API server, and a relay must not be able to open raw TCP to it through that
+    door.
     """
     if env is None:
         env = os.environ

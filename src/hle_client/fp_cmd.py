@@ -102,7 +102,9 @@ def _explain_if_not_allowed(allowed: list[str], host: str, port: int) -> str | N
     rules = [rule for rule in (parse_rule(entry) for entry in allowed) if rule is not None]
     if len(rules) != len(allowed):
         return None
-    if is_allowed(rules, host, port):
+    # The metadata hard-deny is the agent's to apply: only it knows whether the
+    # operator opted back in, so don't turn it into a client-side refusal here.
+    if is_allowed(rules, host, port, allow_metadata=True):
         return None
     return (
         f"the agent does not allow {host}:{port}.\n"

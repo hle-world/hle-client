@@ -28,7 +28,7 @@ import websockets.exceptions
 
 from hle_client import __version__, agent_logs, agent_state, agent_update, config, k8s_targets
 from hle_client.discovery import active_providers, scan_all
-from hle_client.firepuncher import FpAgentSide
+from hle_client.firepuncher import FpAgentSide, metadata_allowed
 from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event
@@ -319,7 +319,8 @@ class AgentClient:
         self._api_key: str | None = None
         self._base_domain: str | None = None
         self._fp: FpAgentSide | None = None
-        # Until the server tells us otherwise, only loopback is forwardable.
+        # Until the server tells us otherwise, the agent's own networks are
+        # forwardable (cloud metadata is still refused by address).
         self._forward_rules: list[ForwardRule] = default_rules()
         # In-flight preflight probes, held so they aren't garbage-collected.
         self._preflight_tasks: set[asyncio.Task[None]] = set()
@@ -620,6 +621,7 @@ class AgentClient:
                 rules=self._forward_rules,
                 enabled=k8s_targets.firepuncher_enabled(),
                 target_guard=self._target_guard,
+                allow_metadata=metadata_allowed(),
             )
             # Marks the session as having worked, so the reconnect backoff in
             # run() starts over rather than compounding across the process life.

@@ -308,7 +308,8 @@ class AgentWelcome(WireModel):
     api_key: str | None = None
     endpoints: list[EndpointSpec] = field(default_factory=list)
     # Firepuncher allowlist. None means "server said nothing" — the agent keeps
-    # its safe default (loopback only) rather than assuming everything is open.
+    # its safe default (its own networks, cloud metadata refused) rather than
+    # assuming everything is open.
     forward_rules: list[ForwardRule] | None = None
     # -- 1.5 ---------------------------------------------------------------
     # Hello capabilities the server supports in return. Today only

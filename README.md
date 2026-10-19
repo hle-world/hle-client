@@ -236,7 +236,11 @@ hle firepuncher rpi 22 -- ssh -p '{port}' me@127.0.0.1   # Run a command, tear d
 
 The first argument is the agent name (see `hle agent list`); each target is a
 port or `host:port` as the agent sees it. The agent must allow each target;
-adjust per agent in the dashboard.
+adjust per agent in the dashboard. By default the agent's own networks are
+allowed, but the cloud metadata service (`169.254.169.254`, `169.254.170.2`,
+`fd00:ec2::254`) is always refused, even when a rule covers it, so a forward
+cannot hand over the instance's IAM credentials. An operator on the agent host
+can opt back in with `HLE_FIREPUNCHER_ALLOW_METADATA=true`.
 
 ### `hle daemon`
 
