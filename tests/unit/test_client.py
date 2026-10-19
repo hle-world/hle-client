@@ -225,12 +225,11 @@ class TestLocalProxyForwardHttp:
         proxy = _proxy("http://192.168.1.10:8080/public/")
         await proxy.start()
 
-        yields = [
-            item
-            async for item in proxy.stream_http(method="GET", path="/../x", headers={})
-        ]
-        assert yields[0][0] == 400
-        assert b"escapes the service base path" in (yields[1][2] or b"")
+        stream = proxy.stream_http(method="GET", path="/../x", headers={})
+        first = await anext(stream)
+        assert first[0] == 400
+        second = await anext(stream)
+        assert b"escapes the service base path" in (second[2] or b"")
         await proxy.stop()
 
     async def test_successful_get(self):

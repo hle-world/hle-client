@@ -1337,7 +1337,10 @@ class Tunnel:
             origin_netloc = self.config.upstream_host
         local_ws_url = _build_local_ws_url(presented_url, open_req.path)
         if local_ws_url is None:
-            logger.error("Rejecting WS path that escapes the service base path: %s", open_req.path[:100])
+            logger.error(
+                "Rejecting WS path that escapes the service base path: %s",
+                open_req.path[:100],
+            )
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
             close_msg = ProtocolMessage(
