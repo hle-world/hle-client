@@ -770,7 +770,13 @@ class Tunnel:
     # ------------------------------------------------------------------
 
     # Allowed relay hostnames — discovery URLs must match one of these.
-    _RELAY_HOST_ALLOWLIST = re.compile(r"^([a-z0-9-]+\.)*hle\.world$")
+    # Relays live on the dedicated ``relay.hle.world`` domain, optionally
+    # region-prefixed. User tunnels are ``<label>-<user>.hle.world`` and must
+    # never be accepted here: discovery tampering could otherwise point the
+    # client at a user's tunnel and leak the API key in TunnelRegistration.
+    _RELAY_HOST_ALLOWLIST = re.compile(r"^([a-z0-9-]+\.)?relay\.hle\.world$")
+    # The relay control path a discovered URL must use.
+    _RELAY_TUNNEL_PATH = "/_hle/tunnel"
 
     async def _discover_relay_uri(self, api_key: str) -> str:
         """Resolve the relay WebSocket URI via the discovery endpoint.
@@ -788,7 +794,8 @@ class Tunnel:
             discovery = None
 
         if discovery is not None:
-            # Validate the discovered URL: must be wss:// to a known host.
+            # Validate the discovered URL: must be wss:// to a known relay
+            # host on the relay tunnel path.
             parsed = urlparse(discovery.relay_url)
             if parsed.scheme != "wss":
                 logger.warning(
@@ -799,6 +806,11 @@ class Tunnel:
                 logger.warning(
                     "Relay discovery returned untrusted host (%s), ignoring",
                     parsed.hostname,
+                )
+            elif parsed.path != self._RELAY_TUNNEL_PATH:
+                logger.warning(
+                    "Relay discovery returned unexpected path (%s), ignoring",
+                    parsed.path,
                 )
             else:
                 logger.info(

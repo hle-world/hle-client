@@ -92,7 +92,7 @@ class TestDiscoverRelayUri:
     async def test_uses_discovery_url(self) -> None:
         tunnel = self._make_tunnel()
         discovery = RelayDiscoveryResponse(
-            relay_url="wss://us-east.hle.world:443/_hle/tunnel",
+            relay_url="wss://us-east.relay.hle.world:443/_hle/tunnel",
             relay_region="us-east-1",
         )
         with patch(
@@ -102,7 +102,44 @@ class TestDiscoverRelayUri:
         ):
             uri = await tunnel._discover_relay_uri("hle_testkey")
 
-        assert uri == "wss://us-east.hle.world:443/_hle/tunnel"
+        assert uri == "wss://us-east.relay.hle.world:443/_hle/tunnel"
+
+    async def test_accepts_bare_relay_host(self) -> None:
+        tunnel = self._make_tunnel()
+        discovery = RelayDiscoveryResponse(relay_url="wss://relay.hle.world/_hle/tunnel")
+        with patch(
+            "hle_client.api.ApiClient.discover_relay",
+            new_callable=AsyncMock,
+            return_value=discovery,
+        ):
+            uri = await tunnel._discover_relay_uri("hle_testkey")
+
+        assert uri == "wss://relay.hle.world/_hle/tunnel"
+
+    async def test_rejects_user_tunnel_host(self) -> None:
+        """A user tunnel host (``<label>-<user>.hle.world``) is not a relay."""
+        tunnel = self._make_tunnel()
+        discovery = RelayDiscoveryResponse(relay_url="wss://foo-bar.hle.world/_hle/tunnel")
+        with patch(
+            "hle_client.api.ApiClient.discover_relay",
+            new_callable=AsyncMock,
+            return_value=discovery,
+        ):
+            uri = await tunnel._discover_relay_uri("hle_testkey")
+
+        assert uri == "wss://hle.world:443/_hle/tunnel"
+
+    async def test_rejects_unexpected_path(self) -> None:
+        tunnel = self._make_tunnel()
+        discovery = RelayDiscoveryResponse(relay_url="wss://relay.hle.world/_hle/agent")
+        with patch(
+            "hle_client.api.ApiClient.discover_relay",
+            new_callable=AsyncMock,
+            return_value=discovery,
+        ):
+            uri = await tunnel._discover_relay_uri("hle_testkey")
+
+        assert uri == "wss://hle.world:443/_hle/tunnel"
 
     async def test_falls_back_on_none(self) -> None:
         tunnel = self._make_tunnel()
