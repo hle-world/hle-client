@@ -359,9 +359,14 @@ An agent can also be told to update itself from the dashboard (the
 it on a host with `HLE_REMOTE_UPDATE=off` or `remote_update = false` in
 `~/.config/hle/agent.toml`; every update request is then refused with
 `refused:remote-update-disabled`. An update to an older release is refused with
-`refused:downgrade` unless `HLE_ALLOW_DOWNGRADE=true` (or
-`allow_downgrade = true` in `agent.toml`) is set, and never below the client's
-minimum supported release. To pin releases, point `HLE_UPDATE_MANIFEST` (or
+`refused:downgrade` unless the request itself asks for a rollback explicitly
+(`allow_downgrade`) or `HLE_ALLOW_DOWNGRADE=true` (or `allow_downgrade = true` in
+`agent.toml`) is set. Setting `HLE_ALLOW_DOWNGRADE=false` (or
+`allow_downgrade = false`) refuses downgrades even when the request asks for
+one. A downgrade never goes below the client's minimum supported release.
+A request may also carry the wheel's sha256 (`wheel_sha256`), which is checked
+the same way; without one, updates work as before. To pin releases, point
+`HLE_UPDATE_MANIFEST` (or
 `update_manifest` in `agent.toml`) at a JSON object mapping each version to the
 sha256 of its wheel; the wheel is downloaded, hashed and only then installed, so
 a wheel swapped on a mirror or index is not activated.

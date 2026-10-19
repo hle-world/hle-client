@@ -13,7 +13,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -165,7 +165,11 @@ class TunnelConfig:
             parsed = urlparse(self.service_url)
             if parsed.username is not None or parsed.password is not None:
                 if self.upstream_basic_auth is None:
-                    self.upstream_basic_auth = (parsed.username or "", parsed.password or "")
+                    # httpx decoded percent-escapes in URL userinfo; keep doing so.
+                    self.upstream_basic_auth = (
+                        unquote(parsed.username or ""),
+                        unquote(parsed.password or ""),
+                    )
                 self.service_url = urlunparse(
                     parsed._replace(netloc=parsed.netloc.rpartition("@")[2])
                 )
@@ -771,11 +775,27 @@ class Tunnel:
     # ------------------------------------------------------------------
 
     # Allowed relay hostnames — discovery URLs must match one of these.
-    # Relays live on the dedicated ``relay.hle.world`` domain, optionally
-    # region-prefixed. User tunnels are ``<label>-<user>.hle.world`` and must
-    # never be accepted here: discovery tampering could otherwise point the
+    # User tunnels are ``<label>-<user>.hle.world``, which looks just like a
+    # regional relay name (``us-east.hle.world``), so a pattern over the whole
+    # zone cannot tell them apart. Accept the apex, the host this tunnel was
+    # configured with, an explicit set of known relay names, and anything under
+    # the dedicated ``relay.hle.world`` domain. Anything else falls back to the
+    # configured relay host: discovery tampering must not be able to point the
     # client at a user's tunnel and leak the API key in TunnelRegistration.
-    _RELAY_HOST_ALLOWLIST = re.compile(r"^([a-z0-9-]+\.)?relay\.hle\.world$")
+    _RELAY_HOSTS = frozenset({"hle.world", "relay.hle.world", "us-east.hle.world"})
+    _RELAY_HOST_ALLOWLIST = re.compile(r"^([a-z0-9-]+\.)*relay\.hle\.world$")
+
+    def _is_relay_host(self, host: str | None) -> bool:
+        """Whether a discovered relay hostname may be connected to."""
+        if not host:
+            return False
+        host = host.lower()
+        return (
+            host in self._RELAY_HOSTS
+            or host == self.config.relay_host.lower()
+            or bool(self._RELAY_HOST_ALLOWLIST.match(host))
+        )
+
     # The relay control path a discovered URL must use.
     _RELAY_TUNNEL_PATH = "/_hle/tunnel"
 
@@ -803,7 +823,7 @@ class Tunnel:
                     "Relay discovery returned non-wss scheme (%s), ignoring",
                     parsed.scheme,
                 )
-            elif not parsed.hostname or not self._RELAY_HOST_ALLOWLIST.match(parsed.hostname):
+            elif not self._is_relay_host(parsed.hostname):
                 logger.warning(
                     "Relay discovery returned untrusted host (%s), ignoring",
                     parsed.hostname,

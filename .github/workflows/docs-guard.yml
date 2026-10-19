@@ -20,21 +20,8 @@ concurrency:
 
 jobs:
   docs-guard:
-    # The action loads its code from the checkout, i.e. from the PR head, so a
-    # fork PR must not run it on the self-hosted ARC pool. docs-guard-fork
-    # below runs it on a disposable GitHub-hosted runner instead.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: arc-runner-hle-client
-    timeout-minutes: 5
-    container:
-      image: python:3.12
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/docs-guard
-
-  docs-guard-fork:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
+    # Fork PRs run PR-head code: keep them off the self-hosted pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'arc-runner-hle-client' }}
     timeout-minutes: 5
     container:
       image: python:3.12

@@ -104,6 +104,36 @@ class TestDiscoverRelayUri:
 
         assert uri == "wss://us-east.relay.hle.world:443/_hle/tunnel"
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "wss://hle.world/_hle/tunnel",
+            "wss://hle.world:443/_hle/tunnel",
+            "wss://us-east.hle.world:443/_hle/tunnel",
+        ],
+    )
+    async def test_accepts_known_relay_hosts(self, url: str) -> None:
+        tunnel = self._make_tunnel()
+        discovery = RelayDiscoveryResponse(relay_url=url)
+        with patch(
+            "hle_client.api.ApiClient.discover_relay",
+            new_callable=AsyncMock,
+            return_value=discovery,
+        ):
+            assert await tunnel._discover_relay_uri("hle_testkey") == url
+
+    async def test_accepts_the_configured_relay_host(self) -> None:
+        tunnel = self._make_tunnel()
+        tunnel.config.relay_host = "relay.example.net"
+        url = "wss://relay.example.net/_hle/tunnel"
+        discovery = RelayDiscoveryResponse(relay_url=url)
+        with patch(
+            "hle_client.api.ApiClient.discover_relay",
+            new_callable=AsyncMock,
+            return_value=discovery,
+        ):
+            assert await tunnel._discover_relay_uri("hle_testkey") == url
+
     async def test_accepts_bare_relay_host(self) -> None:
         tunnel = self._make_tunnel()
         discovery = RelayDiscoveryResponse(relay_url="wss://relay.hle.world/_hle/tunnel")

@@ -37,6 +37,11 @@ class TestServiceUrlNormalization:
         assert cfg.service_url == "http://h:80/"
         assert cfg.upstream_basic_auth == ("u", "p")
 
+    def test_percent_encoded_userinfo_is_decoded_like_before(self):
+        cfg = TunnelConfig(service_url="http://us%40er:p%3Aw%2Fd@h:80/", service_label="x")
+        assert cfg.service_url == "http://h:80/"
+        assert cfg.upstream_basic_auth == ("us@er", "p:w/d")
+
     def test_url_empty_username_still_moves_the_password(self):
         cfg = TunnelConfig(service_url="http://:p@h:80", service_label="x")
         assert cfg.service_url == "http://h:80"

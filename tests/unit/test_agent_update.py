@@ -1323,7 +1323,7 @@ class TestConfigPolicy:
 
         monkeypatch.setenv("HLE_AGENT_CONFIG", str(tmp_path / "none.toml"))
         assert config.load_remote_update() is True
-        assert config.load_allow_downgrade() is False
+        assert config.load_allow_downgrade() is None
 
     def test_remote_update_accepts_the_usual_off_spellings(self, tmp_path, monkeypatch):
         from hle_client import config
@@ -1383,6 +1383,32 @@ class TestRequestFields:
         client, _, _ = make_agent(tmp_path)
         req = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
         assert client._refuse_update_reason(req) is None
+
+    def test_local_false_beats_the_relay_flag(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        client._allow_downgrade = False
+        req = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
+        assert client._refuse_update_reason(req) == "refused:downgrade"
+
+    def test_local_true_allows_without_the_relay_flag(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        client._allow_downgrade = True
+        req = UpdateRequest(request_id="r", target_version=OLD)
+        assert client._refuse_update_reason(req) is None
+
+    def test_local_unset_follows_the_relay_flag(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        assert client._allow_downgrade is None
+        refused = UpdateRequest(request_id="r", target_version=OLD)
+        allowed = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
+        assert client._refuse_update_reason(refused) == "refused:downgrade"
+        assert client._refuse_update_reason(allowed) is None
+
+    def test_env_false_is_an_explicit_refusal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HLE_ALLOW_DOWNGRADE", "false")
+        client, _, _ = make_agent(tmp_path)
+        req = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
+        assert client._refuse_update_reason(req) == "refused:downgrade"
 
     def test_rollback_flag_still_respects_the_floor(self, tmp_path):
         client, _, _ = make_agent(tmp_path)

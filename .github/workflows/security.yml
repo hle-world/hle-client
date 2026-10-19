@@ -19,57 +19,11 @@ concurrency:
   group: security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The ARC pool is self-hosted, on the home LAN, and shares a host with the
-# private repos' runners. Every job below runs PR-head code, so each carries
-# the same fork guard and has a GitHub-hosted twin for fork PRs.
 jobs:
   bandit:
     name: Bandit (Python SAST)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: arc-runner-hle-client
-    timeout-minutes: 10
-    container:
-      image: python:3.13-slim
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Bandit
-        run: pip install bandit[toml]
-
-      - name: Run Bandit
-        run: |
-          bandit -r src/ \
-            -f json -o bandit-results.json \
-            --severity-level medium \
-            --confidence-level medium \
-            -s B101 \
-            || true
-
-      - name: Display results
-        if: always()
-        run: |
-          if [ -f bandit-results.json ]; then
-            python -c "
-          import json, sys
-          data = json.load(open('bandit-results.json'))
-          results = data.get('results', [])
-          if not results:
-              print('No issues found.')
-              sys.exit(0)
-          for r in results:
-              sev = r['issue_severity']
-              conf = r['issue_confidence']
-              print(f\"[{sev}/{conf}] {r['filename']}:{r['line_number']} -- {r['issue_text']}\")
-          print(f\"\n{len(results)} issue(s) found.\")
-          if any(r['issue_severity'] in ('HIGH', 'MEDIUM') for r in results):
-              sys.exit(1)
-          "
-          fi
-
-  bandit-fork:
-    name: Bandit (Python SAST, fork PR)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
+    # Fork PRs run PR-head code: keep them off the self-hosted pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'arc-runner-hle-client' }}
     timeout-minutes: 10
     container:
       image: python:3.13-slim
@@ -111,33 +65,8 @@ jobs:
 
   pip-audit:
     name: pip-audit (Dependencies)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: arc-runner-hle-client
-    timeout-minutes: 10
-    container:
-      image: python:3.13-slim
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install uv
-        run: pip install uv
-
-      - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
-
-      - name: Install pip-audit
-        run: pip install pip-audit
-
-      - name: Upgrade pip
-        run: pip install --upgrade pip
-
-      - name: Run pip-audit
-        run: pip-audit --desc --fix --dry-run 2>&1
-
-  pip-audit-fork:
-    name: pip-audit (Dependencies, fork PR)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
+    # Fork PRs run PR-head code: keep them off the self-hosted pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'arc-runner-hle-client' }}
     timeout-minutes: 10
     container:
       image: python:3.13-slim
@@ -161,36 +90,8 @@ jobs:
 
   secrets-scan:
     name: TruffleHog (Secret Scanning)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: arc-runner-hle-client
-    timeout-minutes: 10
-    container:
-      image: python:3.13-slim
-    steps:
-      - name: Install git and curl
-        run: apt-get update && apt-get install -y git curl
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Install TruffleHog (pinned to v3.88.9)
-        run: |
-          TRUFFLEHOG_VERSION="3.88.9"
-          ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
-          curl -sSfL -o /tmp/trufflehog.tar.gz \
-            "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${ARCH}.tar.gz"
-          tar -xzf /tmp/trufflehog.tar.gz -C /usr/local/bin trufflehog
-          rm /tmp/trufflehog.tar.gz
-          trufflehog --version
-
-      - name: TruffleHog scan
-        run: trufflehog filesystem . --only-verified
-
-  secrets-scan-fork:
-    name: TruffleHog (Secret Scanning, fork PR)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
+    # Fork PRs run PR-head code: keep them off the self-hosted pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'arc-runner-hle-client' }}
     timeout-minutes: 10
     container:
       image: python:3.13-slim

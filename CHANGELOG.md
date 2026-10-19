@@ -4,6 +4,39 @@
 
 ### Security
 
+- A `--service` URL with credentials (`http://user:pass@host`) no longer sends
+  them to the relay. The client keeps them for upstream Basic auth, as before,
+  and registers the URL without them.
+- `hle daemon install --upstream-basic-auth` writes the credential to an
+  owner-only file the service reads at start, not to the service manager's
+  visible environment. Existing installs keep working; reinstall the daemon to
+  move its credential into the file.
+- Agent remote updates: a move to an older release is refused unless the update
+  request asks for a rollback or `HLE_ALLOW_DOWNGRADE=true` is set (and
+  `HLE_ALLOW_DOWNGRADE=false` always refuses). `HLE_REMOTE_UPDATE=off` disables
+  remote updates on a host. A wheel digest, from the request or from a local
+  `HLE_UPDATE_MANIFEST`, is verified before install when one is given.
+- Forwarded paths can no longer climb out of the service's base path with dot
+  segments, and webhook tunnels reject encoded dot and slash tricks. Other
+  encoded characters pass through unchanged.
+- Secrets are redacted from the agent log tail, diagnostics, WebSocket close
+  reasons and logged WebSocket URLs.
+- Relay-supplied text is stripped of terminal control characters and printed
+  literally, not as rich markup.
+- Relay discovery only accepts known relay hosts, the configured relay host and
+  hosts under `relay.hle.world`, on the relay tunnel path.
+- The agent control channel is plain `ws://` only for exactly `localhost`,
+  `127.0.0.1` and `::1`.
+- Config and credential files are written owner-only through a temporary file;
+  an existing loose file is rewritten to 0600 and stays readable.
+- Firepuncher's default allowlist no longer includes link-local ranges, and the
+  cloud metadata endpoints are refused unless
+  `HLE_FIREPUNCHER_ALLOW_METADATA=true` is set on the agent host.
+- CI: pull requests from forks run on GitHub-hosted runners, not the
+  self-hosted pool.
+
+### Security
+
 - Credentials embedded in `--service` (for example
   `http://admin:pass@192.168.1.5`) no longer reach the relay. The client moves
   the userinfo into the local-only upstream Basic auth and registers the URL

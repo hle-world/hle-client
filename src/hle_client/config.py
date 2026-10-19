@@ -107,6 +107,9 @@ def _write_private_file(path: Path, content: str) -> None:
     the target. The target is therefore either the old file or a complete 0600
     file, never a world-readable work-in-progress.
     """
+    if path.is_symlink():
+        # A dotfiles-managed config: write through the link, don't replace it.
+        path = path.resolve()
     _ensure_private_dir(path.parent)
 
     try:
@@ -321,15 +324,18 @@ def load_remote_update() -> bool:
     return True
 
 
-def load_allow_downgrade() -> bool:
-    """Whether a remote update may move back to an older release. Default off."""
+def load_allow_downgrade() -> bool | None:
+    """Local downgrade policy: True allow, False always refuse, None unset.
+
+    Unset defers to the relay's explicit rollback flag on the request.
+    """
     env = _env_flag(os.environ.get(ALLOW_DOWNGRADE_ENV))
     if env is not None:
         return env
     value = load_agent_settings().get("allow_downgrade")
     if isinstance(value, bool):
         return value
-    return False
+    return None
 
 
 def load_update_manifest() -> dict[str, str] | None:

@@ -886,8 +886,8 @@ class AgentClient:
             return self._remote_update
         return config.load_remote_update()
 
-    def _allow_downgrade_enabled(self) -> bool:
-        """Whether the local config permits moving back to an older release."""
+    def _allow_downgrade_enabled(self) -> bool | None:
+        """Local downgrade policy: True allow, False refuse, None unset."""
         if self._allow_downgrade is not None:
             return self._allow_downgrade
         return config.load_allow_downgrade()
@@ -921,7 +921,10 @@ class AgentClient:
             # never below the floor: the releases below it predate the update
             # protocol, so an agent must not be pinned back onto one.
             below_floor = agent_update.is_older(req.target_version, agent_update.MIN_REMOTE_VERSION)
-            if below_floor or not (req.allow_downgrade or self._allow_downgrade_enabled()):
+            local = self._allow_downgrade_enabled()
+            # Explicit local false always refuses; unset honours the relay's flag.
+            allowed = local if local is not None else req.allow_downgrade
+            if below_floor or not allowed:
                 return "refused:downgrade"
         if req.drain_policy == "wait" and self._active_ws_streams() > 0:
             return "busy:draining"
