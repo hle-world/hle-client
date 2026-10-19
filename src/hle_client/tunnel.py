@@ -1662,9 +1662,8 @@ class Tunnel:
             # Prefer the close code from the exception (covers abnormal closes
             # where local_ws.close_code may not yet be populated).
             close_code = exc.code or getattr(local_ws, "close_code", None) or 1006
-            close_reason = _redact_secrets(
-                exc.reason or getattr(local_ws, "close_reason", "") or ""
-            )[:_WS_CLOSE_REASON_MAX]
+            raw_reason = exc.reason or getattr(local_ws, "close_reason", "") or ""
+            close_reason = _redact_secrets(raw_reason)[:_WS_CLOSE_REASON_MAX]
             exc_type = type(exc).__name__
             logger.info(
                 "Local WS connection closed: stream_id=%s code=%d reason=%r",
@@ -1689,9 +1688,8 @@ class Tunnel:
             # async-for ended without an exception (rare path — peer half-closed
             # cleanly). Read the recorded close metadata from the connection.
             close_code = getattr(local_ws, "close_code", None) or 1000
-            close_reason = _redact_secrets(
-                getattr(local_ws, "close_reason", "") or ""
-            )[:_WS_CLOSE_REASON_MAX]
+            raw_reason = getattr(local_ws, "close_reason", "") or ""
+            close_reason = _redact_secrets(raw_reason)[:_WS_CLOSE_REASON_MAX]
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
