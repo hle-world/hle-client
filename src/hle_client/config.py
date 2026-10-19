@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
+import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +57,84 @@ SOURCE_AGENT_TOKEN_FILE = "~/.config/hle/agent.toml"
 
 
 # ---------------------------------------------------------------------------
+# Private file writes
+# ---------------------------------------------------------------------------
+
+# Windows has no O_NOFOLLOW; there the flag is simply absent.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _ensure_private_dir(directory: Path) -> None:
+    """Create ``directory`` 0700, tightening it if it was looser.
+
+    Only HLE's own credential directory is chmodded. An ``HLE_AGENT_CONFIG``
+    override can name a shared directory (``/tmp``, someone's home), and
+    chmodding that would break every other user of it, so there we only warn.
+    """
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        mode = stat.S_IMODE(directory.stat().st_mode)
+    except OSError:
+        return
+    if not mode & 0o077:
+        return
+    if directory != CONFIG_DIR:
+        logger.warning("Credential directory %s has mode %o, not 0700", directory, mode)
+        return
+    logger.warning("Credential directory %s had mode %o; tightening to 0700", directory, mode)
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        logger.warning("Could not tighten %s to 0700", directory, exc_info=True)
+
+
+def _write_private_file(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` at 0600 without ever exposing it wider.
+
+    A sibling temporary file, opened ``O_CREAT|O_EXCL|O_NOFOLLOW`` and forced
+    to 0600 before anything is written, is fsynced and atomically renamed over
+    the target. The target is therefore either the old file or a complete 0600
+    file, never a world-readable work-in-progress.
+    """
+    _ensure_private_dir(path.parent)
+
+    try:
+        loose = bool(stat.S_IMODE(path.stat().st_mode) & 0o077)
+    except OSError:
+        loose = False
+    if loose:
+        logger.warning("Credential file %s had loose permissions; rewriting 0600", path)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+    for _ in range(100):
+        tmp = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(tmp, flags, 0o600)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(f"could not create a temporary file next to {path}")
+
+    closed = False
+    try:
+        os.fchmod(fd, 0o600)
+        data = content.encode("utf-8")
+        written = 0
+        while written < len(data):
+            written += os.write(fd, data[written:])
+        os.fsync(fd)
+        os.close(fd)
+        closed = True
+        os.replace(tmp, path)
+    except BaseException:
+        if not closed:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+# ---------------------------------------------------------------------------
 # API key
 # ---------------------------------------------------------------------------
 
@@ -81,8 +161,6 @@ def save_api_key(api_key: str) -> None:
     file survives.
     """
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-
         existing_lines: list[str] = []
         found = False
         if CONFIG_FILE.exists():
@@ -97,10 +175,10 @@ def save_api_key(api_key: str) -> None:
         if not found:
             existing_lines.append(f'api_key = "{api_key}"\n')
 
-        # 0o600 (owner-only read/write) to protect the API key.
-        fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.writelines(existing_lines)
+        # 0600 (owner-only read/write) to protect the API key; the temp file is
+        # created at that mode and renamed into place, so an existing 0644 file
+        # cannot leak the key.
+        _write_private_file(CONFIG_FILE, "".join(existing_lines))
 
         # nosemgrep: python-logger-credential-disclosure
         logger.info("API key saved to %s", CONFIG_FILE)
@@ -154,9 +232,7 @@ def agent_config_path() -> Path:
 def save_agent_token(token: str) -> None:
     """Persist the agent enrollment token (0600)."""
     path = agent_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(f'token = "{token}"\n')
-    path.chmod(0o600)
+    _write_private_file(path, f'token = "{token}"\n')
 
 
 def load_agent_token() -> str | None:
