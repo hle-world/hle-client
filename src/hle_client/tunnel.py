@@ -402,24 +402,24 @@ def _validated_webhook_path(raw_path: str, prefix: str) -> str | None:
 
     Webhook tunnels are unauthenticated and may only reach the registered path
     prefix. Percent-encoded dots, slashes and backslashes are decoded before
-    normalising (the upstream may decode them, so a naive prefix check on the
-    raw path is not enough); any path whose decoded and normalised form differs
-    from the raw form — encoded dots/slashes/backslashes, redundant separators,
-    literal ``..`` segments, a trailing slash — is rejected. The decoded,
-    normalised path is returned so callers forward exactly what was validated.
+    checking (the upstream may decode them, so a prefix check on the raw path is
+    not enough). A path is rejected when its decoded form has a backslash or a
+    ``..`` segment, or does not normalise to something under the prefix. An
+    encoded slash that stays inside the prefix is fine, and the raw path (with
+    any trailing slash) is what gets forwarded, as before.
     """
     if not isinstance(raw_path, str):
         return None
     decoded = _ENCODED_PATH_SEPARATOR.sub(
         lambda m: _ENCODED_PATH_CHARS[m.group(1).lower()], raw_path
     )
-    normalized = posixpath.normpath(decoded)
-    if normalized != raw_path:
+    if "\\" in decoded or ".." in decoded.split("/"):
         return None
+    normalized = posixpath.normpath(decoded)
     # Match exact path or path with trailing segments (segment boundary).
     if not (normalized == prefix or normalized.startswith(prefix + "/")):
         return None
-    return normalized
+    return raw_path
 
 
 class _DiagnosticLogHandler(logging.Handler):

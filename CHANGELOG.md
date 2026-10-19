@@ -6,7 +6,8 @@
 
 - A `--service` URL with credentials (`http://user:pass@host`) no longer sends
   them to the relay. The client keeps them for upstream Basic auth, as before,
-  and registers the URL without them.
+  and registers the URL without them. `hle expose` warns when the URL carries
+  credentials and no longer echoes them.
 - `hle daemon install --upstream-basic-auth` writes the credential to an
   owner-only file the service reads at start, not to the service manager's
   visible environment. Existing installs keep working; reinstall the daemon to
@@ -34,15 +35,6 @@
   `HLE_FIREPUNCHER_ALLOW_METADATA=true` is set on the agent host.
 - CI: pull requests from forks run on GitHub-hosted runners, not the
   self-hosted pool.
-
-### Security
-
-- Credentials embedded in `--service` (for example
-  `http://admin:pass@192.168.1.5`) no longer reach the relay. The client moves
-  the userinfo into the local-only upstream Basic auth and registers the URL
-  without it, so a server-side leak can no longer disclose homelab credentials.
-  `hle tunnel create` warns when the URL carries credentials and no longer echoes
-  them in its own output. Upstream requests still send `Authorization: Basic`.
 
 ## v2610.11 — 2026-10-18
 

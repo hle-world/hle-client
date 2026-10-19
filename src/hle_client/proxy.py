@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import logging
 import os
-import re
 import ssl
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -108,10 +107,8 @@ def upstream_verify(verify_ssl: bool) -> bool | ssl.SSLContext:
 
 
 # A relay-supplied path must stay under the service URL's base path. A dot
-# segment ("..") is rejected outright, and so is anything that could smuggle
-# one past this check once an upstream decodes it: percent-encoded dot or slash
-# and backslash separators.
-_ENCODED_DOT_OR_SLASH_RE = re.compile(r"%(?:2e|2f)", re.IGNORECASE)
+# segment ("..") is rejected outright, including one an upstream would only see
+# after decoding percent-encoded dots or slashes.
 
 
 def _base_path(url: str) -> str:
@@ -163,20 +160,26 @@ def safe_proxied_path(path: str, target_url: str) -> str | None:
     The relay controls *path*, so a visitor of a tunnel that deliberately
     exposes a sub-path (``http://host:8080/public/``) must not be able to climb
     out of it with dot segments. *path* is percent-decoded for the check only —
-    the raw path is what gets forwarded, so ``%20`` and friends survive — and a
-    path with an encoded dot or slash, a backslash, or a ``..`` segment is
-    rejected. The decoded path is then normalised (RFC 3986
-    ``remove_dot_segments``) and must still land under the base path.
+    the raw path is what gets forwarded, so ``%20`` and encoded slashes in
+    ordinary API paths (``%2F``) survive. A path is rejected when, once decoded,
+    it has a ``..`` segment (however the dots or slashes were spelled) or a
+    backslash. The path is then normalised (RFC 3986 ``remove_dot_segments``)
+    and must still land under the base path.
+
+    A service exposed at the site root has nothing to climb out of, so only the
+    malformed-path checks apply there.
     """
     if not path.startswith("/") or path.startswith("//") or "\\" in path:
         return None
-    if _ENCODED_DOT_OR_SLASH_RE.search(path):
-        return None
     decoded = unquote(path)
-    if "\\" in decoded or ".." in decoded.split("/"):
+    if "\\" in decoded:
+        return None
+    base_path = _base_path(target_url)
+    if base_path == "/":
+        return path
+    if ".." in decoded.split("/"):
         return None
     normalized = _remove_dot_segments(path)
-    base_path = _base_path(target_url)
     if not _remove_dot_segments(base_path + normalized.lstrip("/")).startswith(base_path):
         return None
     return normalized

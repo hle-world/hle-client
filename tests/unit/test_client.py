@@ -204,6 +204,23 @@ class TestLocalProxyForwardHttp:
         proxy._http_client.request.assert_not_awaited()
         await proxy.stop()
 
+    def test_encoded_slashes_and_dots_in_ordinary_paths_pass_through(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for base in ("http://h:8080/", "http://h:8080/public/"):
+            for path in (
+                "/Items/a%2Fb/Images",
+                "/remote.php/dav/files/me/dir%2Fsub/file%2Etxt",
+                ["/api/v1/x%2Fy", "q=1"][0],
+            ):
+                assert safe_proxied_path(path, base) == path, (base, path)
+
+    def test_encoded_traversal_is_still_rejected_under_a_base_path(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for path in ("/%2e%2e/x", "/a/%2E%2E%2f%2e%2e/x", "/..%2fx", "/a%5c..%5cx"):
+            assert safe_proxied_path(path, "http://h:8080/public/") is None, path
+
     async def test_relative_path_stays_under_a_base_path(self):
         proxy = _proxy("http://192.168.1.10:8080/public/")
         await proxy.start()
@@ -871,6 +888,18 @@ class TestWebhookPathRestriction:
     @pytest.mark.parametrize(
         "path",
         [
+            "/hook/stripe/",  # trailing slash worked before and still does
+            "/hook/stripe//evt",
+            "/hook/stripe/a%2Fb",  # an encoded slash that stays inside the prefix
+            "/hook/stripe/file%2Etxt",
+        ],
+    )
+    def test_accepts_benign_variants_and_forwards_them_unchanged(self, path):
+        assert _validated_webhook_path(path, "/hook/stripe") == path
+
+    @pytest.mark.parametrize(
+        "path",
+        [
             # Percent-encoded dot / slash / backslash (upstream may decode them).
             "/hook/stripe/%2e%2e/x",
             "/hook/stripe/%2E%2E/admin",
@@ -878,9 +907,8 @@ class TestWebhookPathRestriction:
             "/hook/stripe/%2f..%2fx",
             "/hook/stripe\\..\\x",
             "/hook/stripe/%5c..%5cx",
-            # Literal traversal / redundant separators / trailing slash.
+            # Literal traversal and paths outside the prefix.
             "/hook/stripe/../admin",
-            "/hook/stripe//evt",
             "/hook/admin",
         ],
     )
