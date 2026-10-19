@@ -27,7 +27,9 @@ The second check is what bounds where a forward may go. By default that is the
 agent's own machine and the private networks around it — the homelab the agent
 exists to reach — which is also what ``hle expose`` has always allowed for the
 same agent on the same LAN. What it excludes is the public internet, so an
-agent cannot be turned into a general-purpose outbound proxy. Narrowing it
+agent cannot be turned into a general-purpose outbound proxy. It also excludes
+the cloud metadata service by address (see :data:`METADATA_TARGETS`), even when
+a rule happens to cover it, unless the operator opts back in. Narrowing it
 further, to specific hosts and ports, is a matter of configuring rules.
 """
 
@@ -213,6 +215,11 @@ def default_rules() -> list[ForwardRule]:
     stops an agent being used as a general-purpose outbound proxy, which is
     nobody's homelab use case. Reaching one is a matter of adding a rule.
 
+    Link-local addresses are excluded too, because on a cloud VM they are the
+    metadata service (`169.254.169.254`), and a default that reached it would
+    hand over the instance's IAM credentials. The metadata endpoints are
+    refused by address on top of this list — see :func:`is_metadata_target`.
+
     The static private ranges accompany the sentinel rather than being replaced
     by it, because an agent too old to understand ``@local`` would otherwise
     see one rule it cannot read and refuse everything — a worse regression than
@@ -229,14 +236,90 @@ def default_rules() -> list[ForwardRule]:
         ForwardRule(host="10.0.0.0/8"),
         ForwardRule(host="172.16.0.0/12"),
         ForwardRule(host="192.168.0.0/16"),
-        # RFC 3927 / RFC 4193 — link-local IPv4 and unique-local IPv6.
-        ForwardRule(host="169.254.0.0/16"),
+        # RFC 4193 — unique-local IPv6.
         ForwardRule(host="fc00::/7"),
-        ForwardRule(host="fe80::/10"),
     ]
 
 
-def is_allowed(rules: list[ForwardRule], host: str, port: int) -> bool:
+# Cloud metadata endpoints, refused whatever the allowlist says. They sit
+# inside ranges a homelab allowlist may legitimately name — link-local IPv4,
+# unique-local IPv6 — so they are checked by address rather than left to
+# whichever CIDR happens to cover them. Reaching one is almost never a
+# legitimate forward and always gives up the instance's IAM credentials.
+METADATA_TARGETS = frozenset(
+    {
+        "169.254.169.254",  # AWS / GCP / Azure / OpenStack instance metadata
+        "169.254.170.2",  # AWS ECS task metadata
+        "fd00:ec2::254",  # AWS instance metadata over IPv6
+    }
+)
+
+
+def is_metadata_target(host: str) -> bool:
+    """Whether *host* is a cloud metadata endpoint, however it is spelled.
+
+    Parsed rather than compared as a string. The scope id of an IPv6 literal is
+    dropped, and every spelling that embeds an IPv4 address (IPv4-mapped,
+    IPv4-compatible, 6to4, Teredo, NAT64) is unwrapped, so none of them slips
+    past. A scoped (``%eth0``) address inside a metadata or link-local range is
+    refused outright.
+    """
+    text = _normalize_host(host)
+    scoped = "%" in text
+    text = text.split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    for candidate in _embedded_addresses(address):
+        if candidate in _METADATA_ADDRESSES:
+            return True
+    if scoped and address.version == 6:
+        return address in _METADATA_V6_RANGE or address in _LINK_LOCAL_V6
+    return False
+
+
+_METADATA_ADDRESSES = frozenset(ipaddress.ip_address(a) for a in METADATA_TARGETS)
+_METADATA_V6_RANGE = ipaddress.ip_network("fd00:ec2::/32")
+_LINK_LOCAL_V6 = ipaddress.ip_network("fe80::/10")
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+
+
+def _embedded_addresses(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """The address plus every IPv4 address it embeds."""
+    found: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [address]
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            found.append(address.ipv4_mapped)
+        if address.sixtofour is not None:
+            found.append(address.sixtofour)
+        if address.teredo is not None:
+            server, client = address.teredo
+            found.extend([server, client])
+        low = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if address in _NAT64 or address in _NAT64_LOCAL or int(address) >> 32 == 0:
+            # NAT64 and IPv4-compatible forms carry the IPv4 in the low 32 bits.
+            found.append(low)
+    return found
+
+
+def is_allowed(
+    rules: list[ForwardRule],
+    host: str,
+    port: int,
+    *,
+    allow_metadata: bool = False,
+) -> bool:
+    """Whether *host:port* is allowed by *rules*.
+
+    Cloud metadata is refused first, even when a rule covers it, unless
+    *allow_metadata* says the operator opted in.
+    """
+    if not allow_metadata and is_metadata_target(host):
+        return False
     return any(rule.matches(host, port) for rule in rules)
 
 

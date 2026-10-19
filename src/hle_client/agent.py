@@ -28,7 +28,7 @@ import websockets.exceptions
 
 from hle_client import __version__, agent_logs, agent_state, agent_update, config, k8s_targets
 from hle_client.discovery import active_providers, scan_all
-from hle_client.firepuncher import FpAgentSide
+from hle_client.firepuncher import FpAgentSide, metadata_allowed
 from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event
@@ -68,6 +68,17 @@ WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 HANDOVER_GROUP_ENV = "HLE_HANDOVER_GROUP"
 _HANDOVER_GROUP_RE = re.compile(r"^[a-z0-9]([a-z0-9._/-]*[a-z0-9])?$")
 _HANDOVER_GROUP_MAX = 128
+
+
+# Cleartext control is only safe on loopback. Matching the exact host (rather
+# than a prefix) keeps a lookalike such as `localhost.attacker.tld` on wss, so
+# AgentHello and its token never travel in the clear.
+_PLAINTEXT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def control_scheme(relay_host: str) -> str:
+    """``ws`` for loopback only, ``wss`` for every other relay host."""
+    return "ws" if relay_host in _PLAINTEXT_HOSTS else "wss"
 
 
 def handover_group_from_env(env: dict[str, str] | None = None) -> str | None:
@@ -220,6 +231,8 @@ class AgentClient:
         support_probe: Callable[[], agent_update.UpdateSupport] | None = None,
         updater_factory: UpdaterFactory | None = None,
         health_timeout: float | None = None,
+        remote_update: bool | None = None,
+        allow_downgrade: bool | None = None,
         target_guard: k8s_targets.KubernetesTargetGuard | None = None,
         successor_of: str | None = None,
         successor_nonce: str | None = None,
@@ -250,11 +263,18 @@ class AgentClient:
         self._home = home or agent_update.hle_home()
         self._support_probe = support_probe or agent_update.can_self_update
         self._updater_factory = updater_factory or (
-            lambda support: agent_update.make_updater(support, self._home)
+            lambda support: agent_update.make_updater(
+                support, self._home, manifest=self._load_manifest()
+            )
         )
         self._health_timeout = (
             health_timeout if health_timeout is not None else agent_update.health_timeout()
         )
+        # None means "ask the local config" (HLE_REMOTE_UPDATE / agent.toml), the
+        # way the agent resolves it at request time; a bool is an explicit
+        # override for an embedder or a test.
+        self._remote_update = remote_update
+        self._allow_downgrade = allow_downgrade
         self._update_task: asyncio.Task[None] | None = None
         self._health_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
@@ -308,7 +328,8 @@ class AgentClient:
         self._api_key: str | None = None
         self._base_domain: str | None = None
         self._fp: FpAgentSide | None = None
-        # Until the server tells us otherwise, only loopback is forwardable.
+        # Until the server tells us otherwise, the agent's own networks are
+        # forwardable (cloud metadata is still refused by address).
         self._forward_rules: list[ForwardRule] = default_rules()
         # In-flight preflight probes, held so they aren't garbage-collected.
         self._preflight_tasks: set[asyncio.Task[None]] = set()
@@ -330,7 +351,7 @@ class AgentClient:
 
     @property
     def control_uri(self) -> str:
-        scheme = "ws" if self._relay_host.startswith("localhost") else "wss"
+        scheme = control_scheme(self._relay_host)
         return f"{scheme}://{self._relay_host}:{self._relay_port}/_hle/agent"
 
     async def run(self) -> None:
@@ -372,7 +393,7 @@ class AgentClient:
                         # `finally` below still stops every endpoint on the way out.
                         self._running = False
                         reason = (exc.rcvd.reason if exc.rcvd is not None else "") or ""
-                        message = _fatal_agent_message(code, reason)
+                        message = agent_logs.redact(_fatal_agent_message(code, reason))
                         logger.error("%s", message)
                         self._fatal_error = message
                         emit_event(
@@ -556,11 +577,16 @@ class AgentClient:
             if self._declares_endpoints:
                 capabilities.append(K8S_DECLARED_CAPABILITY)
             # `update:<method>` is advertised only for installs the agent can
-            # stage a new version into itself. The method is sent regardless so
-            # the dashboard can tell a brew user what to run.
+            # stage a new version into itself, and only while remote updates are
+            # enabled locally. The method is sent regardless so the dashboard can
+            # tell a brew user what to run.
             install_method = detect_install_method()
             support = self._probe_support()
-            update_cap = update_capability(support.method) if support.supported else None
+            update_cap = (
+                update_capability(support.method)
+                if support.supported and self._remote_update_enabled()
+                else None
+            )
             if update_cap is not None:
                 capabilities.append(update_cap)
             # `handover` says the relay may treat this process as one that can
@@ -609,6 +635,7 @@ class AgentClient:
                 rules=self._forward_rules,
                 enabled=k8s_targets.firepuncher_enabled(),
                 target_guard=self._target_guard,
+                allow_metadata=metadata_allowed(),
             )
             # Marks the session as having worked, so the reconnect backoff in
             # run() starts over rather than compounding across the process life.
@@ -840,6 +867,31 @@ class AgentClient:
                 total += int(count)
         return total
 
+    @staticmethod
+    def _load_manifest() -> dict[str, str] | None:
+        """The operator's pinned digests, or None when none are configured.
+
+        An unreadable manifest becomes an empty one, so staging fails closed
+        (no trusted digest) while a rollback, which never stages, still works.
+        """
+        try:
+            return config.load_update_manifest()
+        except ValueError as exc:
+            logger.error("Unreadable update manifest, refusing to stage: %s", exc)
+            return {}
+
+    def _remote_update_enabled(self) -> bool:
+        """Whether remote updates are allowed locally (env / agent.toml)."""
+        if self._remote_update is not None:
+            return self._remote_update
+        return config.load_remote_update()
+
+    def _allow_downgrade_enabled(self) -> bool | None:
+        """Local downgrade policy: True allow, False refuse, None unset."""
+        if self._allow_downgrade is not None:
+            return self._allow_downgrade
+        return config.load_allow_downgrade()
+
     def _refuse_update_reason(self, req: UpdateRequest) -> str | None:
         """Why *req* cannot be accepted right now, or None to go ahead."""
         if self._update_task is not None and not self._update_task.done():
@@ -854,11 +906,26 @@ class AgentClient:
         if self._boot.kind == "watch":
             # This process is itself an update still proving it works.
             return "busy:updating"
+        if not self._remote_update_enabled():
+            # The operator turned remote updates off on this host; nothing the
+            # relay sends is honoured.
+            return "refused:remote-update-disabled"
         support = self._probe_support()
         if not support.supported:
             return support.reason or f"unsupported:{support.method}"
         if req.target_version == __version__:
             return "unsupported:same-version"
+        if agent_update.is_older(req.target_version, __version__):
+            # A downgrade is refused unless the relay asks for it explicitly (a
+            # deliberate rollback) or the operator opted in, and even then
+            # never below the floor: the releases below it predate the update
+            # protocol, so an agent must not be pinned back onto one.
+            below_floor = agent_update.is_older(req.target_version, agent_update.MIN_REMOTE_VERSION)
+            local = self._allow_downgrade_enabled()
+            # Explicit local false always refuses; unset honours the relay's flag.
+            allowed = local if local is not None else req.allow_downgrade
+            if below_floor or not allowed:
+                return "refused:downgrade"
         if req.drain_policy == "wait" and self._active_ws_streams() > 0:
             return "busy:draining"
         return None
@@ -1286,12 +1353,13 @@ class AgentClient:
         """Startup bookkeeping that needs a live control connection."""
         if self._boot.kind == "report_failed" and self._boot.state is not None:
             state = self._boot.state
+            tail = self._boot.log_tail or agent_update.log_tail()
             result = UpdateResult(
                 request_id=state.request_id,
                 ok=False,
                 from_version=state.from_version,
                 to_version=state.to_version,
-                log_tail=self._boot.log_tail or agent_update.log_tail(),
+                log_tail=[agent_logs.redact(x) for x in tail],
             )
             if state.request_id != agent_update.LOCAL_REQUEST_ID:
                 await ws.send(result.model_dump_json())

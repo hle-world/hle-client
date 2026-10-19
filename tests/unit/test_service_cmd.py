@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -214,9 +215,15 @@ class TestBuildExposeArgs:
 
 
 class TestSecretServiceFiles:
-    """A unit carrying upstream basic auth is owner-only; others are unchanged."""
+    """A unit carrying upstream basic auth keeps it out of Environment=.
 
-    def test_unit_env_line_is_quoted_and_escaped(self):
+    systemd exposes ``Environment=`` over D-Bus to any local user
+    (``systemctl show <unit> -p Environment``), so the secret goes in an
+    owner-only ``EnvironmentFile=`` the unit points at instead. Other files
+    are unchanged.
+    """
+
+    def test_unit_references_an_environment_file_not_the_secret(self):
         unit = render_unit(
             label="tv",
             hle_path="/usr/bin/hle",
@@ -224,8 +231,15 @@ class TestSecretServiceFiles:
             user_mode=True,
             run_as_user=None,
             env={"HLE_UPSTREAM_BASIC_AUTH": 'u:p"a%ss\\'},
+            env_file="/etc/hle/tv.env",
         )
-        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH=u:p\\"a%%ss\\\\"' in unit
+        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH=' not in unit
+        assert 'u:p"a' not in unit
+        assert "EnvironmentFile=/etc/hle/tv.env" in unit
+
+    def test_the_environment_file_quotes_and_escapes(self):
+        text = service_cmd._systemd_env_file_text({"HLE_UPSTREAM_BASIC_AUTH": 'u:p"a%ss\\'})
+        assert text == 'HLE_UPSTREAM_BASIC_AUTH="u:p\\"a%ss\\\\"\n'
 
     def test_unit_env_rejects_newlines(self):
         with pytest.raises(UsageError):
@@ -238,7 +252,9 @@ class TestSecretServiceFiles:
                 env={"HLE_UPSTREAM_BASIC_AUTH": "u:p\nExecStart=/bin/sh"},
             )
 
-    def test_plist_env(self):
+    def test_plist_env_is_sourced_not_put_in_the_visible_environment(self):
+        from hle_client.service_cmd import _LAUNCHD_ENV_WRAPPER
+
         plist = render_launchd_plist(
             label="tv",
             plist_label="world.hle.tv",
@@ -247,9 +263,17 @@ class TestSecretServiceFiles:
             run_as_user=None,
             log_dir="/tmp",
             env={"HLE_UPSTREAM_BASIC_AUTH": "u:<p>"},
+            env_file="/etc/hle/tv.env",
         )
-        assert "<key>HLE_UPSTREAM_BASIC_AUTH</key>" in plist
-        assert "<string>u:&lt;p&gt;</string>" in plist
+        assert "<key>HLE_UPSTREAM_BASIC_AUTH</key>" not in plist
+        assert "u:&lt;p&gt;" not in plist
+        assert f"<string>{_LAUNCHD_ENV_WRAPPER}</string>" in plist
+        assert "<string>/etc/hle/tv.env</string>" in plist
+
+    def test_launchd_env_file_is_shell_quoted(self):
+        text = service_cmd._launchd_env_file_text({"HLE_UPSTREAM_BASIC_AUTH": "u:it's"})
+        # Quote style differs between Python versions; the shell round-trip must not.
+        assert shlex.split(text) == ["HLE_UPSTREAM_BASIC_AUTH=u:it's"]
 
     def test_rc_script_exports_env_outside_command_args(self):
         script = service_cmd.render_rc_script(
@@ -261,6 +285,12 @@ class TestSecretServiceFiles:
         assert "export HLE_UPSTREAM_BASIC_AUTH='u:it'\\''s'" in script
         command_args = next(ln for ln in script.splitlines() if ln.startswith("command_args="))
         assert "HLE_UPSTREAM_BASIC_AUTH" not in command_args
+
+    def test_env_file_is_owner_only(self, tmp_path):
+        path = tmp_path / "etc" / "hle" / "tv.env"
+        service_cmd._write_env_file(path, 'HLE_UPSTREAM_BASIC_AUTH="u:p"\n')
+        assert path.read_text() == 'HLE_UPSTREAM_BASIC_AUTH="u:p"\n'
+        assert path.stat().st_mode & 0o777 == 0o600
 
     def test_private_write_is_owner_only(self, tmp_path):
         path = tmp_path / "hle-tv.service"

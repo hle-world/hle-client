@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from hle_client.output import strip_markup
+from hle_client.output import strip_control, strip_markup
 
 try:  # pragma: no cover - both branches run, but never in one process
     from rich.console import Console
@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover
             self.columns.append(header)
 
         def add_row(self, *cells: Any, **_: Any) -> None:
-            self.rows.append([strip_markup(str(c)) for c in cells])
+            self.rows.append([strip_markup(strip_control(str(c))) for c in cells])
 
         def render(self) -> str:
             width_count = max([len(self.columns), *(len(r) for r in self.rows)])
@@ -109,7 +109,7 @@ except ImportError:  # pragma: no cover
                     # which is the one branch this code cannot be reached from.
                     print(obj.render(), file=self._stream)  # type: ignore[attr-defined]
                 else:
-                    print(strip_markup(str(obj)), file=self._stream)
+                    print(strip_markup(strip_control(str(obj))), file=self._stream)
 
 
 __all__ = ["HAVE_RICH", "Console", "Table"]

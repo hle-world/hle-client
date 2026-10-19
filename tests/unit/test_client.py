@@ -15,7 +15,7 @@ import websockets.exceptions
 from websockets.frames import Close
 
 from hle_client.proxy import LocalProxy, ProxyConfig
-from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError
+from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError, _validated_webhook_path
 from hle_common.models import (
     ProxiedHttpRequest,
     WsStreamClose,
@@ -190,6 +190,83 @@ class TestLocalProxyForwardHttp:
         )
         assert status == 400
         assert b"path must be relative" in body
+        await proxy.stop()
+
+    async def test_rejects_dot_segment_paths_under_a_base_path(self):
+        proxy = _proxy("http://192.168.1.10:8080/public/")
+        await proxy.start()
+        proxy._http_client.request = AsyncMock(side_effect=AssertionError("must not forward"))
+
+        for path in ("/../x", "/./../x", "/%2e%2e/x", "/..%2fx"):
+            status, _, body = await proxy.forward_http(method="GET", path=path, headers={})
+            assert status == 400, path
+            assert b"escapes the service base path" in body, path
+        proxy._http_client.request.assert_not_awaited()
+        await proxy.stop()
+
+    def test_encoded_slashes_and_dots_in_ordinary_paths_pass_through(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for base in ("http://h:8080/", "http://h:8080/public/"):
+            for path in (
+                "/Items/a%2Fb/Images",
+                "/remote.php/dav/files/me/dir%2Fsub/file%2Etxt",
+                ["/api/v1/x%2Fy", "q=1"][0],
+            ):
+                assert safe_proxied_path(path, base) == path, (base, path)
+
+    def test_matrix_param_and_double_encoded_traversal_is_rejected(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for base in ("http://h:8080/", "http://h:8080/public/"):
+            for path in (
+                "/a/..;/x",
+                "/a/%2e%2e;/x",
+                "/a/..;jsessionid=1/x",
+                "/a/%252e%252e/x",
+                "/a/%252E%252E%252fx",
+                "/a/%25252e%25252e/x",
+            ):
+                assert safe_proxied_path(path, base) is None, (base, path)
+
+    def test_percent_25_and_encoded_slashes_still_pass(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for path in ("/a/100%25/b", "/Items/a%2Fb/Images", "/f/x;v=1/y", "/a/.hidden/b"):
+            assert safe_proxied_path(path, "http://h:8080/public/") == path, path
+
+    def test_encoded_traversal_is_still_rejected_under_a_base_path(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for path in ("/%2e%2e/x", "/a/%2E%2E%2f%2e%2e/x", "/..%2fx", "/a%5c..%5cx"):
+            assert safe_proxied_path(path, "http://h:8080/public/") is None, path
+
+    async def test_relative_path_stays_under_a_base_path(self):
+        proxy = _proxy("http://192.168.1.10:8080/public/")
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response()
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        status, _, _ = await proxy.forward_http(method="GET", path="/a/b", headers={})
+
+        assert status == 200
+        assert proxy._http_client.request.call_args.kwargs["url"] == "/a/b"
+        # httpx merges the relative path into base_url, landing under the
+        # sub-path the owner exposed.
+        built = proxy._http_client.build_request("GET", "/a/b")
+        assert str(built.url) == "http://192.168.1.10:8080/public/a/b"
+        await proxy.stop()
+
+    async def test_stream_rejects_dot_segment_paths_under_a_base_path(self):
+        proxy = _proxy("http://192.168.1.10:8080/public/")
+        await proxy.start()
+
+        stream = proxy.stream_http(method="GET", path="/../x", headers={})
+        first = await anext(stream)
+        assert first[0] == 400
+        second = await anext(stream)
+        assert b"escapes the service base path" in (second[2] or b"")
         await proxy.stop()
 
     async def test_successful_get(self):
@@ -560,6 +637,49 @@ class TestTunnelRegistrationHandshake:
         assert tunnel._tunnel_id == "t-test-123"
         assert tunnel._public_url == "https://myapp-abc.hle.world"
 
+    async def test_registration_strips_url_embedded_credentials(self):
+        # The relay persists and displays ``service_url``, so credentials in
+        # ``--service`` must be moved to local upstream Basic auth before the
+        # registration frame is sent.
+        tunnel = _tunnel(
+            service_url="http://u:p@h:80/",
+            service_label="ha",
+            api_key="hle_testkey_creds",
+        )
+        assert tunnel.config.service_url == "http://h:80/"
+        assert tunnel.config.upstream_basic_auth == ("u", "p")
+
+        mock_ws = AsyncMock()
+        sent_messages: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent_messages.append(m))
+        ack = ProtocolMessage(
+            type=MessageType.TUNNEL_ACK,
+            payload={
+                "tunnel_id": "t-creds",
+                "subdomain": "ha-abc",
+                "public_url": "https://ha-abc.hle.world",
+                "websocket_enabled": True,
+                "user_code": "abc",
+                "service_label": "ha",
+            },
+        )
+        mock_ws.recv = AsyncMock(return_value=ack.model_dump_json())
+        mock_ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("hle_client.tunnel.websockets.connect", return_value=mock_ctx):
+            await tunnel._proxy.start()
+            await tunnel._connect_once()
+            await tunnel._proxy.stop()
+
+        reg_msg = ProtocolMessage.model_validate_json(sent_messages[0])
+        assert reg_msg.payload is not None
+        assert reg_msg.payload["service_url"] == "http://h:80/"
+        assert "u:p" not in sent_messages[0]
+
     async def test_wrong_ack_type_raises(self):
         tunnel = _tunnel(api_key="hle_testkey_for_bad_ack", service_label="test")
 
@@ -775,6 +895,118 @@ class TestTunnelHandleHttpRequest:
 
         resp_msg = ProtocolMessage.model_validate_json(sent[0])
         assert resp_msg.payload["body"] is None
+        await tunnel._proxy.stop()
+
+
+class TestWebhookPathRestriction:
+    """Webhook tunnels may only forward requests inside the registered prefix."""
+
+    def test_accepts_exact_prefix_and_prefixed_event(self):
+        assert _validated_webhook_path("/hook/stripe", "/hook/stripe") == "/hook/stripe"
+        assert _validated_webhook_path("/hook/stripe/evt", "/hook/stripe") == "/hook/stripe/evt"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/hook/stripe/",  # trailing slash worked before and still does
+            "/hook/stripe//evt",
+            "/hook/stripe/a%2Fb",  # an encoded slash that stays inside the prefix
+            "/hook/stripe/file%2Etxt",
+        ],
+    )
+    def test_accepts_benign_variants_and_forwards_them_unchanged(self, path):
+        assert _validated_webhook_path(path, "/hook/stripe") == path
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # Percent-encoded dot / slash / backslash (upstream may decode them).
+            "/hook/stripe/%2e%2e/x",
+            "/hook/stripe/..;/admin",
+            "/hook/stripe/%2e%2e;/admin",
+            "/hook/stripe/%252e%252e/admin",
+            "/hook/stripe/%2E%2E/admin",
+            "/hook/stripe/..%2fx",
+            "/hook/stripe/%2f..%2fx",
+            "/hook/stripe\\..\\x",
+            "/hook/stripe/%5c..%5cx",
+            # Literal traversal and paths outside the prefix.
+            "/hook/stripe/../admin",
+            "/hook/admin",
+        ],
+    )
+    def test_rejects_bypass_and_malformed_paths(self, path):
+        assert _validated_webhook_path(path, "/hook/stripe") is None
+
+    async def test_bypass_paths_return_404_and_are_not_forwarded(self):
+        tunnel = _tunnel(webhook_path="/hook/stripe")
+        tunnel._tunnel_id = "t-hook"
+        await tunnel._proxy.start()
+        tunnel._proxy.forward_http = AsyncMock(return_value=(200, {}, b"ok"))
+
+        mock_ws = AsyncMock()
+        sent: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        bypasses = [
+            "/hook/stripe/%2e%2e/x",
+            "/hook/stripe/..%2fx",
+            "/hook/stripe\\..\\x",
+        ]
+        for index, path in enumerate(bypasses):
+            request_payload = ProxiedHttpRequest(
+                request_id=f"req-{index}",
+                method="POST",
+                path=path,
+                headers={},
+            )
+            msg = ProtocolMessage(
+                type=MessageType.HTTP_REQUEST,
+                tunnel_id="t-hook",
+                request_id=f"req-{index}",
+                payload=request_payload.model_dump(),
+            )
+            await tunnel._handle_http_request(mock_ws, msg)
+
+        tunnel._proxy.forward_http.assert_not_awaited()
+        assert len(sent) == len(bypasses)
+        for raw in sent:
+            assert ProtocolMessage.model_validate_json(raw).payload["status_code"] == 404
+        await tunnel._proxy.stop()
+
+    async def test_registered_path_event_is_forwarded(self):
+        tunnel = _tunnel(webhook_path="/hook/stripe")
+        tunnel._tunnel_id = "t-hook"
+        await tunnel._proxy.start()
+        tunnel._proxy.forward_http = AsyncMock(return_value=(200, {}, b"ok"))
+
+        mock_ws = AsyncMock()
+        sent: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        request_payload = ProxiedHttpRequest(
+            request_id="req-evt",
+            method="POST",
+            path="/hook/stripe/evt",
+            headers={"content-type": "application/json"},
+        )
+        msg = ProtocolMessage(
+            type=MessageType.HTTP_REQUEST,
+            tunnel_id="t-hook",
+            request_id="req-evt",
+            payload=request_payload.model_dump(),
+        )
+
+        await tunnel._handle_http_request(mock_ws, msg)
+
+        tunnel._proxy.forward_http.assert_awaited_once_with(
+            method="POST",
+            path="/hook/stripe/evt",
+            headers={"content-type": "application/json"},
+            body=None,
+            query_string="",
+        )
+        assert ProtocolMessage.model_validate_json(sent[0]).payload["status_code"] == 200
         await tunnel._proxy.stop()
 
 
@@ -1009,16 +1241,21 @@ class TestTunnelWssTls:
         captured = await self._open(tunnel)
         assert captured["kwargs"]["proxy"] is None
 
-    async def test_url_embedded_credentials_are_kept_in_the_presented_url(self):
+    async def test_url_embedded_credentials_are_stripped_from_the_presented_url(self):
         tunnel = _tunnel(
             service_url="http://user:pass@web.apps.svc.cluster.local.:8000",
             upstream_host="web:8000",
         )
         captured = await self._open(tunnel, headers={"Origin": "https://x.hle.world"})
 
-        assert captured["url"] == "ws://user:pass@web:8000/ws"
+        # The credentials are moved to upstream_basic_auth, so they never appear
+        # in the presented URL (which becomes the upstream Host header) ...
+        assert captured["url"] == "ws://web:8000/ws"
         # Origin is rewritten to the local service and never carries userinfo.
         assert captured["kwargs"]["additional_headers"]["Origin"] == "http://web:8000"
+        # ... but they still reach the upstream as Basic auth.
+        expected = "Basic " + base64.b64encode(b"user:pass").decode()
+        assert captured["kwargs"]["additional_headers"]["authorization"] == expected
 
     async def test_ws_url_embedded_credentials_are_sent_as_basic_auth(self):
         import websockets
@@ -1083,6 +1320,42 @@ class TestTunnelWssTls:
         # upstream as Basic auth, exactly as it does without canonicalisation.
         expected = "Basic " + base64.b64encode(b":pass").decode()
         assert seen["auth"] == expected
+
+
+class TestUrlEmbeddedCredentialsReachUpstream:
+    """Credentials in ``--service`` reach the local service, never the relay."""
+
+    async def test_forwarded_request_carries_basic_auth(self):
+        seen: dict[str, str] = {}
+
+        async def handler(reader, writer):
+            request = await reader.readuntil(b"\r\n\r\n")
+            seen["request"] = request.decode("latin-1")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        tunnel = _tunnel(service_url=f"http://user:pass@127.0.0.1:{port}", service_label="x")
+        # Stripped before anything is registered ...
+        assert tunnel.config.service_url == f"http://127.0.0.1:{port}"
+        assert tunnel.config.upstream_basic_auth == ("user", "pass")
+
+        proxy = tunnel._proxy
+        await proxy.start()
+        try:
+            async with server:
+                status, _, body = await proxy.forward_http(method="GET", path="/", headers={})
+        finally:
+            await proxy.stop()
+
+        # ... but still sent upstream as Basic auth.
+        assert status == 200, body
+        request = seen["request"].lower()
+        assert "authorization: basic " in request
+        assert f"host: 127.0.0.1:{port}" in request
 
 
 class TestTlsVerificationForCanonicalNames:

@@ -104,9 +104,11 @@ Options:
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
 
 `hle daemon install tunnel` takes the same options, so any tunnel you can run
-you can also install as a service. `--upstream-basic-auth` is written to the
-service's environment, never its command line, and the service file is then
-readable by its owner only.
+you can also install as a service. `--upstream-basic-auth` is written to an
+owner-only environment file the service reads at start — never to its command
+line or to the service manager's visible environment (systemd exposes
+`Environment=` over D-Bus) — and the service file is then readable by its owner
+only.
 
 ### `hle tunnel preflight`
 
@@ -234,7 +236,11 @@ hle firepuncher rpi 22 -- ssh -p '{port}' me@127.0.0.1   # Run a command, tear d
 
 The first argument is the agent name (see `hle agent list`); each target is a
 port or `host:port` as the agent sees it. The agent must allow each target;
-adjust per agent in the dashboard.
+adjust per agent in the dashboard. By default the agent's own networks are
+allowed, but the cloud metadata service (`169.254.169.254`, `169.254.170.2`,
+`fd00:ec2::254`) is always refused, even when a rule covers it, so a forward
+cannot hand over the instance's IAM credentials. An operator on the agent host
+can opt back in with `HLE_FIREPUNCHER_ALLOW_METADATA=true`.
 
 ### `hle daemon`
 
@@ -345,6 +351,25 @@ API key resolution order:
 1. `--api-key` CLI flag
 2. `HLE_API_KEY` environment variable
 3. `~/.config/hle/config.toml`
+
+### Agent self-update policy
+
+An agent can also be told to update itself from the dashboard (the
+`update_request` control frame). That is on by default. An operator can refuse
+it on a host with `HLE_REMOTE_UPDATE=off` or `remote_update = false` in
+`~/.config/hle/agent.toml`; every update request is then refused with
+`refused:remote-update-disabled`. An update to an older release is refused with
+`refused:downgrade` unless the request itself asks for a rollback explicitly
+(`allow_downgrade`) or `HLE_ALLOW_DOWNGRADE=true` (or `allow_downgrade = true` in
+`agent.toml`) is set. Setting `HLE_ALLOW_DOWNGRADE=false` (or
+`allow_downgrade = false`) refuses downgrades even when the request asks for
+one. A downgrade never goes below the client's minimum supported release.
+A request may also carry the wheel's sha256 (`wheel_sha256`), which is checked
+the same way; without one, updates work as before. To pin releases, point
+`HLE_UPDATE_MANIFEST` (or
+`update_manifest` in `agent.toml`) at a JSON object mapping each version to the
+sha256 of its wheel; the wheel is downloaded, hashed and only then installed, so
+a wheel swapped on a mirror or index is not activated.
 
 ### Kubernetes agents
 

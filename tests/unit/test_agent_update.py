@@ -8,6 +8,7 @@ would, so the verification steps have something to look at.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -22,12 +23,15 @@ from hle_client.agent_update import (
     CURRENT_LINK,
     FAILED_FILE,
     LOCAL_REQUEST_ID,
+    MIN_REMOTE_VERSION,
     PREVIOUS_FILE,
     STATE_FILE,
     VERSIONS_DIR,
     BootCheck,
+    DigestMismatchError,
     FailedUpdate,
     InvalidVersionError,
+    ReleaseManifest,
     RollbackError,
     StageError,
     SwapError,
@@ -39,11 +43,16 @@ from hle_client.agent_update import (
     can_self_update,
     current_version,
     installer_owns,
+    is_older,
+    normalize_digest,
     read_failed_marker,
     read_update_state,
+    release_key,
     relink_launchers,
     run_update,
+    sha256_file,
     validate_version,
+    verify_wheel_digest,
     versioned_layout_present,
     write_update_state,
 )
@@ -655,6 +664,8 @@ def make_agent(
     support: UpdateSupport = SUPPORTED_VENV,
     updater: RecordingUpdater | None = None,
     health_timeout: float = 0.2,
+    remote_update: bool | None = None,
+    allow_downgrade: bool | None = None,
 ) -> tuple[AgentClient, RecordingUpdater, list[FakeTunnel]]:
     tunnels: list[FakeTunnel] = []
     up = updater or RecordingUpdater()
@@ -671,6 +682,8 @@ def make_agent(
         support_probe=lambda: support,
         updater_factory=lambda s: up,
         health_timeout=health_timeout,
+        remote_update=remote_update,
+        allow_downgrade=allow_downgrade,
     )
     return client, up, tunnels
 
@@ -1122,3 +1135,315 @@ class TestVersionValidation:
             up.rollback()
         assert fetched == []
         assert runner.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Version ordering (the downgrade refusal and its floor)
+# --------------------------------------------------------------------------- #
+class TestVersionOrdering:
+    def test_release_key_sorts_calver(self):
+        assert release_key("2609.8") < release_key("2609.10")
+        assert release_key("2609.9") < release_key("2610.0")
+        assert release_key("2609.8.1") < release_key("2609.9")
+
+    def test_is_older(self):
+        assert is_older("2609.8", "2609.9")
+        assert not is_older("2609.10", "2609.9")
+        assert not is_older("2609.9", "2609.9")
+
+    def test_the_floor_is_not_above_the_running_version(self):
+        # Otherwise every target would look like a downgrade.
+        assert not is_older(__version__, MIN_REMOTE_VERSION)
+
+
+# --------------------------------------------------------------------------- #
+# Release integrity: a wheel is activated only when its digest matches
+# --------------------------------------------------------------------------- #
+def _writing_download(content: bytes):
+    """A download hook that lays down a wheel with *content* where asked."""
+
+    def download(version: str, dest: Path) -> Path:
+        wheel = dest / f"hle_client-{version}-py3-none-any.whl"
+        wheel.write_bytes(content)
+        return wheel
+
+    return download
+
+
+class TestReleaseIntegrity:
+    def test_verifies_a_matching_digest(self, tmp_path):
+        wheel = tmp_path / "hle_client-9999.1-py3-none-any.whl"
+        wheel.write_bytes(b"the real wheel")
+        verify_wheel_digest(wheel, sha256_file(wheel))
+        verify_wheel_digest(wheel, "sha256:" + sha256_file(wheel))
+
+    def test_rejects_a_mismatched_digest(self, tmp_path):
+        wheel = tmp_path / "hle_client-9999.1-py3-none-any.whl"
+        wheel.write_bytes(b"tampered")
+        with pytest.raises(DigestMismatchError, match="expected sha256"):
+            verify_wheel_digest(wheel, "00" * 32)
+
+    def test_manifest_normalises_and_looks_up(self):
+        manifest = ReleaseManifest.from_mapping({NEW: "SHA256:" + "AB" * 32})
+        assert manifest.expected(NEW) == "ab" * 32
+        assert manifest.expected(OLD) is None
+        assert normalize_digest("sha256:ABCDEF") == "abcdef"
+
+    def test_manifest_rejects_a_non_release_key(self):
+        with pytest.raises(StageError, match="not a release version"):
+            ReleaseManifest.from_mapping({"../x": "ab" * 32})
+
+    def test_versioned_stage_rejects_a_wheel_with_the_wrong_digest(self, tmp_path):
+        home = make_home(tmp_path)
+        runner = FakeRunner()
+        manifest = ReleaseManifest({NEW: "00" * 32})
+        up = VersionedUpdater(
+            home,
+            python="/fake/python",
+            run=runner,
+            manifest=manifest,
+            download=_writing_download(b"tampered"),
+        )
+        with pytest.raises(DigestMismatchError):
+            up.stage(NEW)
+        # Nothing was installed and `current` still points at the old version.
+        assert not (home / VERSIONS_DIR / NEW).exists()
+        assert current_version(home) == OLD
+        assert not any(c[1:4] == ["-m", "pip", "install"] for c in runner.calls)
+
+    def test_versioned_stage_refuses_a_version_absent_from_the_manifest(self, tmp_path):
+        home = make_home(tmp_path)
+        up = VersionedUpdater(
+            home,
+            python="/fake/python",
+            run=FakeRunner(),
+            manifest=ReleaseManifest({OLD: "ab" * 32}),
+            download=_writing_download(b"whatever"),
+        )
+        with pytest.raises(StageError, match="no trusted digest"):
+            up.stage(NEW)
+        assert not (home / VERSIONS_DIR / NEW).exists()
+
+    def test_versioned_stage_installs_the_verified_wheel(self, tmp_path):
+        home = make_home(tmp_path)
+        content = b"the real wheel"
+
+        class WheelRunner(FakeRunner):
+            def __call__(self, argv, **kwargs):
+                if argv[1:4] == ["-m", "pip", "install"]:
+                    self.calls.append(list(argv))
+                    (Path(argv[0]).parent / "hle").write_text(f"#!fake {NEW}\n")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return super().__call__(argv, **kwargs)
+
+        runner = WheelRunner()
+        manifest = ReleaseManifest({NEW: hashlib.sha256(content).hexdigest()})
+        up = VersionedUpdater(
+            home,
+            python="/fake/python",
+            run=runner,
+            manifest=manifest,
+            download=_writing_download(content),
+        )
+        up.stage(NEW)
+        install = [c for c in runner.calls if c[1:4] == ["-m", "pip", "install"]][0]
+        assert install[-1].endswith(".whl")
+
+    def test_tool_stage_rejects_a_mismatched_wheel_before_swap(self, tmp_path):
+        home = tmp_path / "home"
+        up = ToolUpdater(
+            "pipx",
+            home,
+            run=FakeRunner(),
+            fetch=lambda url, t: 200,
+            hle_path=str(tmp_path / "venv" / "bin" / "hle"),
+            manifest=ReleaseManifest({NEW: "00" * 32}),
+            download=_writing_download(b"tampered"),
+        )
+        with pytest.raises(DigestMismatchError):
+            up.stage(NEW)
+        assert up._staged_wheel is None
+        assert not (home / PREVIOUS_FILE).exists()
+
+
+# --------------------------------------------------------------------------- #
+# Local update policy: opt-out and downgrade refusal
+# --------------------------------------------------------------------------- #
+class TestUpdatePolicy:
+    def test_downgrade_is_refused(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        req = UpdateRequest(request_id="r", target_version=OLD)
+        assert client._refuse_update_reason(req) == "refused:downgrade"
+
+    async def test_downgrade_request_is_acked_refused(self, tmp_path):
+        client, up, _ = make_agent(tmp_path)
+        ws = FakeWs()
+        await client._handle_message(request(target_version=OLD), ws)
+        assert ws.of_type("update_ack")[0]["reason"] == "refused:downgrade"
+        assert up.calls == []
+        assert client._update_task is None
+
+    def test_downgrade_is_allowed_when_the_config_opts_in(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        client._allow_downgrade = True
+        req = UpdateRequest(request_id="r", target_version=OLD)
+        assert client._refuse_update_reason(req) is None
+
+    def test_the_floor_still_refuses_below_minimum(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        client._allow_downgrade = True
+        req = UpdateRequest(request_id="r", target_version="2609.8")
+        assert client._refuse_update_reason(req) == "refused:downgrade"
+
+    def test_remote_update_off_refuses_every_request(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        client._remote_update = False
+        for target in (NEW, OLD, __version__):
+            req = UpdateRequest(request_id="r", target_version=target)
+            assert client._refuse_update_reason(req) == "refused:remote-update-disabled"
+
+    def test_remote_update_off_from_the_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HLE_REMOTE_UPDATE", "off")
+        client, _, _ = make_agent(tmp_path)
+        req = UpdateRequest(request_id="r", target_version=NEW)
+        assert client._refuse_update_reason(req) == "refused:remote-update-disabled"
+
+    def test_remote_update_off_from_agent_toml(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "agent.toml"
+        cfg.write_text('token = "hlea_x"\nremote_update = false\n')
+        monkeypatch.setenv("HLE_AGENT_CONFIG", str(cfg))
+        client, _, _ = make_agent(tmp_path)
+        req = UpdateRequest(request_id="r", target_version=NEW)
+        assert client._refuse_update_reason(req) == "refused:remote-update-disabled"
+
+
+class TestConfigPolicy:
+    def test_defaults_are_update_on_and_downgrade_off(self, tmp_path, monkeypatch):
+        from hle_client import config
+
+        monkeypatch.setenv("HLE_AGENT_CONFIG", str(tmp_path / "none.toml"))
+        assert config.load_remote_update() is True
+        assert config.load_allow_downgrade() is None
+
+    def test_remote_update_accepts_the_usual_off_spellings(self, tmp_path, monkeypatch):
+        from hle_client import config
+
+        monkeypatch.setenv("HLE_AGENT_CONFIG", str(tmp_path / "none.toml"))
+        for off in ("off", "0", "false", "no"):
+            monkeypatch.setenv("HLE_REMOTE_UPDATE", off)
+            assert config.load_remote_update() is False
+        monkeypatch.setenv("HLE_REMOTE_UPDATE", "on")
+        assert config.load_remote_update() is True
+
+    def test_allow_downgrade_from_agent_toml(self, tmp_path, monkeypatch):
+        from hle_client import config
+
+        cfg = tmp_path / "agent.toml"
+        cfg.write_text('token = "hlea_x"\nallow_downgrade = true\n')
+        monkeypatch.setenv("HLE_AGENT_CONFIG", str(cfg))
+        assert config.load_allow_downgrade() is True
+
+    def test_manifest_is_read_from_agent_toml(self, tmp_path, monkeypatch):
+        from hle_client import config
+
+        manifest_path = tmp_path / "manifest.json"
+        manifest_path.write_text(json.dumps({NEW: "ab" * 32}))
+        cfg = tmp_path / "agent.toml"
+        cfg.write_text(f'token = "hlea_x"\nupdate_manifest = "{manifest_path}"\n')
+        monkeypatch.setenv("HLE_AGENT_CONFIG", str(cfg))
+        assert config.load_update_manifest() == {NEW: "ab" * 32}
+
+    def test_a_configured_manifest_that_cannot_be_read_is_an_error(self, tmp_path, monkeypatch):
+        from hle_client import config
+
+        monkeypatch.setenv("HLE_UPDATE_MANIFEST", str(tmp_path / "nope.json"))
+        with pytest.raises(ValueError, match="could not read update manifest"):
+            config.load_update_manifest()
+
+    def test_make_updater_passes_the_manifest_to_a_versioned_updater(self, tmp_path):
+        manifest = ReleaseManifest({NEW: "ab" * 32})
+        up = agent_update.make_updater(SUPPORTED_VENV, tmp_path, manifest=manifest)
+        assert isinstance(up, VersionedUpdater)
+        assert up._manifest is manifest
+
+    def test_make_updater_coerces_a_plain_mapping_for_a_tool(self, tmp_path):
+        up = agent_update.make_updater(
+            UpdateSupport(True, "pipx"), tmp_path, manifest={NEW: "sha256:" + "ab" * 32}
+        )
+        assert isinstance(up, ToolUpdater)
+        assert up._manifest is not None
+        assert up._manifest.expected(NEW) == "ab" * 32
+
+
+# --------------------------------------------------------------------------- #
+# Fields the relay may send on the request itself (both optional)
+# --------------------------------------------------------------------------- #
+class TestRequestFields:
+    def test_explicit_rollback_flag_allows_a_downgrade(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        req = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
+        assert client._refuse_update_reason(req) is None
+
+    def test_local_false_beats_the_relay_flag(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        client._allow_downgrade = False
+        req = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
+        assert client._refuse_update_reason(req) == "refused:downgrade"
+
+    def test_local_true_allows_without_the_relay_flag(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        client._allow_downgrade = True
+        req = UpdateRequest(request_id="r", target_version=OLD)
+        assert client._refuse_update_reason(req) is None
+
+    def test_local_unset_follows_the_relay_flag(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        assert client._allow_downgrade is None
+        refused = UpdateRequest(request_id="r", target_version=OLD)
+        allowed = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
+        assert client._refuse_update_reason(refused) == "refused:downgrade"
+        assert client._refuse_update_reason(allowed) is None
+
+    def test_env_false_is_an_explicit_refusal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HLE_ALLOW_DOWNGRADE", "false")
+        client, _, _ = make_agent(tmp_path)
+        req = UpdateRequest(request_id="r", target_version=OLD, allow_downgrade=True)
+        assert client._refuse_update_reason(req) == "refused:downgrade"
+
+    def test_rollback_flag_still_respects_the_floor(self, tmp_path):
+        client, _, _ = make_agent(tmp_path)
+        req = UpdateRequest(request_id="r", target_version="2609.8", allow_downgrade=True)
+        assert client._refuse_update_reason(req) == "refused:downgrade"
+
+    def test_old_relay_message_without_the_fields_still_parses(self):
+        req = UpdateRequest.model_validate(
+            {"type": "update_request", "request_id": "r", "target_version": NEW}
+        )
+        assert req.allow_downgrade is False
+        assert req.wheel_sha256 is None
+
+    def test_request_digest_is_checked_when_no_manifest_is_pinned(self, tmp_path):
+        up = VersionedUpdater(
+            make_home(tmp_path),
+            python="/fake/python",
+            run=FakeRunner(),
+            download=_writing_download(b"tampered"),
+        )
+        up.pin_digest(NEW, "00" * 32)
+        with pytest.raises(DigestMismatchError):
+            up.stage(NEW)
+
+    def test_request_digest_never_overrides_an_operator_manifest(self, tmp_path):
+        up = VersionedUpdater(
+            make_home(tmp_path),
+            python="/fake/python",
+            run=FakeRunner(),
+            manifest=ReleaseManifest({NEW: "ab" * 32}),
+        )
+        up.pin_digest(NEW, "00" * 32)
+        assert up._manifest is not None
+        assert up._manifest.expected(NEW) == "ab" * 32
+
+    def test_no_digest_means_no_pinning(self, tmp_path):
+        up = VersionedUpdater(make_home(tmp_path), python="/fake/python", run=FakeRunner())
+        assert up._manifest is None

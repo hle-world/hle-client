@@ -57,6 +57,12 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 _SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+# Secrets never go in a service manager's *visible* environment: systemd
+# exposes ``Environment=`` over D-Bus to any local user (``systemctl show
+# <unit> -p Environment``) and launchd shows ``EnvironmentVariables`` in
+# ``launchctl print``. They are written to an owner-only file the manager
+# reads at start instead, and the unit references it by path.
+_SYSTEM_ENV_DIR = Path("/etc/hle")
 _LAUNCHD_LABEL_PREFIX = "world.hle"
 # FreeBSD keeps ports/packages rc scripts here, separate from base system rc.d.
 _RCD_DIR = Path("/usr/local/etc/rc.d")
@@ -240,9 +246,10 @@ def build_expose_args(spec: TunnelSpec, *, allow: tuple[str, ...] | list[str] = 
 
     Secrets are never part of argv — anyone on the machine can read a process
     list, and the unit file's ExecStart line with it. ``upstream_basic_auth``
-    travels in the service environment instead (:func:`expose_env`), where
-    ``--upstream-basic-auth`` picks it up through its envvar. The API key is
-    read at runtime from the running user's config or ``HLE_API_KEY``.
+    travels in an owner-only environment file the service reads at start
+    (:func:`expose_env`), where ``--upstream-basic-auth`` picks it up through
+    its envvar — not in the service manager's visible environment. The API key
+    is read at runtime from the running user's config or ``HLE_API_KEY``.
 
     Raises ``ValueError`` for a webhook spec: webhooks run through
     ``tunnel webhook``, which ``tunnel create`` is not.
@@ -368,6 +375,23 @@ def current_platform() -> str:
     return sys.platform
 
 
+def _env_dir(user_mode: bool) -> Path:
+    """Directory holding owner-only service environment files."""
+    if user_mode:
+        return Path.home() / ".config" / "hle" / "services"
+    return _SYSTEM_ENV_DIR
+
+
+def _env_file_path(*, label: str, name: str | None, user_mode: bool) -> Path:
+    """The owner-only file a service manager reads a secret environment from."""
+    base = name or label
+    for suffix in (".service", ".plist"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return _env_dir(user_mode) / f"{base}.env"
+
+
 def _require_supported() -> str:
     """Ensure the running platform has a supported service backend.
 
@@ -408,19 +432,27 @@ def _quote_exec_args(args: list[str]) -> str:
 
 
 def _systemd_env_escape(value: str) -> str:
-    """Escape a value for a double-quoted ``Environment=`` assignment."""
+    """Escape a value for a double-quoted line in an ``EnvironmentFile``."""
     if "\n" in value or "\r" in value:
         raise UsageError("Service environment values cannot contain newlines.")
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    # No ``%`` specifier expansion and no variable expansion in an
+    # EnvironmentFile, so only backslash and the quote need escaping.
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _systemd_env_file_text(env: dict[str, str]) -> str:
+    """Body of the owner-only ``EnvironmentFile`` a systemd unit reads at start."""
+    return "".join(f'{key}="{_systemd_env_escape(value)}"\n' for key, value in sorted(env.items()))
 
 
 def _write_service_file(path: Path, text: str, *, private: bool, mode: int = 0o644) -> None:
     """Write a unit/plist/rc script; owner-only when it carries a secret.
 
     A service file is normally world-readable, and ``systemctl cat`` shows it
-    to anyone. One carrying a secret in its environment (and in its hle-spec
-    stamp) is created 0600 — or 0700 for an rc.d script, which must stay
-    executable — before a byte of the secret is written.
+    to anyone. One whose hle-spec stamp records a secret is created 0600 — or
+    0700 for an rc.d script, which must stay executable — before a byte of the
+    secret is written. The secret's environment file is separate and always
+    owner-only (:func:`_write_env_file`).
     """
     if not private:
         path.write_text(text)
@@ -437,6 +469,20 @@ def _write_service_file(path: Path, text: str, *, private: bool, mode: int = 0o6
         os.close(fd)
 
 
+def _write_env_file(path: Path, text: str) -> None:
+    """Write an owner-only (0600) environment file, creating its directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_service_file(path, text, private=True)
+
+
+def _remove_env_file(path: Path) -> None:
+    """Delete a service's environment file, tolerating one that is already gone."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        raise HleError(f"Permission denied removing {path}.", hint="Try sudo.") from None
+
+
 def render_unit(
     *,
     label: str,
@@ -449,6 +495,7 @@ def render_unit(
     restart: str = "on-failure",
     spec: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    env_file: str | None = None,
 ) -> str:
     """Render the systemd unit file text. Pure function (unit-testable)."""
     exec_start = f"{hle_path} {_quote_exec_args(run_args)}"
@@ -477,10 +524,14 @@ def render_unit(
     if agent_config:
         lines.append(f"Environment=HLE_AGENT_CONFIG={agent_config}")
     lines.append(f"Environment={_QUIET_ENV[0]}={_QUIET_ENV[1]}")
-    # Values argv must not carry (secrets). The unit file is written 0600
-    # whenever there are any, see _write_service_file.
-    for key, value in sorted((env or {}).items()):
-        lines.append(f'Environment="{key}={_systemd_env_escape(value)}"')
+    # Values argv must not carry (secrets). They go in an owner-only
+    # EnvironmentFile the manager reads at start — never in an Environment=
+    # line, which systemd exposes to every local user over D-Bus. The unit
+    # file is written 0600 whenever there are any, see _write_service_file.
+    if env:
+        _systemd_env_file_text(env)  # validates (rejects newlines)
+        path = env_file or str(_env_file_path(label=label, name=None, user_mode=user_mode))
+        lines.append(f"EnvironmentFile={path}")
     # System units run as root by default; pin an explicit user when asked so
     # the tunnel reads that user's ~/.config/hle/config.toml (API key).
     if not user_mode and run_as_user:
@@ -670,12 +721,14 @@ def _systemd_install(
     env: dict[str, str] | None = None,
 ) -> None:
     run_as_user = run_as or (None if user_mode else getpass.getuser())
+    env_path = _env_file_path(label=label, name=name, user_mode=user_mode)
     unit = render_unit(
         label=label,
         hle_path=find_hle_path(),
         run_args=run_args,
         agent_config=agent_config,
         env=env,
+        env_file=str(env_path),
         user_mode=user_mode,
         run_as_user=run_as_user,
         description=description,
@@ -726,6 +779,9 @@ def _systemd_install(
 
     path = _unit_dir(user_mode) / uname
     try:
+        if env:
+            # Before the unit, so systemd never starts it with a missing file.
+            _write_env_file(env_path, _systemd_env_file_text(env))
         _write_service_file(path, unit, private=bool(env))
     except PermissionError:
         raise HleError(
@@ -778,6 +834,10 @@ def _systemd_uninstall(*, label: str, name: str | None, user_mode: bool) -> None
             console.print(f"[green]Removed[/green] {path}")
         except PermissionError:
             raise HleError(f"Permission denied removing {path}", hint="Try sudo.") from None
+    env_path = _env_file_path(label=label, name=name, user_mode=user_mode)
+    if env_path.exists():
+        _remove_env_file(env_path)
+        console.print(f"[green]Removed[/green] {env_path}")
     _systemctl(user_mode, "daemon-reload")
 
 
@@ -837,6 +897,23 @@ def _systemd_list(*, user_mode: bool | None) -> None:
 # --------------------------------------------------------------------------- #
 # launchd backend (macOS)
 # --------------------------------------------------------------------------- #
+# launchd has no EnvironmentFile=, so when a secret env is needed the program
+# is wrapped in a shell that sources the owner-only file first. The secret is
+# then in neither ProgramArguments nor EnvironmentVariables (which launchd
+# shows in `launchctl print`), only in the 0600 file.
+_LAUNCHD_ENV_WRAPPER = 'set -a; . "$1"; set +a; shift; exec "$@"'
+
+
+def _launchd_env_file_text(env: dict[str, str]) -> str:
+    """Body of the owner-only shell file the launchd wrapper sources at start."""
+    lines = []
+    for key, value in sorted(env.items()):
+        if "\n" in value or "\r" in value:
+            raise UsageError("Service environment values cannot contain newlines.")
+        lines.append(f"{key}={shlex.quote(value)}")
+    return "\n".join(lines) + "\n"
+
+
 def render_launchd_plist(
     *,
     label: str,
@@ -848,13 +925,20 @@ def render_launchd_plist(
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    env_file: str | None = None,
 ) -> str:
     """Render a launchd plist. Pure function (unit-testable).
 
     ``run_as_user`` adds a ``UserName`` key (system daemons only); pass ``None``
     for per-user agents that already run as the invoking user.
     """
-    prog = [hle_path, *run_args]
+    if env:
+        _launchd_env_file_text(env)  # validates (rejects newlines)
+        path = env_file or str(_env_file_path(label=label, name=None, user_mode=False))
+        # $0 is "sh"; $1 is the secret file, consumed before exec.
+        prog = ["/bin/sh", "-c", _LAUNCHD_ENV_WRAPPER, "sh", path, hle_path, *run_args]
+    else:
+        prog = [hle_path, *run_args]
     prog_xml = "\n".join(f"        <string>{_xml_escape(a)}</string>" for a in prog)
     out_log = f"{log_dir.rstrip('/')}/{label}.log"
     err_log = f"{log_dir.rstrip('/')}/{label}.err.log"
@@ -880,8 +964,9 @@ def render_launchd_plist(
         lines += ["    <key>UserName</key>", f"    <string>{_xml_escape(run_as_user)}</string>"]
     # The token file by absolute path. launchd hands a daemon its own
     # environment, so deriving the path from HOME at runtime can resolve
-    # somewhere the enrolling user never wrote to.
-    plist_env = {_QUIET_ENV[0]: _QUIET_ENV[1], **dict(sorted((env or {}).items()))}
+    # somewhere the enrolling user never wrote to. Secrets are not here: they
+    # are sourced from the owner-only file by the wrapper above.
+    plist_env = {_QUIET_ENV[0]: _QUIET_ENV[1]}
     if agent_config:
         plist_env = {"HLE_AGENT_CONFIG": agent_config, **plist_env}
     if plist_env:
@@ -940,6 +1025,7 @@ def _launchd_install(
     # need an explicit UserName so the tunnel reads that user's config.
     run_as_user = None if user_mode else (run_as or getpass.getuser())
     plabel = launchd_label(label, name)
+    env_path = _env_file_path(label=label, name=name, user_mode=user_mode)
     plist = render_launchd_plist(
         label=label,
         plist_label=plabel,
@@ -949,10 +1035,26 @@ def _launchd_install(
         log_dir=_launchd_log_dir(user_mode),
         agent_config=agent_config,
         env=env,
+        env_file=str(env_path),
         spec=spec,
     )
     path = _launchd_dir(user_mode) / f"{plabel}.plist"
     try:
+        if env:
+            # Before the plist, so launchd never loads a job whose file is missing.
+            _write_env_file(env_path, _launchd_env_file_text(env))
+            if run_as_user:
+                # launchd runs the wrapper *as the service user*, so that user —
+                # not root, who wrote the file — has to be able to read it.
+                # systemd instead reads its EnvironmentFile as root, before it
+                # drops privileges, so its file stays root-owned.
+                try:
+                    shutil.chown(env_path, user=run_as_user)
+                except (LookupError, OSError) as exc:
+                    raise HleError(
+                        f"Could not give {run_as_user} read access to {env_path}: {exc}",
+                        hint="Pass --run-as with an existing local user.",
+                    ) from None
         _write_service_file(path, plist, private=bool(env))
     except PermissionError:
         raise HleError(
@@ -991,6 +1093,10 @@ def _launchd_uninstall(*, label: str, name: str | None, user_mode: bool) -> None
     else:
         _launchctl("remove", plabel)
         console.print(f"[yellow]No plist at {path}[/yellow] (attempted launchctl remove).")
+    env_path = _env_file_path(label=label, name=name, user_mode=user_mode)
+    if env_path.exists():
+        _remove_env_file(env_path)
+        console.print(f"[green]Removed[/green] {env_path}")
 
 
 def _launchd_status(*, label: str, name: str | None, user_mode: bool) -> None:
@@ -2059,8 +2165,10 @@ def install(
     service reads that user's config.
 
     The one exception is --upstream-basic-auth, which the local service needs
-    and nothing else holds: it goes into the service's environment (never its
-    command line), and the service file is then written owner-only.
+    and nothing else holds: it goes into an owner-only environment file the
+    service reads at start (never its command line, and never the service
+    manager's visible environment), and the service file is then written
+    owner-only.
 
     Scope is auto-detected when neither --user nor --system is given: root
     installs a system service, a normal user installs a per-user one.

@@ -20,8 +20,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ from hle_common.fp_protocol import (
     FpOpen,
     FpReady,
     is_allowed,
+    is_metadata_target,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +53,20 @@ DIAL_TIMEOUT = 10.0
 # Bounds the number of concurrent forwarded connections per session, so one
 # runaway client can't exhaust the agent's file descriptors.
 MAX_STREAMS = 128
+
+# Local operator opt-in for cloud metadata targets. They are refused whatever
+# the allowlist says unless this is truthy: a default that reached the metadata
+# service would hand over the VM's IAM credentials to anyone who can open a
+# forward.
+METADATA_ALLOWED_ENV = "HLE_FIREPUNCHER_ALLOW_METADATA"
+
+
+def metadata_allowed(env: Mapping[str, str] | None = None) -> bool:
+    """Whether the operator opted back in to forwarding cloud metadata."""
+    if env is None:
+        env = os.environ
+    return (env.get(METADATA_ALLOWED_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
 
 Sender = Callable[[str], Awaitable[None]]
 
@@ -82,6 +98,10 @@ class FpAgentSide:
     rules: list[ForwardRule] = field(default_factory=list)
     enabled: bool = True
     target_guard: KubernetesTargetGuard | None = None
+    # Cloud metadata endpoints are refused on top of ``rules`` unless the
+    # operator opted in, so a rule that covers link-local (or ``@local`` on a
+    # VM with a link-local interface) cannot expose the instance's credentials.
+    allow_metadata: bool = False
     _streams: dict[str, _Stream] = field(default_factory=dict)
     # Stream ids whose open is still in flight (resolving the guard, dialling).
     # Counted with ``_streams`` so the cap covers both pending and active opens;
@@ -153,8 +173,13 @@ class FpAgentSide:
         Kubernetes CNI, a VPN and a LAN, and fixed CIDRs sent from there would
         be guessing at all four.
         """
-        if is_allowed(self.rules, host, port):
+        if is_allowed(self.rules, host, port, allow_metadata=self.allow_metadata):
             return True
+        # The sentinel path below bypasses is_allowed, so apply the metadata
+        # refusal here too: `@local` on a cloud VM can cover the link-local
+        # metadata address.
+        if not self.allow_metadata and is_metadata_target(host):
+            return False
         local_rules = [r for r in self.rules if r.host == LOCAL_NETWORKS]
         if not local_rules:
             return False
@@ -177,8 +202,8 @@ class FpAgentSide:
 
     async def _on_open(self, msg: FpOpen) -> None:
         # In a cluster firepuncher is off unless the operator turned it on: the
-        # relay's default rules include loopback and link-local, which inside a
-        # pod are the agent itself and the cloud metadata service.
+        # relay's default rules include the pod's own networks, which inside a
+        # pod include the API server.
         if not self.enabled:
             logger.warning(
                 "Firepuncher refused %s:%s — disabled on kubernetes agents",

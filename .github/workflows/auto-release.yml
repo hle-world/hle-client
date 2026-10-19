@@ -16,6 +16,7 @@ jobs:
     # Only run when a release PR is merged (not just closed)
     if: >
       github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'chore/release-')
     runs-on: arc-runner-hle-client
     # A release that never finishes is worse than one that fails: the tag is
@@ -129,6 +130,7 @@ jobs:
     if: >
       always() &&
       github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'chore/release-')
     runs-on: ubuntu-latest
     permissions:

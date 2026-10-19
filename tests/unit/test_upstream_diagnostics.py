@@ -29,6 +29,12 @@ class TestSanitizeWsUrl:
     def test_no_query_unchanged(self):
         assert _sanitize_ws_url("ws://localhost:7681/ws") == "ws://localhost:7681/ws"
 
+    def test_strips_userinfo_and_query(self):
+        assert _sanitize_ws_url("ws://u:p@h/x?t=1") == "ws://h/x"
+
+    def test_strips_userinfo_keeps_host_and_port(self):
+        assert _sanitize_ws_url("wss://admin:pw@host:8006/path") == "wss://host:8006/path"
+
 
 class TestUpstreamConnectDiagnostics:
     def test_includes_status_and_sanitized_url(self):

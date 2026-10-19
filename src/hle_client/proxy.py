@@ -8,7 +8,7 @@ import os
 import ssl
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -104,6 +104,106 @@ def upstream_verify(verify_ssl: bool) -> bool | ssl.SSLContext:
     if not verify_ssl:
         return False
     return upstream_ssl_context()
+
+
+# A relay-supplied path must stay under the service URL's base path. A dot
+# segment ("..") is rejected outright, including one an upstream would only see
+# after decoding percent-encoded dots or slashes.
+
+
+def _base_path(url: str) -> str:
+    """The path component of *url*, normalised to start and end with ``/``."""
+    path = urlparse(url).path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def _remove_dot_segments(path: str) -> str:
+    """RFC 3986 §5.2.4 ``remove_dot_segments``."""
+    output: list[str] = []
+    while path:
+        if path.startswith("../"):
+            path = path[3:]
+        elif path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/./"):
+            path = "/" + path[3:]
+        elif path == "/.":
+            path = "/"
+        elif path.startswith("/../"):
+            path = "/" + path[4:]
+            if output:
+                output.pop()
+        elif path == "/..":
+            path = "/"
+            if output:
+                output.pop()
+        elif path in (".", ".."):
+            path = ""
+        elif path.startswith("/"):
+            index = path.find("/", 1)
+            output.append(path if index == -1 else path[:index])
+            path = "" if index == -1 else path[index:]
+        else:
+            index = path.find("/")
+            output.append(path if index == -1 else path[:index])
+            path = "" if index == -1 else path[index:]
+    return "".join(output) or "/"
+
+
+def decode_path_fully(path: str, rounds: int = 3) -> str:
+    """Percent-decode *path* until it stops changing (at most *rounds* times).
+
+    Used for checking only. An upstream behind another proxy may decode twice,
+    so ``%252e%252e`` has to be seen as ``..``. A lone ``%25`` is not rejected.
+    """
+    for _ in range(rounds):
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    return path
+
+
+def has_parent_segment(decoded: str) -> bool:
+    """Whether any segment is ``..`` once a ``;param`` suffix is ignored.
+
+    Servlet containers and some proxies drop ``;matrix`` parameters before
+    resolving dot segments, so ``..;/`` climbs exactly like ``../``.
+    """
+    return any(seg.split(";", 1)[0] == ".." for seg in decoded.split("/"))
+
+
+def safe_proxied_path(path: str, target_url: str) -> str | None:
+    """Return *path* if it stays under *target_url*'s base path, else ``None``.
+
+    The relay controls *path*, so a visitor of a tunnel that deliberately
+    exposes a sub-path (``http://host:8080/public/``) must not be able to climb
+    out of it with dot segments. *path* is percent-decoded for the check only —
+    the raw path is what gets forwarded, so ``%20`` and encoded slashes in
+    ordinary API paths (``%2F``) survive. A path is rejected when, once decoded,
+    it has a ``..`` segment (however the dots or slashes were spelled) or a
+    backslash. The path is then normalised (RFC 3986 ``remove_dot_segments``)
+    and must still land under the base path.
+
+    A service exposed at the site root has nothing to climb out of, so only the
+    malformed-path checks apply there.
+    """
+    if not path.startswith("/") or path.startswith("//") or "\\" in path:
+        return None
+    decoded = decode_path_fully(path)
+    if "\\" in decoded or has_parent_segment(decoded):
+        return None
+    base_path = _base_path(target_url)
+    if base_path == "/":
+        return path
+    normalized = _remove_dot_segments(path)
+    if not _remove_dot_segments(base_path + normalized.lstrip("/")).startswith(base_path):
+        return None
+    return normalized
 
 
 def _upstream_error_headers(exc: BaseException) -> dict[str, str | list[str]]:
@@ -304,6 +404,18 @@ class LocalProxy:
                 b"Bad Request: path must be relative",
             )
 
+        # A dot segment must not let a visitor climb out of a deliberately
+        # exposed sub-path (httpx would normalise it against base_url).
+        safe_path = safe_proxied_path(path, self.config.target_url)
+        if safe_path is None:
+            logger.error("Rejecting path that escapes the service base path: %s", path[:100])
+            return (
+                400,
+                {"content-type": "text/plain"},
+                b"Bad Request: path escapes the service base path",
+            )
+        path = safe_path
+
         url = path
         if query_string:
             url = f"{path}?{query_string}"
@@ -437,6 +549,16 @@ class LocalProxy:
             yield (400, {"content-type": "text/plain"}, None)
             yield (None, None, b"Bad Request: path must be relative")
             return
+
+        # A dot segment must not let a visitor climb out of a deliberately
+        # exposed sub-path (httpx would normalise it against base_url).
+        safe_path = safe_proxied_path(path, self.config.target_url)
+        if safe_path is None:
+            logger.error("Rejecting path that escapes the service base path: %s", path[:100])
+            yield (400, {"content-type": "text/plain"}, None)
+            yield (None, None, b"Bad Request: path escapes the service base path")
+            return
+        path = safe_path
 
         url = path
         if query_string:

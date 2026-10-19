@@ -20,8 +20,30 @@ _CLUSTER_ENV = (
     "HLE_POD_NAMESPACE",
     "HLE_CLUSTER_DOMAIN",
     "HLE_FIREPUNCHER_ENABLED",
+    "HLE_FIREPUNCHER_ALLOW_METADATA",
     "HLE_DISCOVERY_EXCLUDE_NAMESPACES",
+    # Self-update policy, so a developer's own agent.toml / environment cannot
+    # change what the update tests see.
+    "HLE_REMOTE_UPDATE",
+    "HLE_ALLOW_DOWNGRADE",
+    "HLE_UPDATE_MANIFEST",
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_agent_config(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
+    """Keep the suite off the developer's real ``~/.config/hle/agent.toml``.
+
+    The self-update policy reads that file, so a ``remote_update = false`` in a
+    local checkout would silently change the update tests. Tests that exercise
+    the file set ``HLE_AGENT_CONFIG`` (or patch ``AGENT_CONFIG_PATH``)
+    themselves, overriding this.
+    """
+    from hle_client import config
+
+    path = tmp_path_factory.mktemp("agent-config") / "agent.toml"
+    monkeypatch.delenv("HLE_AGENT_CONFIG", raising=False)
+    monkeypatch.setattr(config, "AGENT_CONFIG_PATH", path)
 
 
 @pytest.fixture(autouse=True)

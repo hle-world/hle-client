@@ -25,6 +25,8 @@ see :class:`ToolUpdater` for the (larger) window that leaves open.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -32,9 +34,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -105,6 +108,102 @@ def validate_version(version: object) -> str:
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise InvalidVersionError(f"not a release version: {version!r}")
     return version
+
+
+# --------------------------------------------------------------------------- #
+# Version ordering
+# --------------------------------------------------------------------------- #
+# The oldest release a remote update will ever move to, however the local
+# config reads. Releases before this predate the update protocol itself (and
+# later hardening), so a relay or admin must not be able to pin an
+# agent back to one. Raising it is a deliberate, one-way decision.
+MIN_REMOTE_VERSION = "2609.9"
+
+
+def release_key(version: str) -> tuple[int, int, int]:
+    """A sortable key for a validated CalVer release (YYMM, N, P)."""
+    validate_version(version)
+    yymm, n, *rest = version.split(".")
+    return int(yymm), int(n), int(rest[0]) if rest else 0
+
+
+def is_older(candidate: str, current: str) -> bool:
+    """Whether *candidate* is an earlier release than *current*."""
+    return release_key(candidate) < release_key(current)
+
+
+# --------------------------------------------------------------------------- #
+# Release integrity
+# --------------------------------------------------------------------------- #
+class DigestMismatchError(StageError):
+    """A downloaded artifact did not match the release manifest."""
+
+
+def sha256_file(path: Path) -> str:
+    """Hex sha256 of *path*, streamed so a large wheel is not held in memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def normalize_digest(value: str) -> str:
+    """Lower-case hex from ``sha256:<hex>`` or a bare ``<hex>``."""
+    text = value.strip().lower()
+    if text.startswith("sha256:"):
+        text = text[len("sha256:") :]
+    return text
+
+
+def verify_wheel_digest(wheel: Path, expected: str) -> None:
+    """Raise :class:`DigestMismatchError` unless *wheel* hashes to *expected*.
+
+    Runs on the downloaded artifact *before* it is handed to pip, so a wheel
+    swapped in transit or served by a compromised mirror is never activated.
+    """
+    actual = sha256_file(wheel)
+    want = normalize_digest(expected)
+    if not hmac.compare_digest(actual, want):
+        raise DigestMismatchError(f"{wheel.name} is sha256:{actual}, expected sha256:{want}")
+
+
+@dataclass(frozen=True)
+class ReleaseManifest:
+    """Trusted sha256 digests of published wheels, keyed by version.
+
+    This is the out-of-band anchor the self-update trusts: a wheel is installed
+    only when its bytes hash to the digest recorded here for that version,
+    whatever the index or the relay claims. The digests come from a signed
+    manifest the operator pins locally (``HLE_UPDATE_MANIFEST`` or the
+    ``update_manifest`` key in ``agent.toml``).
+    """
+
+    digests: Mapping[str, str]
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, object]) -> ReleaseManifest:
+        out: dict[str, str] = {}
+        for version, value in data.items():
+            if not VERSION_RE.fullmatch(str(version)):
+                raise StageError(f"not a release version in manifest: {version!r}")
+            if not isinstance(value, str) or not value.strip():
+                raise StageError(f"missing digest for {version!r} in manifest")
+            out[str(version)] = normalize_digest(value)
+        return cls(out)
+
+    def expected(self, version: str) -> str | None:
+        """The trusted digest for *version*, or None when it is not pinned."""
+        return self.digests.get(version)
+
+
+def coerce_manifest(
+    manifest: ReleaseManifest | Mapping[str, object] | None,
+) -> ReleaseManifest | None:
+    """Normalise whatever the caller supplied into a :class:`ReleaseManifest`."""
+    if manifest is None or isinstance(manifest, ReleaseManifest):
+        return manifest
+    return ReleaseManifest.from_mapping(manifest)
 
 
 # --------------------------------------------------------------------------- #
@@ -425,7 +524,14 @@ def ensure_log_buffer() -> RingBufferHandler:
 
 
 def log_tail(n: int = 50) -> list[str]:
-    return ensure_log_buffer().tail(n)
+    # Redact at this boundary: the ring sits on the root logger, so it can hold
+    # anything the process logged (URL userinfo, WS query tickets, debug
+    # output). Every caller sends the result to the relay, so none of them may
+    # see a raw line. Imported lazily to avoid an import cycle: agent_logs
+    # already imports this module.
+    from hle_client.agent_logs import redact
+
+    return [redact(line) for line in ensure_log_buffer().tail(n)]
 
 
 # --------------------------------------------------------------------------- #
@@ -467,11 +573,25 @@ class VersionedUpdater:
         python: str | None = None,
         run: Runner | None = None,
         pip_timeout: float = 600.0,
+        manifest: ReleaseManifest | Mapping[str, object] | None = None,
+        download: Callable[[str, Path], Path] | None = None,
     ) -> None:
         self.home = home
         self.python = python or sys.executable
         self._run = run or _run
         self._pip_timeout = pip_timeout
+        # When set, the wheel is fetched and its sha256 checked against the
+        # manifest before pip is allowed to install it.
+        self._manifest = coerce_manifest(manifest)
+        self._download = download or self._download_wheel
+
+    def pin_digest(self, version: str, digest: str) -> None:
+        """Verify *version*'s wheel against *digest* from the update request.
+
+        Ignored when the operator pinned a manifest: that one is authoritative.
+        """
+        if self._manifest is None:
+            self._manifest = ReleaseManifest({version: normalize_digest(digest)})
 
     # -- paths ---------------------------------------------------------------
     def version_dir(self, version: str) -> Path:
@@ -503,6 +623,8 @@ class VersionedUpdater:
         """Create ``versions/<v>`` and install exactly ``hle-client==<v>``.
 
         PyPI only: the request carries no index and none is honoured from it.
+        When a release manifest is configured the wheel is downloaded first and
+        its sha256 checked against the trusted digest before pip installs it.
         On any failure the directory is removed and :class:`StageError` raised.
         """
         target = self.version_dir(version)
@@ -516,24 +638,61 @@ class VersionedUpdater:
                 what="create venv",
                 timeout=120.0,
             )
-            self._check(
-                [
-                    str(target / "bin" / "python"),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-cache-dir",
-                    "--disable-pip-version-check",
-                    "--quiet",
-                    f"{_PACKAGE}=={version}",
-                ],
-                what="pip install",
-                timeout=self._pip_timeout,
-            )
+            if self._manifest is None:
+                self._pip_install(target, f"{_PACKAGE}=={version}")
+            else:
+                expected = self._manifest.expected(version)
+                if expected is None:
+                    raise StageError(f"no trusted digest for {version} in the release manifest")
+                with tempfile.TemporaryDirectory(prefix="hle-update-") as tmp:
+                    wheel = self._download(version, Path(tmp))
+                    verify_wheel_digest(wheel, expected)
+                    self._pip_install(target, str(wheel))
         except StageError:
             self._remove(target)
             raise
         return target
+
+    def _pip_install(self, target: Path, spec: str) -> None:
+        self._check(
+            [
+                str(target / "bin" / "python"),
+                "-m",
+                "pip",
+                "install",
+                "--no-cache-dir",
+                "--disable-pip-version-check",
+                "--quiet",
+                spec,
+            ],
+            what="pip install",
+            timeout=self._pip_timeout,
+        )
+
+    def _download_wheel(self, version: str, dest: Path) -> Path:
+        """Fetch the wheel for *version* into *dest*; never install it yet."""
+        dest.mkdir(parents=True, exist_ok=True)
+        self._check(
+            [
+                self.python,
+                "-m",
+                "pip",
+                "download",
+                "--no-deps",
+                "--only-binary=:all:",
+                "--no-cache-dir",
+                "--disable-pip-version-check",
+                "--dest",
+                str(dest),
+                f"{_PACKAGE}=={version}",
+            ],
+            what="pip download",
+            timeout=self._pip_timeout,
+        )
+        wheels = sorted(dest.glob("*.whl"))
+        if not wheels:
+            raise StageError(f"pip download produced no wheel for {version}")
+        return wheels[0]
 
     def verify(self, version: str) -> None:
         """The staged copy must report *version* and import both packages."""
@@ -679,6 +838,8 @@ class ToolUpdater:
         fetch: Callable[[str, float], int] | None = None,
         hle_path: str | None = None,
         install_timeout: float = 600.0,
+        manifest: ReleaseManifest | Mapping[str, object] | None = None,
+        download: Callable[[str, Path], Path] | None = None,
     ) -> None:
         if tool not in ("pipx", "uv"):
             raise ValueError(f"not a tool updater: {tool}")
@@ -688,16 +849,30 @@ class ToolUpdater:
         self._fetch = fetch or _http_status
         self._hle_path = hle_path or str(Path(sys.executable).with_name("hle"))
         self._install_timeout = install_timeout
+        self._manifest = coerce_manifest(manifest)
+        self._download = download or self._download_wheel
+        self._staged_wheel: Path | None = None
+        self._wheel_dir: tempfile.TemporaryDirectory[str] | None = None
 
     @property
     def previous_file(self) -> Path:
         return self.home / PREVIOUS_FILE
 
-    def _install_argv(self, version: str) -> list[str]:
-        spec = f"{_PACKAGE}=={validate_version(version)}"
+    def pin_digest(self, version: str, digest: str) -> None:
+        """Verify *version*'s wheel against *digest* from the update request.
+
+        Ignored when the operator pinned a manifest: that one is authoritative.
+        """
+        if self._manifest is None:
+            self._manifest = ReleaseManifest({version: normalize_digest(digest)})
+
+    def _install_spec_argv(self, spec: str) -> list[str]:
         if self.tool == "pipx":
             return ["pipx", "install", "--force", spec]
         return ["uv", "tool", "install", "--force", spec]
+
+    def _install_argv(self, version: str) -> list[str]:
+        return self._install_spec_argv(f"{_PACKAGE}=={validate_version(version)}")
 
     def stage(self, version: str) -> Path:
         url = f"https://pypi.org/pypi/{_PACKAGE}/{validate_version(version)}/json"
@@ -709,7 +884,60 @@ class ToolUpdater:
             raise StageError(f"{_PACKAGE} {version} is not on PyPI")
         if status != 200:
             raise StageError(f"PyPI answered HTTP {status} for {version}")
+        if self._manifest is not None:
+            # Fetch and verify now: these tools rewrite the running venv in
+            # place, so the digest has to pass before swap touches anything.
+            expected = self._manifest.expected(version)
+            if expected is None:
+                raise StageError(f"no trusted digest for {version} in the release manifest")
+            self._clear_staged_wheel()
+            wheel_dir = tempfile.TemporaryDirectory(prefix="hle-wheel-")
+            try:
+                wheel = self._download(version, Path(wheel_dir.name))
+                verify_wheel_digest(wheel, expected)
+            except StageError:
+                wheel_dir.cleanup()
+                raise
+            self._wheel_dir = wheel_dir
+            self._staged_wheel = wheel
         return Path(self._hle_path).parent.parent
+
+    def _download_wheel(self, version: str, dest: Path) -> Path:
+        """Fetch the wheel for *version* into *dest*; never install it yet."""
+        dest.mkdir(parents=True, exist_ok=True)
+        python = str(Path(self._hle_path).with_name("python"))
+        argv = [
+            python,
+            "-m",
+            "pip",
+            "download",
+            "--no-deps",
+            "--only-binary=:all:",
+            "--no-cache-dir",
+            "--disable-pip-version-check",
+            "--dest",
+            str(dest),
+            f"{_PACKAGE}=={version}",
+        ]
+        try:
+            result = self._run(argv, timeout=self._install_timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise StageError(f"pip download failed: {exc}") from exc
+        if result.returncode != 0:
+            raise StageError(
+                f"pip download failed (exit {result.returncode}): "
+                f"{_tail(result.stderr or result.stdout or '')}"
+            )
+        wheels = sorted(dest.glob("*.whl"))
+        if not wheels:
+            raise StageError(f"pip download produced no wheel for {version}")
+        return wheels[0]
+
+    def _clear_staged_wheel(self) -> None:
+        self._staged_wheel = None
+        if self._wheel_dir is not None:
+            self._wheel_dir.cleanup()
+            self._wheel_dir = None
 
     def verify(self, version: str) -> None:
         # Nothing is staged yet; the real check happens after the install.
@@ -723,18 +951,24 @@ class ToolUpdater:
         return (result.stdout or "").strip()
 
     def swap(self, version: str, *, from_version: str) -> None:
-        argv = self._install_argv(version)  # validates before anything is written
+        if self._staged_wheel is not None:
+            argv = self._install_spec_argv(str(self._staged_wheel))
+        else:
+            argv = self._install_argv(version)  # validates before anything is written
         _write_atomic(self.previous_file, from_version + "\n")
         try:
             result = self._run(argv, timeout=self._install_timeout)
         except (OSError, subprocess.SubprocessError) as exc:
+            self._clear_staged_wheel()
             raise SwapError(f"{self.tool} install failed: {exc}") from exc
         if result.returncode != 0:
+            self._clear_staged_wheel()
             raise SwapError(
                 f"{self.tool} install failed (exit {result.returncode}): "
                 f"{_tail(result.stderr or result.stdout or '')}"
             )
         out = self._installed_version()
+        self._clear_staged_wheel()
         if version not in out:
             # The tool said yes but the venv says otherwise (a stale index
             # view, typically). Put the old pin back before reporting.
@@ -776,14 +1010,18 @@ def _http_status(url: str, timeout: float) -> int:
 
 
 def make_updater(
-    support: UpdateSupport, home: Path, *, run: Runner | None = None
+    support: UpdateSupport,
+    home: Path,
+    *,
+    run: Runner | None = None,
+    manifest: ReleaseManifest | Mapping[str, object] | None = None,
 ) -> VersionedUpdater | ToolUpdater:
     """The updater for a supported install; raises for an unsupported one."""
     if not support.supported:
         raise UpdateError(support.reason or "unsupported")
     if support.method in ("pipx", "uv"):
-        return ToolUpdater(support.method, home, run=run)
-    return VersionedUpdater(home, run=run)
+        return ToolUpdater(support.method, home, run=run, manifest=manifest)
+    return VersionedUpdater(home, run=run, manifest=manifest)
 
 
 # --------------------------------------------------------------------------- #
@@ -821,6 +1059,10 @@ async def run_update(
         await send_progress(UpdateProgress(request_id=req.request_id, phase=p, detail=detail))
 
     await phase("staging", f"{_PACKAGE}=={version}")
+    pin = getattr(updater, "pin_digest", None)
+    if req.wheel_sha256 and callable(pin):
+        # A digest from the relay is used only when the operator pinned none.
+        pin(version, req.wheel_sha256)
     await asyncio.to_thread(updater.stage, version)
     await phase("verifying")
     await asyncio.to_thread(updater.verify, version)

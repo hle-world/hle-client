@@ -643,6 +643,27 @@ class TestExposeNoAutoSave:
         assert result.exit_code == 0
         assert mock_run.called
 
+    def test_expose_warns_about_url_embedded_credentials(self) -> None:
+        runner = CliRunner()
+        with patch("hle_client.cli.asyncio.run") as mock_run:
+            mock_run.return_value = None
+            result = runner.invoke(
+                main,
+                [
+                    "expose",
+                    "--service",
+                    "http://admin:hunter2@localhost:8080",
+                    "--label",
+                    "test",
+                    "--api-key",
+                    "hle_" + "f" * 32,
+                ],
+            )
+        assert result.exit_code == 0
+        assert "credentials" in result.output.lower()
+        # Neither the warning nor the summary line replays the password.
+        assert "hunter2" not in result.output
+
 
 class TestAgentList:
     """`hle agent list` — the lookup for what to pass to `hle fp --agent`."""

@@ -20,6 +20,7 @@ from hle_common.fp_protocol import (
     FpOpen,
     default_rules,
     is_allowed,
+    is_metadata_target,
 )
 
 
@@ -518,6 +519,78 @@ class TestIsAllowed:
     def test_empty_rules_allow_nothing(self):
         # "Not configured" must read as closed, not open.
         assert not is_allowed([], "localhost", 22)
+
+
+class TestMetadataRefusal:
+    """Cloud metadata must not be reachable through a forward by default.
+
+    On a cloud VM the link-local range is the metadata service, so a default
+    that included it handed the instance's IAM credentials to anyone who could
+    open a forward. It is refused by address on top of the allowlist.
+    """
+
+    def test_the_default_excludes_metadata(self):
+        rules = default_rules()
+        assert not is_allowed(rules, "169.254.169.254", 80)
+        assert not is_allowed(rules, "169.254.170.2", 80)
+        assert not is_allowed(rules, "fd00:ec2::254", 80)
+        assert is_allowed(rules, "192.168.1.5", 80)
+
+    def test_a_rule_covering_link_local_still_refuses_metadata(self):
+        rules = [ForwardRule(host="169.254.0.0/16")]
+        assert not is_allowed(rules, "169.254.169.254", 80)
+        # The rest of the range is still usable.
+        assert is_allowed(rules, "169.254.1.1", 80)
+
+    def test_metadata_is_detected_through_an_ipv4_mapped_spelling(self):
+        assert is_metadata_target("::ffff:169.254.169.254")
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "fd00:ec2::254%eth0",  # scope id
+            "[fd00:ec2::254%25eth0]".replace("%25", "%"),
+            "FD00:EC2:0:0:0:0:0:254",  # long, upper-case form
+            "::ffff:169.254.169.254",  # IPv4-mapped
+            "::ffff:a9fe:a9fe",  # IPv4-mapped, hex
+            "::169.254.169.254",  # IPv4-compatible
+            "2002:a9fe:a9fe::",  # 6to4
+            "64:ff9b::a9fe:a9fe",  # NAT64
+            "64:ff9b::169.254.170.2",  # NAT64, ECS endpoint
+            "fe80::1%eth0",  # scoped link-local
+            "169.254.169.254.",  # trailing dot
+        ],
+    )
+    def test_metadata_is_detected_in_every_spelling(self, host):
+        assert is_metadata_target(host), host
+        assert not is_allowed([ForwardRule(host="::/0")], host, 80)
+
+    def test_teredo_embedding_metadata_is_detected(self):
+        # Teredo stores the client IPv4 bit-inverted in the low 32 bits.
+        assert not is_metadata_target("2001:0:4136:e378:8000:63bf:3fff:fdd2")  # ordinary
+        assert is_metadata_target("2001:0:a9fe:a9fe::1")  # server field
+
+    def test_ordinary_addresses_are_not_metadata(self):
+        for host in ("10.0.0.5", "::ffff:10.0.0.5", "fd00::1", "2002:c0a8:101::", "example.com"):
+            assert not is_metadata_target(host), host
+
+    def test_the_operator_can_opt_metadata_back_in(self):
+        rules = [ForwardRule(host="169.254.169.254", port=80)]
+        assert is_allowed(rules, "169.254.169.254", 80, allow_metadata=True)
+
+    async def test_at_local_does_not_open_metadata(self, monkeypatch):
+        """`@local` on a VM can cover link-local, so the sentinel path refuses too."""
+        from hle_client import firepuncher
+
+        monkeypatch.setattr(firepuncher, "is_local", lambda host: True)
+        out = Collector()
+        agent = FpAgentSide(send=out, rules=[ForwardRule(host=LOCAL_NETWORKS)])
+
+        await agent.handle(
+            FpOpen(stream_id="s1", target_host="169.254.169.254", target_port=80).model_dump()
+        )
+
+        assert out.first(FpMsgType.ERROR)["code"] == FpErrorCode.NOT_ALLOWED
 
 
 class TestCidrRules:

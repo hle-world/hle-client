@@ -86,12 +86,23 @@ class TestRedact:
     def test_leaves_ordinary_lines_alone(self, line):
         assert agent_logs.redact(line) == line
 
-    def test_userinfo_keeps_user_and_host(self):
+    def test_userinfo_is_fully_redacted(self):
         out = agent_logs.redact("https://admin:s3cret@host.example/p")
-        assert out == "https://admin:[redacted]@host.example/p"
+        assert out == "https://[redacted]@host.example/p"
 
     def test_keeps_query_params_after_a_masked_value(self):
         assert agent_logs.redact("/x?token=abc&a=1") == "/x?token=[redacted]&a=1"
+
+
+class TestLogTailEgress:
+    def test_log_tail_is_redacted(self, ring):
+        ring.lines.append("enrolled with hlea_AbCdEf1234567890xyz")
+        ring.lines.append("dialing http://admin:hunter2@host.example/path")
+        ring.lines.append("GET /x?access_token=tok3nvalue&a=1")
+        ring.lines.append("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig")
+        joined = "\n".join(agent_update.log_tail())
+        for secret in ("AbCdEf1234567890xyz", "hunter2", "tok3nvalue", "eyJhbGciOiJIUzI1NiJ9"):
+            assert secret not in joined
 
 
 class TestLogsResponder:

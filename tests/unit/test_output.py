@@ -15,7 +15,15 @@ import json
 
 import pytest
 
-from hle_client.output import JSON, TABLE, Output, color_enabled, strip_markup
+from hle_client.output import (
+    JSON,
+    TABLE,
+    Output,
+    color_enabled,
+    sanitize,
+    strip_control,
+    strip_markup,
+)
 
 
 class TestMarkupStripping:
@@ -31,6 +39,40 @@ class TestMarkupStripping:
         assert strip_markup("worker[1] failed") == "worker[1] failed"
         assert strip_markup("http://[::1]:8080") == "http://[::1]:8080"
         assert strip_markup("[2026-09-07] done") == "[2026-09-07] done"
+
+
+class TestControlCharacters:
+    """Network text may not carry bytes a terminal acts on."""
+
+    def test_escapes_are_dropped_but_layout_survives(self):
+        assert strip_control("a\x1b[31mb\x07\n\tc") == "a[31mb\n\tc"
+
+    def test_sanitize_escapes_markup_as_well(self):
+        out = sanitize("\x1b]52;c;evil\x07 [link=x]y[/link]")
+        assert "\x1b" not in out
+        assert "\x07" not in out
+        # rich consumes the backslash, leaving the brackets literal.
+        assert "[link=x]y[/link]" in out.replace("\\[", "[")
+
+
+class TestOutputStripsControl:
+    def test_rich_console_input_is_cleaned(self, capsys):
+        out = Output(color=False)
+        out.print("\x1b]52;c;evil\x07 hello")
+        printed = capsys.readouterr().out
+        assert "\x1b" not in printed
+        assert "\x07" not in printed
+        assert "hello" in printed
+
+    def test_fallback_console_input_is_cleaned(self, monkeypatch, capsys):
+        monkeypatch.setattr("hle_client.output.HAVE_RICH", False)
+        out = Output(color=False)
+        monkeypatch.setattr(out, "_console", None)
+        out.print("\x1b]52;c;evil\x07 hello")
+        printed = capsys.readouterr().out
+        assert "\x1b" not in printed
+        assert "\x07" not in printed
+        assert "hello" in printed
 
 
 class TestColorDecision:

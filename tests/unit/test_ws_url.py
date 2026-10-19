@@ -32,3 +32,13 @@ class TestBuildLocalWsUrl:
     def test_query_string_preserved(self):
         url = _build_local_ws_url("https://h:8006/", "/vncwebsocket?port=5901&vncticket=AB%2FCD")
         assert url == "wss://h:8006/vncwebsocket?port=5901&vncticket=AB%2FCD"
+
+    def test_dot_segment_escapes_base_path_is_rejected(self):
+        # A visitor must not climb out of a deliberately exposed sub-path.
+        assert _build_local_ws_url("http://host:8080/public/", "/../admin") is None
+        assert _build_local_ws_url("http://host:8080/public/", "/%2e%2e/admin") is None
+        assert _build_local_ws_url("http://host:8080/public/", "/..%2fadmin") is None
+
+    def test_relative_path_stays_under_base_path(self):
+        url = _build_local_ws_url("http://host:8080/public/", "/a/b")
+        assert url == "ws://host:8080/public/a/b"

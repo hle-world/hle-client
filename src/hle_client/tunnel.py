@@ -7,12 +7,13 @@ import base64
 import contextlib
 import logging
 import os
+import posixpath
 import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -22,7 +23,7 @@ import websockets
 import websockets.asyncio.client
 import websockets.exceptions
 
-from hle_client import __version__
+from hle_client import __version__, agent_logs
 from hle_client import config as hle_config
 from hle_client.chunk_budget import LayeredBudget, endpoint_budget, get_chunk_budget
 from hle_client.fragmenting import FragmentingConnection
@@ -32,6 +33,9 @@ from hle_client.proxy import (
     UPSTREAM_ERROR_HEADER,
     LocalProxy,
     ProxyConfig,
+    decode_path_fully,
+    has_parent_segment,
+    safe_proxied_path,
     sni_hostname_for,
     upstream_verify,
 )
@@ -153,6 +157,25 @@ class TunnelConfig:
         if self.service_url and "://" not in self.service_url:
             self.service_url = f"http://{self.service_url}"
 
+        # URL-embedded credentials (http://user:pass@host) are supported so
+        # upstream Basic auth keeps working, but the userinfo must not leave the
+        # host: the relay stores ``service_url`` with the tunnel and shows it in
+        # the dashboard and API. Move it into the local-only
+        # ``upstream_basic_auth`` and register the URL without it. An explicit
+        # ``upstream_basic_auth`` wins, but the URL is stripped either way.
+        if self.service_url:
+            parsed = urlparse(self.service_url)
+            if parsed.username is not None or parsed.password is not None:
+                if self.upstream_basic_auth is None:
+                    # httpx decoded percent-escapes in URL userinfo; keep doing so.
+                    self.upstream_basic_auth = (
+                        unquote(parsed.username or ""),
+                        unquote(parsed.password or ""),
+                    )
+                self.service_url = urlunparse(
+                    parsed._replace(netloc=parsed.netloc.rpartition("@")[2])
+                )
+
 
 def to_tunnel_config(
     spec: TunnelSpec,
@@ -212,14 +235,20 @@ _WS_CLOSE_REASON_MAX = 123
 
 
 def _sanitize_ws_url(url: str) -> str:
-    """Drop the query string from a WS URL before logging/reporting it.
+    """Reduce a WS URL to ``scheme://host:port/path`` before logging/reporting it.
 
     Proxmox vncwebsocket (and similar) carry single-use secrets in the query
-    string (``vncticket``, tokens), which must never be stored in the relay's
-    debug capture. The path is what matters for diagnosis (e.g. spotting a
-    doubled slash), so keep it and drop everything after ``?``.
+    string (``vncticket``, tokens), and a service URL may embed credentials in
+    the userinfo (``user:pass@host``). Neither must ever be stored in the
+    relay's debug capture. The path is what matters for diagnosis (e.g.
+    spotting a doubled slash), so keep it and drop the userinfo, query and
+    fragment.
     """
-    return url.split("?", 1)[0]
+    parsed = urlparse(url)
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]
+    return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
 
 
 def _upstream_connect_diagnostics(url: str, exc: BaseException) -> dict[str, Any]:
@@ -243,8 +272,13 @@ def _upstream_connect_diagnostics(url: str, exc: BaseException) -> dict[str, Any
     return diag
 
 
-def _build_local_ws_url(service_url: str, path: str) -> str:
+def _build_local_ws_url(service_url: str, path: str) -> str | None:
     """Join the local service URL and a WS path into a ``ws(s)://`` URL.
+
+    Returns ``None`` when *path* would escape the service URL's base path
+    (dot segments, encoded separators) — ``websockets`` does not normalise the
+    path the way httpx normalises the HTTP path, so the same guard is applied
+    here as in the HTTP proxy.
 
     ``path`` always starts with ``/``. The base has any trailing slash
     stripped first, otherwise a service URL like ``https://host:8006/`` would
@@ -254,8 +288,14 @@ def _build_local_ws_url(service_url: str, path: str) -> str:
     vncwebsocket answers HTTP 500, breaking every VM/CT console over the
     tunnel.
     """
+    path_only, sep, query = path.partition("?")
+    safe_path = safe_proxied_path(path_only, service_url)
+    if safe_path is None:
+        return None
+    if sep:
+        safe_path = f"{safe_path}?{query}"
     base = service_url.replace("http://", "ws://").replace("https://", "wss://")
-    return f"{base.rstrip('/')}{path}"
+    return f"{base.rstrip('/')}{safe_path}"
 
 
 def _build_ws_close_diagnostics(
@@ -294,18 +334,21 @@ def _build_ws_close_diagnostics(
 # Diagnostics helpers (pure, unit-tested in isolation)
 # --------------------------------------------------------------------------
 
-# Secret patterns redacted from client log lines before they leave the host.
-_REDACT_API_KEY = re.compile(r"hle_[0-9a-f]{32}")
-_REDACT_KV = re.compile(r"(?i)\b(vncticket|token)=[^\s&]+")
-_REDACT_AUTH = re.compile(r"(?i)(authorization:\s*).+")
 
-
+# Secret redaction for the diagnostics channel.
 def _redact_secrets(text: str) -> str:
-    """Redact obvious secrets from a log message (best-effort, no raise)."""
-    text = _REDACT_API_KEY.sub("[REDACTED]", text)
-    text = _REDACT_KV.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
-    text = _REDACT_AUTH.sub(lambda m: f"{m.group(1)}[REDACTED]", text)
-    return text
+    """Redact secrets from a log message (best-effort, no raise).
+
+    One redactor everywhere data leaves the host: this delegates to
+    :func:`hle_client.agent_logs.redact`, so the diagnostics channel and the
+    update log tail scrub lines the same way.
+    """
+    return agent_logs.redact(text)
+
+
+def _redact_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Redact every string value in a diagnostics payload before it is sent."""
+    return {k: _redact_secrets(v) if isinstance(v, str) else v for k, v in data.items()}
 
 
 def _service_check_data(
@@ -341,6 +384,39 @@ def _service_check_data(
         # Exception class + short message; never the full repr (no secrets).
         data["error"] = f"{type(error).__name__}: {error}"[:200]
     return data
+
+
+# --------------------------------------------------------------------------
+# Webhook path restriction (pure, unit-tested in isolation)
+# --------------------------------------------------------------------------
+
+# ``posixpath.normpath`` does not decode, so a request such as
+# ``/hook/stripe/%2e%2e/admin`` (or the double-encoded ``%252e%252e``, or
+# ``..;/``) would pass a naive prefix check while the upstream decodes it into
+# ``/admin``. The check therefore runs on the fully decoded path.
+
+
+def _validated_webhook_path(raw_path: str, prefix: str) -> str | None:
+    """Return the path to forward for a webhook request, or ``None`` to reject.
+
+    Webhook tunnels are unauthenticated and may only reach the registered path
+    prefix. Percent-encoded dots, slashes and backslashes are decoded before
+    checking (the upstream may decode them, so a prefix check on the raw path is
+    not enough). A path is rejected when its decoded form has a backslash or a
+    ``..`` segment, or does not normalise to something under the prefix. An
+    encoded slash that stays inside the prefix is fine, and the raw path (with
+    any trailing slash) is what gets forwarded, as before.
+    """
+    if not isinstance(raw_path, str):
+        return None
+    decoded = decode_path_fully(raw_path)
+    if "\\" in decoded or has_parent_segment(decoded):
+        return None
+    normalized = posixpath.normpath(decoded)
+    # Match exact path or path with trailing segments (segment boundary).
+    if not (normalized == prefix or normalized.startswith(prefix + "/")):
+        return None
+    return raw_path
 
 
 class _DiagnosticLogHandler(logging.Handler):
@@ -539,7 +615,7 @@ class Tunnel:
                     code = exc.rcvd.code
                     close_code = code
                     if close_codes.is_fatal(code):
-                        message = self._fatal_close_message(code, exc.rcvd.reason)
+                        message = _redact_secrets(self._fatal_close_message(code, exc.rcvd.reason))
                         self._emit("fatal", level="error", message=message, code=code)
                         raise TunnelFatalError(message) from exc
                     if not close_codes.should_reconnect(code):
@@ -696,7 +772,29 @@ class Tunnel:
     # ------------------------------------------------------------------
 
     # Allowed relay hostnames — discovery URLs must match one of these.
-    _RELAY_HOST_ALLOWLIST = re.compile(r"^([a-z0-9-]+\.)*hle\.world$")
+    # User tunnels are ``<label>-<user>.hle.world``, which looks just like a
+    # regional relay name (``us-east.hle.world``), so a pattern over the whole
+    # zone cannot tell them apart. Accept the apex, the host this tunnel was
+    # configured with, an explicit set of known relay names, and anything under
+    # the dedicated ``relay.hle.world`` domain. Anything else falls back to the
+    # configured relay host: discovery tampering must not be able to point the
+    # client at a user's tunnel and leak the API key in TunnelRegistration.
+    _RELAY_HOSTS = frozenset({"hle.world", "relay.hle.world", "us-east.hle.world"})
+    _RELAY_HOST_ALLOWLIST = re.compile(r"^([a-z0-9-]+\.)*relay\.hle\.world$")
+
+    def _is_relay_host(self, host: str | None) -> bool:
+        """Whether a discovered relay hostname may be connected to."""
+        if not host:
+            return False
+        host = host.lower()
+        return (
+            host in self._RELAY_HOSTS
+            or host == self.config.relay_host.lower()
+            or bool(self._RELAY_HOST_ALLOWLIST.match(host))
+        )
+
+    # The relay control path a discovered URL must use.
+    _RELAY_TUNNEL_PATH = "/_hle/tunnel"
 
     async def _discover_relay_uri(self, api_key: str) -> str:
         """Resolve the relay WebSocket URI via the discovery endpoint.
@@ -714,17 +812,23 @@ class Tunnel:
             discovery = None
 
         if discovery is not None:
-            # Validate the discovered URL: must be wss:// to a known host.
+            # Validate the discovered URL: must be wss:// to a known relay
+            # host on the relay tunnel path.
             parsed = urlparse(discovery.relay_url)
             if parsed.scheme != "wss":
                 logger.warning(
                     "Relay discovery returned non-wss scheme (%s), ignoring",
                     parsed.scheme,
                 )
-            elif not parsed.hostname or not self._RELAY_HOST_ALLOWLIST.match(parsed.hostname):
+            elif not self._is_relay_host(parsed.hostname):
                 logger.warning(
                     "Relay discovery returned untrusted host (%s), ignoring",
                     parsed.hostname,
+                )
+            elif parsed.path != self._RELAY_TUNNEL_PATH:
+                logger.warning(
+                    "Relay discovery returned unexpected path (%s), ignoring",
+                    parsed.path,
                 )
             else:
                 logger.info(
@@ -936,6 +1040,14 @@ class Tunnel:
         """
         url = self.config.service_url
         verify = self.config.verify_ssl
+        # URL-embedded credentials were moved to upstream_basic_auth, so the
+        # probe must inject them itself to see the same response a forwarded
+        # request would.
+        probe_headers: dict[str, str] = {}
+        if self.config.upstream_basic_auth is not None:
+            uname, upass = self.config.upstream_basic_auth
+            token = base64.b64encode(f"{uname}:{upass}".encode()).decode()
+            probe_headers["authorization"] = f"Basic {token}"
         # A canonicalised in-cluster name may carry a trailing dot; verify the
         # certificate against the original host the dashboard configured.
         url_host = urlparse(url).hostname or ""
@@ -953,9 +1065,9 @@ class Tunnel:
                 trust_env=self.config.trust_env,
             ) as client:
                 try:
-                    response = await client.head(url, extensions=extensions)
+                    response = await client.head(url, extensions=extensions, headers=probe_headers)
                 except httpx.HTTPError:
-                    response = await client.get(url, extensions=extensions)
+                    response = await client.get(url, extensions=extensions, headers=probe_headers)
             elapsed_ms = (time.monotonic() - start) * 1000
             data = _service_check_data(url, verify, elapsed_ms, response=response)
         except Exception as exc:
@@ -974,7 +1086,7 @@ class Tunnel:
         if not self._diagnostics_enabled or self._ws is None or self._tunnel_id is None:
             return
         try:
-            payload = DiagnosticEvent(event=event, data=data, ts=time.time())
+            payload = DiagnosticEvent(event=event, data=_redact_data(data), ts=time.time())
             ws_msg = ProtocolMessage(
                 type=MessageType.DIAGNOSTIC,
                 tunnel_id=self._tunnel_id,
@@ -1033,12 +1145,9 @@ class Tunnel:
         """Forward an HTTP request to the local service and return the response."""
         # Webhook mode: reject requests that don't match the registered path prefix
         if self.config.webhook_path:
-            import posixpath
-
-            req_path = posixpath.normpath((msg.payload or {}).get("path", ""))
             prefix = self.config.webhook_path.rstrip("/")
-            # Match exact path or path with trailing segments (segment boundary)
-            if not (req_path == prefix or req_path.startswith(prefix + "/")):
+            req_path = _validated_webhook_path((msg.payload or {}).get("path", ""), prefix)
+            if req_path is None:
                 req = ProxiedHttpRequest.model_validate(msg.payload)
                 response = ProxiedHttpResponse(
                     request_id=req.request_id,
@@ -1058,6 +1167,9 @@ class Tunnel:
                 with contextlib.suppress(websockets.exceptions.ConnectionClosed):
                     await ws.send(resp_msg.model_dump_json())
                 return
+            # Forward exactly the validated, normalised path.
+            if msg.payload is not None:
+                msg.payload["path"] = req_path
 
         if CAPABILITY_CHUNKED_RESPONSE in self._server_caps:
             await self._handle_http_request_chunked(ws, msg)
@@ -1299,10 +1411,11 @@ class Tunnel:
         # Build the local WS URL (see _build_local_ws_url for the trailing-
         # slash handling that keeps strict upstreams like Proxmox happy). When
         # the guard canonicalised the target, the URI keeps the authority the
-        # dashboard asked for — including any ``user:pass@`` so URL-embedded
-        # Basic auth is still sent — for the Host header, while the TCP
-        # connection is directed at the canonical name via websockets'
-        # ``host``/``port`` keywords.
+        # dashboard asked for for the Host header, while the TCP connection is
+        # directed at the canonical name via websockets' ``host``/``port``
+        # keywords. URL-embedded credentials were moved to
+        # ``upstream_basic_auth`` in TunnelConfig and are injected as a header
+        # below, so they never appear in the URL.
         parsed = urlparse(self.config.service_url)
         canonical_host = parsed.hostname or ""
         canonical_port = parsed.port
@@ -1310,20 +1423,26 @@ class Tunnel:
         # Origin never carries userinfo; strip it from the authority.
         origin_netloc = parsed.netloc.rpartition("@")[2]
         if self.config.upstream_host:
-            userinfo = ""
-            # ``is not None``: an empty username with a password (``:pass@``)
-            # is still userinfo and must be sent as Basic auth, as it is when
-            # the URL is passed through unchanged on a non-canonical target.
-            if parsed.username is not None:
-                userinfo = parsed.username
-                if parsed.password:
-                    userinfo += f":{parsed.password}"
-                userinfo += "@"
-            presented_url = urlunparse(
-                parsed._replace(netloc=f"{userinfo}{self.config.upstream_host}")
-            )
+            presented_url = urlunparse(parsed._replace(netloc=self.config.upstream_host))
             origin_netloc = self.config.upstream_host
         local_ws_url = _build_local_ws_url(presented_url, open_req.path)
+        if local_ws_url is None:
+            logger.error(
+                "Rejecting WS path that escapes the service base path: %s",
+                open_req.path[:100],
+            )
+            async with self._ws_streams_lock:
+                self._ws_streams.pop(stream_id, None)
+            close_msg = ProtocolMessage(
+                type=MessageType.WS_CLOSE,
+                tunnel_id=self._tunnel_id,
+                payload=WsStreamClose(
+                    stream_id=stream_id, code=1008, reason="invalid path"
+                ).model_dump(),
+            )
+            with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                await ws.send(close_msg.model_dump_json())
+            return
 
         # Strip WebSocket handshake and hop-by-hop headers — these belong to
         # the browser↔relay connection, not the client↔local service connection.
@@ -1419,7 +1538,7 @@ class Tunnel:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
                 self._recent_closed_streams.append(stream_id)
-            reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
+            reason = _redact_secrets(f"{type(exc).__name__}: {exc}")[:_WS_CLOSE_REASON_MAX]
             close_msg = ProtocolMessage(
                 type=MessageType.WS_CLOSE,
                 tunnel_id=self._tunnel_id,
@@ -1586,9 +1705,8 @@ class Tunnel:
             # Prefer the close code from the exception (covers abnormal closes
             # where local_ws.close_code may not yet be populated).
             close_code = exc.code or getattr(local_ws, "close_code", None) or 1006
-            close_reason = (exc.reason or getattr(local_ws, "close_reason", "") or "")[
-                :_WS_CLOSE_REASON_MAX
-            ]
+            raw_reason = exc.reason or getattr(local_ws, "close_reason", "") or ""
+            close_reason = _redact_secrets(raw_reason)[:_WS_CLOSE_REASON_MAX]
             exc_type = type(exc).__name__
             logger.info(
                 "Local WS connection closed: stream_id=%s code=%d reason=%r",
@@ -1599,21 +1717,22 @@ class Tunnel:
         except MessageTooLargeError as exc:
             # Too big even to fragment: close this stream, not the tunnel.
             close_code = exc.close_code
-            close_reason = str(exc)[:_WS_CLOSE_REASON_MAX]
+            close_reason = _redact_secrets(str(exc))[:_WS_CLOSE_REASON_MAX]
             exc_type = type(exc).__name__
             logger.warning("Upstream WS message too large: stream_id=%s %s", stream_id, exc)
             with contextlib.suppress(Exception):
                 await local_ws.close(code=close_code, reason=close_reason)
         except Exception as exc:
             close_code = 1011
-            close_reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
+            close_reason = _redact_secrets(f"{type(exc).__name__}: {exc}")[:_WS_CLOSE_REASON_MAX]
             exc_type = type(exc).__name__
             logger.exception("Error reading from local WS: stream_id=%s", stream_id)
         else:
             # async-for ended without an exception (rare path — peer half-closed
             # cleanly). Read the recorded close metadata from the connection.
             close_code = getattr(local_ws, "close_code", None) or 1000
-            close_reason = (getattr(local_ws, "close_reason", "") or "")[:_WS_CLOSE_REASON_MAX]
+            raw_reason = getattr(local_ws, "close_reason", "") or ""
+            close_reason = _redact_secrets(raw_reason)[:_WS_CLOSE_REASON_MAX]
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)

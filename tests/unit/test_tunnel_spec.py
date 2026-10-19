@@ -554,6 +554,7 @@ class TestDaemonInstallWritesTheSpec:
             patch.object(service_cmd, "_require_supported", return_value="linux"),
             patch.object(service_cmd, "current_platform", return_value="linux"),
             patch.object(service_cmd, "_unit_dir", return_value=tmp_path),
+            patch.object(service_cmd, "_env_dir", return_value=tmp_path),
             patch.object(service_cmd, "_unit_path_in_other_scope", return_value=None),
             patch.object(service_cmd, "find_hle_path", return_value="/usr/bin/hle"),
             patch.object(service_cmd.subprocess, "run") as run,
@@ -574,7 +575,14 @@ class TestDaemonInstallWritesTheSpec:
         exec_line = next(ln for ln in text.splitlines() if ln.startswith("ExecStart="))
         assert "admin:pw" not in exec_line
         assert "--response-timeout 90" in exec_line
-        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH=admin:pw"' in text
+        # Not in the environment systemd shows to every local user...
+        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH' not in text
+        assert "Environment=HLE_UPSTREAM_BASIC_AUTH" not in text
+        # ...but in an owner-only file the unit points at.
+        env_file = tmp_path / "ha.env"
+        assert f"EnvironmentFile={env_file}" in text
+        assert env_file.stat().st_mode & 0o777 == 0o600
+        assert env_file.read_text() == 'HLE_UPSTREAM_BASIC_AUTH="admin:pw"\n'
         assert unit.stat().st_mode & 0o777 == 0o600
         stamp = parse_service_spec(text)
         assert stamp is not None
@@ -592,6 +600,7 @@ class TestDaemonInstallWritesTheSpec:
             patch.object(service_cmd, "service_spec", return_value=stamp),
             patch.object(service_cmd, "current_platform", return_value="linux"),
             patch.object(service_cmd, "_unit_dir", return_value=tmp_path),
+            patch.object(service_cmd, "_env_dir", return_value=tmp_path),
             patch.object(service_cmd, "_unit_path_in_other_scope", return_value=None),
             patch.object(service_cmd, "find_hle_path", return_value="/usr/bin/hle"),
             patch.object(service_cmd.subprocess, "run") as run,
@@ -636,7 +645,10 @@ class TestDaemonInstallWritesTheSpec:
         assert "--upstream-basic-auth" not in exec_line
         assert "--verify-ssl" in exec_line
         assert "--allow x@y.z" in exec_line
-        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH=a:b"' in text
+        assert 'Environment="HLE_UPSTREAM_BASIC_AUTH' not in text
+        env_file = tmp_path / "ha.env"
+        assert f"EnvironmentFile={env_file}" in text
+        assert env_file.read_text() == 'HLE_UPSTREAM_BASIC_AUTH="a:b"\n'
         assert unit.stat().st_mode & 0o777 == 0o600
         # Stamped with the spec now, so the next refresh takes the new path.
         restamped = parse_service_spec(text)

@@ -45,6 +45,14 @@ class TestWithoutRich:
         norich.Console().print("[green]Connected[/green] to the relay")
         assert capsys.readouterr().out.strip() == "Connected to the relay"
 
+    def test_control_characters_never_reach_the_terminal(self, norich, capsys):
+        """A relay close reason may carry an escape byte; the fallback drops it."""
+        norich.Console().print("\x1b]52;c;evil\x07 Connection lost")
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "\x07" not in out
+        assert "Connection lost" in out
+
     def test_a_table_renders_as_aligned_columns(self, norich, capsys):
         table = norich.Table(title="Active Tunnels")
         table.add_column("Subdomain")
