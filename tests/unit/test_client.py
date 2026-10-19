@@ -15,7 +15,7 @@ import websockets.exceptions
 from websockets.frames import Close
 
 from hle_client.proxy import LocalProxy, ProxyConfig
-from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError
+from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError, _validated_webhook_path
 from hle_common.models import (
     ProxiedHttpRequest,
     WsStreamClose,
@@ -815,6 +815,107 @@ class TestTunnelHandleHttpRequest:
 
         resp_msg = ProtocolMessage.model_validate_json(sent[0])
         assert resp_msg.payload["body"] is None
+        await tunnel._proxy.stop()
+
+
+class TestWebhookPathRestriction:
+    """Webhook tunnels may only forward requests inside the registered prefix."""
+
+    def test_accepts_exact_prefix_and_prefixed_event(self):
+        assert _validated_webhook_path("/hook/stripe", "/hook/stripe") == "/hook/stripe"
+        assert (
+            _validated_webhook_path("/hook/stripe/evt", "/hook/stripe")
+            == "/hook/stripe/evt"
+        )
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # Percent-encoded dot / slash / backslash (upstream may decode them).
+            "/hook/stripe/%2e%2e/x",
+            "/hook/stripe/%2E%2E/admin",
+            "/hook/stripe/..%2fx",
+            "/hook/stripe/%2f..%2fx",
+            "/hook/stripe\\..\\x",
+            "/hook/stripe/%5c..%5cx",
+            # Literal traversal / redundant separators / trailing slash.
+            "/hook/stripe/../admin",
+            "/hook/stripe//evt",
+            "/hook/admin",
+        ],
+    )
+    def test_rejects_bypass_and_malformed_paths(self, path):
+        assert _validated_webhook_path(path, "/hook/stripe") is None
+
+    async def test_bypass_paths_return_404_and_are_not_forwarded(self):
+        tunnel = _tunnel(webhook_path="/hook/stripe")
+        tunnel._tunnel_id = "t-hook"
+        await tunnel._proxy.start()
+        tunnel._proxy.forward_http = AsyncMock(return_value=(200, {}, b"ok"))
+
+        mock_ws = AsyncMock()
+        sent: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        bypasses = [
+            "/hook/stripe/%2e%2e/x",
+            "/hook/stripe/..%2fx",
+            "/hook/stripe\\..\\x",
+        ]
+        for index, path in enumerate(bypasses):
+            request_payload = ProxiedHttpRequest(
+                request_id=f"req-{index}",
+                method="POST",
+                path=path,
+                headers={},
+            )
+            msg = ProtocolMessage(
+                type=MessageType.HTTP_REQUEST,
+                tunnel_id="t-hook",
+                request_id=f"req-{index}",
+                payload=request_payload.model_dump(),
+            )
+            await tunnel._handle_http_request(mock_ws, msg)
+
+        tunnel._proxy.forward_http.assert_not_awaited()
+        assert len(sent) == len(bypasses)
+        for raw in sent:
+            assert ProtocolMessage.model_validate_json(raw).payload["status_code"] == 404
+        await tunnel._proxy.stop()
+
+    async def test_registered_path_event_is_forwarded(self):
+        tunnel = _tunnel(webhook_path="/hook/stripe")
+        tunnel._tunnel_id = "t-hook"
+        await tunnel._proxy.start()
+        tunnel._proxy.forward_http = AsyncMock(return_value=(200, {}, b"ok"))
+
+        mock_ws = AsyncMock()
+        sent: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
+
+        request_payload = ProxiedHttpRequest(
+            request_id="req-evt",
+            method="POST",
+            path="/hook/stripe/evt",
+            headers={"content-type": "application/json"},
+        )
+        msg = ProtocolMessage(
+            type=MessageType.HTTP_REQUEST,
+            tunnel_id="t-hook",
+            request_id="req-evt",
+            payload=request_payload.model_dump(),
+        )
+
+        await tunnel._handle_http_request(mock_ws, msg)
+
+        tunnel._proxy.forward_http.assert_awaited_once_with(
+            method="POST",
+            path="/hook/stripe/evt",
+            headers={"content-type": "application/json"},
+            body=None,
+            query_string="",
+        )
+        assert ProtocolMessage.model_validate_json(sent[0]).payload["status_code"] == 200
         await tunnel._proxy.stop()
 
 

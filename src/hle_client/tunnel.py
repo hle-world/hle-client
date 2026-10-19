@@ -7,6 +7,7 @@ import base64
 import contextlib
 import logging
 import os
+import posixpath
 import re
 import time
 from collections import deque
@@ -353,6 +354,44 @@ def _service_check_data(
         # Exception class + short message; never the full repr (no secrets).
         data["error"] = f"{type(error).__name__}: {error}"[:200]
     return data
+
+
+# --------------------------------------------------------------------------
+# Webhook path restriction (pure, unit-tested in isolation)
+# --------------------------------------------------------------------------
+
+# Percent-encoded dot, slash and backslash. ``posixpath.normpath`` does not
+# decode, so a request such as ``/hook/stripe/%2e%2e/admin`` would pass a naive
+# prefix check while the upstream (many Java/Spring, some Go/Node routers)
+# decodes it into ``/admin``. Decode before normalising and reject anything
+# that does not round-trip, then forward only the validated path.
+_ENCODED_PATH_SEPARATOR = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
+_ENCODED_PATH_CHARS = {"2e": ".", "2f": "/", "5c": "\\"}
+
+
+def _validated_webhook_path(raw_path: str, prefix: str) -> str | None:
+    """Return the path to forward for a webhook request, or ``None`` to reject.
+
+    Webhook tunnels are unauthenticated and may only reach the registered path
+    prefix. Percent-encoded dots, slashes and backslashes are decoded before
+    normalising (the upstream may decode them, so a naive prefix check on the
+    raw path is not enough); any path whose decoded and normalised form differs
+    from the raw form — encoded dots/slashes/backslashes, redundant separators,
+    literal ``..`` segments, a trailing slash — is rejected. The decoded,
+    normalised path is returned so callers forward exactly what was validated.
+    """
+    if not isinstance(raw_path, str):
+        return None
+    decoded = _ENCODED_PATH_SEPARATOR.sub(
+        lambda m: _ENCODED_PATH_CHARS[m.group(1).lower()], raw_path
+    )
+    normalized = posixpath.normpath(decoded)
+    if normalized != raw_path:
+        return None
+    # Match exact path or path with trailing segments (segment boundary).
+    if not (normalized == prefix or normalized.startswith(prefix + "/")):
+        return None
+    return normalized
 
 
 class _DiagnosticLogHandler(logging.Handler):
@@ -1045,12 +1084,9 @@ class Tunnel:
         """Forward an HTTP request to the local service and return the response."""
         # Webhook mode: reject requests that don't match the registered path prefix
         if self.config.webhook_path:
-            import posixpath
-
-            req_path = posixpath.normpath((msg.payload or {}).get("path", ""))
             prefix = self.config.webhook_path.rstrip("/")
-            # Match exact path or path with trailing segments (segment boundary)
-            if not (req_path == prefix or req_path.startswith(prefix + "/")):
+            req_path = _validated_webhook_path((msg.payload or {}).get("path", ""), prefix)
+            if req_path is None:
                 req = ProxiedHttpRequest.model_validate(msg.payload)
                 response = ProxiedHttpResponse(
                     request_id=req.request_id,
@@ -1070,6 +1106,9 @@ class Tunnel:
                 with contextlib.suppress(websockets.exceptions.ConnectionClosed):
                     await ws.send(resp_msg.model_dump_json())
                 return
+            # Forward exactly the validated, normalised path.
+            if msg.payload is not None:
+                msg.payload["path"] = req_path
 
         if CAPABILITY_CHUNKED_RESPONSE in self._server_caps:
             await self._handle_http_request_chunked(ws, msg)
