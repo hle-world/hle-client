@@ -6,12 +6,14 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
 
 from hle_client.proxy import UPSTREAM_ERROR_HEADER, LocalProxy, ProxyConfig
 from hle_client.tunnel import (
     Tunnel,
     TunnelConfig,
     _DiagnosticLogHandler,
+    _redact_data,
     _redact_secrets,
     _service_check_data,
 )
@@ -227,17 +229,48 @@ class TestRedactSecrets:
     def test_api_key(self):
         s = _redact_secrets("using key hle_" + "0" * 32 + " now")
         assert "hle_" not in s
-        assert "[REDACTED]" in s
+        assert "[redacted]" in s
 
     def test_vncticket_and_token(self):
-        assert _redact_secrets("url?vncticket=SECRET&x=1") == "url?vncticket=[REDACTED]&x=1"
-        assert _redact_secrets("token=abc123 tail") == "token=[REDACTED] tail"
+        assert _redact_secrets("url?vncticket=SECRET&x=1") == "url?vncticket=[redacted]&x=1"
+        assert _redact_secrets("token=abc123 tail") == "token=[redacted] tail"
 
     def test_authorization(self):
-        assert _redact_secrets("Authorization: Bearer xyz") == "Authorization: [REDACTED]"
+        assert _redact_secrets("Authorization: Bearer xyz") == "Authorization: [redacted]"
 
     def test_no_secret_unchanged(self):
         assert _redact_secrets("plain message") == "plain message"
+
+
+_SECRET_LINES = [
+    ("enrolled with hlea_AbCdEf1234567890xyz", "AbCdEf1234567890xyz"),
+    ("dialing http://admin:hunter2@host.example/path", "hunter2"),
+    ("GET /x?access_token=tok3nvalue&a=1", "tok3nvalue"),
+    ("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", "eyJhbGciOiJIUzI1NiJ9"),
+]
+
+
+class TestDiagnosticEgressRedaction:
+    def _record(self, msg="m", name="hle_client.x"):
+        return logging.LogRecord(name, logging.WARNING, __file__, 1, msg, None, None)
+
+    @pytest.mark.parametrize(("line", "secret"), _SECRET_LINES)
+    def test_log_line_diagnostic_is_redacted(self, line, secret):
+        tunnel = _tunnel()
+        tunnel._diagnostics_enabled = True
+        emitted: list = []
+        tunnel._emit_diagnostic = lambda event, **data: emitted.append((event, data))
+        handler = _DiagnosticLogHandler(tunnel)
+        handler.emit(self._record(msg=line))
+        assert len(emitted) == 1
+        _event, data = emitted[0]
+        assert secret not in data["message"]
+
+    @pytest.mark.parametrize(("line", "secret"), _SECRET_LINES)
+    def test_diagnostic_payload_is_redacted(self, line, secret):
+        data = _redact_data({"event_field": line, "code": 1011})
+        assert secret not in data["event_field"]
+        assert data["code"] == 1011
 
 
 class TestDiagnosticLogHandler:
@@ -262,7 +295,7 @@ class TestDiagnosticLogHandler:
         event, data = emitted[0]
         assert event == "log.line"
         assert data["level"] == "WARNING"
-        assert "[REDACTED]" in data["message"]
+        assert "[redacted]" in data["message"]
 
     def test_info_not_emitted(self):
         tunnel = _tunnel()

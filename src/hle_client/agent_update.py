@@ -425,7 +425,14 @@ def ensure_log_buffer() -> RingBufferHandler:
 
 
 def log_tail(n: int = 50) -> list[str]:
-    return ensure_log_buffer().tail(n)
+    # Redact at this boundary: the ring sits on the root logger, so it can hold
+    # anything the process logged (URL userinfo, WS query tickets, debug
+    # output). Every caller sends the result to the relay, so none of them may
+    # see a raw line. Imported lazily to avoid an import cycle: agent_logs
+    # already imports this module.
+    from hle_client.agent_logs import redact
+
+    return [redact(line) for line in ensure_log_buffer().tail(n)]
 
 
 # --------------------------------------------------------------------------- #

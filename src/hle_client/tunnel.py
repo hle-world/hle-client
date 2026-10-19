@@ -23,7 +23,7 @@ import websockets
 import websockets.asyncio.client
 import websockets.exceptions
 
-from hle_client import __version__
+from hle_client import __version__, agent_logs
 from hle_client import config as hle_config
 from hle_client.chunk_budget import LayeredBudget, endpoint_budget, get_chunk_budget
 from hle_client.fragmenting import FragmentingConnection
@@ -214,14 +214,20 @@ _WS_CLOSE_REASON_MAX = 123
 
 
 def _sanitize_ws_url(url: str) -> str:
-    """Drop the query string from a WS URL before logging/reporting it.
+    """Reduce a WS URL to ``scheme://host:port/path`` before logging/reporting it.
 
     Proxmox vncwebsocket (and similar) carry single-use secrets in the query
-    string (``vncticket``, tokens), which must never be stored in the relay's
-    debug capture. The path is what matters for diagnosis (e.g. spotting a
-    doubled slash), so keep it and drop everything after ``?``.
+    string (``vncticket``, tokens), and a service URL may embed credentials in
+    the userinfo (``user:pass@host``). Neither must ever be stored in the
+    relay's debug capture. The path is what matters for diagnosis (e.g.
+    spotting a doubled slash), so keep it and drop the userinfo, query and
+    fragment.
     """
-    return url.split("?", 1)[0]
+    parsed = urlparse(url)
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]
+    return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
 
 
 def _upstream_connect_diagnostics(url: str, exc: BaseException) -> dict[str, Any]:
@@ -307,18 +313,20 @@ def _build_ws_close_diagnostics(
 # Diagnostics helpers (pure, unit-tested in isolation)
 # --------------------------------------------------------------------------
 
-# Secret patterns redacted from client log lines before they leave the host.
-_REDACT_API_KEY = re.compile(r"hle_[0-9a-f]{32}")
-_REDACT_KV = re.compile(r"(?i)\b(vncticket|token)=[^\s&]+")
-_REDACT_AUTH = re.compile(r"(?i)(authorization:\s*).+")
-
-
+# Secret redaction for the diagnostics channel.
 def _redact_secrets(text: str) -> str:
-    """Redact obvious secrets from a log message (best-effort, no raise)."""
-    text = _REDACT_API_KEY.sub("[REDACTED]", text)
-    text = _REDACT_KV.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
-    text = _REDACT_AUTH.sub(lambda m: f"{m.group(1)}[REDACTED]", text)
-    return text
+    """Redact secrets from a log message (best-effort, no raise).
+
+    One redactor everywhere data leaves the host: this delegates to
+    :func:`hle_client.agent_logs.redact`, so the diagnostics channel and the
+    update log tail scrub lines the same way.
+    """
+    return agent_logs.redact(text)
+
+
+def _redact_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Redact every string value in a diagnostics payload before it is sent."""
+    return {k: _redact_secrets(v) if isinstance(v, str) else v for k, v in data.items()}
 
 
 def _service_check_data(
@@ -590,7 +598,7 @@ class Tunnel:
                     code = exc.rcvd.code
                     close_code = code
                     if close_codes.is_fatal(code):
-                        message = self._fatal_close_message(code, exc.rcvd.reason)
+                        message = _redact_secrets(self._fatal_close_message(code, exc.rcvd.reason))
                         self._emit("fatal", level="error", message=message, code=code)
                         raise TunnelFatalError(message) from exc
                     if not close_codes.should_reconnect(code):
@@ -1025,7 +1033,7 @@ class Tunnel:
         if not self._diagnostics_enabled or self._ws is None or self._tunnel_id is None:
             return
         try:
-            payload = DiagnosticEvent(event=event, data=data, ts=time.time())
+            payload = DiagnosticEvent(event=event, data=_redact_data(data), ts=time.time())
             ws_msg = ProtocolMessage(
                 type=MessageType.DIAGNOSTIC,
                 tunnel_id=self._tunnel_id,
@@ -1487,7 +1495,7 @@ class Tunnel:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)
                 self._recent_closed_streams.append(stream_id)
-            reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
+            reason = _redact_secrets(f"{type(exc).__name__}: {exc}")[:_WS_CLOSE_REASON_MAX]
             close_msg = ProtocolMessage(
                 type=MessageType.WS_CLOSE,
                 tunnel_id=self._tunnel_id,
@@ -1654,9 +1662,9 @@ class Tunnel:
             # Prefer the close code from the exception (covers abnormal closes
             # where local_ws.close_code may not yet be populated).
             close_code = exc.code or getattr(local_ws, "close_code", None) or 1006
-            close_reason = (exc.reason or getattr(local_ws, "close_reason", "") or "")[
-                :_WS_CLOSE_REASON_MAX
-            ]
+            close_reason = _redact_secrets(
+                exc.reason or getattr(local_ws, "close_reason", "") or ""
+            )[:_WS_CLOSE_REASON_MAX]
             exc_type = type(exc).__name__
             logger.info(
                 "Local WS connection closed: stream_id=%s code=%d reason=%r",
@@ -1667,21 +1675,23 @@ class Tunnel:
         except MessageTooLargeError as exc:
             # Too big even to fragment: close this stream, not the tunnel.
             close_code = exc.close_code
-            close_reason = str(exc)[:_WS_CLOSE_REASON_MAX]
+            close_reason = _redact_secrets(str(exc))[:_WS_CLOSE_REASON_MAX]
             exc_type = type(exc).__name__
             logger.warning("Upstream WS message too large: stream_id=%s %s", stream_id, exc)
             with contextlib.suppress(Exception):
                 await local_ws.close(code=close_code, reason=close_reason)
         except Exception as exc:
             close_code = 1011
-            close_reason = f"{type(exc).__name__}: {exc}"[:_WS_CLOSE_REASON_MAX]
+            close_reason = _redact_secrets(f"{type(exc).__name__}: {exc}")[:_WS_CLOSE_REASON_MAX]
             exc_type = type(exc).__name__
             logger.exception("Error reading from local WS: stream_id=%s", stream_id)
         else:
             # async-for ended without an exception (rare path — peer half-closed
             # cleanly). Read the recorded close metadata from the connection.
             close_code = getattr(local_ws, "close_code", None) or 1000
-            close_reason = (getattr(local_ws, "close_reason", "") or "")[:_WS_CLOSE_REASON_MAX]
+            close_reason = _redact_secrets(
+                getattr(local_ws, "close_reason", "") or ""
+            )[:_WS_CLOSE_REASON_MAX]
         finally:
             async with self._ws_streams_lock:
                 self._ws_streams.pop(stream_id, None)

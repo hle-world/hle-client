@@ -23,29 +23,32 @@ __all__ = ["LOGS_CAPABILITY", "build_response", "redact"]
 
 _MASK = "[redacted]"
 
-# Order matters: the Authorization rule eats the rest of the line first, so a
-# "Basic ..." or "Bearer ..." value is never left half-visible.
+# Order matters: the Authorization/Cookie rule eats the rest of the line first,
+# so a "Basic ..." or "Bearer ..." value is never left half-visible; the
+# userinfo rule runs last so it sees whatever the earlier rules left.
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Credential-bearing headers: the whole value, to the end of the line.
     (
         re.compile(r"(?i)\b((?:proxy-)?authorization|(?:set-)?cookie|x-api-key)[\"']?\s*[:=]\s*.*"),
         rf"\1: {_MASK}",
     ),
-    (re.compile(r"(?i)\b(bearer\s+)[^\s\"',;]+"), rf"\1{_MASK}"),
-    # Real key shapes only (see config.API_KEY_PATTERN / AGENT_TOKEN_PREFIX), so
-    # module and logger names such as ``hle_client.agent`` are left alone.
-    (re.compile(r"\bhle_[0-9a-f]{32,}\b"), _MASK),
-    (re.compile(r"\bhlea_[A-Za-z0-9_-]{16,}"), _MASK),
-    # ``password=x``, ``token: x``, ``"api_key": "x"``.
+    (re.compile(r"(?i)\b((?:bearer|basic)\s+)[^\s\"',;]+"), rf"\1{_MASK}"),
+    # Real key shapes, any length (see config.API_KEY_PATTERN /
+    # AGENT_TOKEN_PREFIX), so module and logger names such as
+    # ``hle_client.agent`` are left alone: they are not followed by a key
+    # alphabet, so the trailing word boundary never matches.
+    (re.compile(r"\bhle_[0-9a-f]+\b"), _MASK),
+    (re.compile(r"\bhlea_[A-Za-z0-9_-]+\b"), _MASK),
+    # ``password=x``, ``?access_token=x``, ``vncticket: x``, ``"api_key": "x"``.
     (
         re.compile(
-            r"(?i)(\b[\w-]*(?:password|passwd|token|secret|api[_-]?key)[\w-]*[\"']?"
-            r"\s*[:=]\s*[\"']?)[^\s&\"',;]+"
+            r"(?i)(\b[\w-]*(?:password|passwd|token|secret|api[_-]?key|ticket|auth|sig)"
+            r"[\w-]*[\"']?\s*[:=]\s*[\"']?)[^\s&\"',;]+"
         ),
         rf"\1{_MASK}",
     ),
-    # URL userinfo: scheme://user:PASS@host
-    (re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^/\s@]+(@)"), rf"\1{_MASK}\2"),
+    # URL userinfo: scheme://user:pass@host -> scheme://[redacted]@host
+    (re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s@]+@"), rf"\1{_MASK}@"),
 ]
 
 

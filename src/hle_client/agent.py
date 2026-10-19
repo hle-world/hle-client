@@ -372,7 +372,7 @@ class AgentClient:
                         # `finally` below still stops every endpoint on the way out.
                         self._running = False
                         reason = (exc.rcvd.reason if exc.rcvd is not None else "") or ""
-                        message = _fatal_agent_message(code, reason)
+                        message = agent_logs.redact(_fatal_agent_message(code, reason))
                         logger.error("%s", message)
                         self._fatal_error = message
                         emit_event(
@@ -1286,12 +1286,13 @@ class AgentClient:
         """Startup bookkeeping that needs a live control connection."""
         if self._boot.kind == "report_failed" and self._boot.state is not None:
             state = self._boot.state
+            tail = self._boot.log_tail or agent_update.log_tail()
             result = UpdateResult(
                 request_id=state.request_id,
                 ok=False,
                 from_version=state.from_version,
                 to_version=state.to_version,
-                log_tail=self._boot.log_tail or agent_update.log_tail(),
+                log_tail=[agent_logs.redact(x) for x in tail],
             )
             if state.request_id != agent_update.LOCAL_REQUEST_ID:
                 await ws.send(result.model_dump_json())
