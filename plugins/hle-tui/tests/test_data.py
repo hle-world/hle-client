@@ -83,7 +83,9 @@ class TestRows:
         from hle_client.ops.models import Tunnel
 
         snapshot = data.Snapshot(
-            tunnels=[Tunnel.from_api({"subdomain": "ha-x7k", "public_url": "https://ha.zone.example"})]
+            tunnels=[
+                Tunnel.from_api({"subdomain": "ha-x7k", "public_url": "https://ha.zone.example"})
+            ]
         )
         assert data.public_url(snapshot, "ha-x7k") == "https://ha.zone.example"
         assert data.public_url(snapshot, "unknown-x7k") == "https://unknown-x7k.hle.world"
