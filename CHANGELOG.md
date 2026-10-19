@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v2610.12 — 2026-10-19
+
+Security hardening release. Everything is backward compatible with existing
+installs and current relays; no configuration changes are required.
 
 ### Security
 
