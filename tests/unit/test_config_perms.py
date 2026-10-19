@@ -43,9 +43,7 @@ class TestSaveApiKeyPermissions:
 
 
 class TestSaveAgentTokenPermissions:
-    def test_creates_the_file_0600_under_a_loose_umask(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_creates_the_file_0600_under_a_loose_umask(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("HLE_AGENT_CONFIG", str(tmp_path / "agent.toml"))
 
         seen: list[int] = []

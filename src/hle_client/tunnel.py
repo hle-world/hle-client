@@ -328,6 +328,7 @@ def _build_ws_close_diagnostics(
 # Diagnostics helpers (pure, unit-tested in isolation)
 # --------------------------------------------------------------------------
 
+
 # Secret redaction for the diagnostics channel.
 def _redact_secrets(text: str) -> str:
     """Redact secrets from a log message (best-effort, no raise).

@@ -104,9 +104,11 @@ Options:
 - `--api-key` — API key (also reads `HLE_API_KEY` env var, then config file)
 
 `hle daemon install tunnel` takes the same options, so any tunnel you can run
-you can also install as a service. `--upstream-basic-auth` is written to the
-service's environment, never its command line, and the service file is then
-readable by its owner only.
+you can also install as a service. `--upstream-basic-auth` is written to an
+owner-only environment file the service reads at start — never to its command
+line or to the service manager's visible environment (systemd exposes
+`Environment=` over D-Bus) — and the service file is then readable by its owner
+only.
 
 ### `hle tunnel preflight`
 

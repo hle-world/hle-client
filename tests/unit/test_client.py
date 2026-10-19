@@ -866,10 +866,7 @@ class TestWebhookPathRestriction:
 
     def test_accepts_exact_prefix_and_prefixed_event(self):
         assert _validated_webhook_path("/hook/stripe", "/hook/stripe") == "/hook/stripe"
-        assert (
-            _validated_webhook_path("/hook/stripe/evt", "/hook/stripe")
-            == "/hook/stripe/evt"
-        )
+        assert _validated_webhook_path("/hook/stripe/evt", "/hook/stripe") == "/hook/stripe/evt"
 
     @pytest.mark.parametrize(
         "path",
