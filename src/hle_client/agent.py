@@ -70,6 +70,17 @@ _HANDOVER_GROUP_RE = re.compile(r"^[a-z0-9]([a-z0-9._/-]*[a-z0-9])?$")
 _HANDOVER_GROUP_MAX = 128
 
 
+# Cleartext control is only safe on loopback. Matching the exact host (rather
+# than a prefix) keeps a lookalike such as `localhost.attacker.tld` on wss, so
+# AgentHello and its token never travel in the clear.
+_PLAINTEXT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def control_scheme(relay_host: str) -> str:
+    """``ws`` for loopback only, ``wss`` for every other relay host."""
+    return "ws" if relay_host in _PLAINTEXT_HOSTS else "wss"
+
+
 def handover_group_from_env(env: dict[str, str] | None = None) -> str | None:
     """``HLE_HANDOVER_GROUP`` if set and valid; invalid -> None plus one warning."""
     value = (os.environ if env is None else env).get(HANDOVER_GROUP_ENV)
@@ -330,7 +341,7 @@ class AgentClient:
 
     @property
     def control_uri(self) -> str:
-        scheme = "ws" if self._relay_host.startswith("localhost") else "wss"
+        scheme = control_scheme(self._relay_host)
         return f"{scheme}://{self._relay_host}:{self._relay_port}/_hle/agent"
 
     async def run(self) -> None:

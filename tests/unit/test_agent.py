@@ -207,6 +207,15 @@ class TestControlUri:
         client = AgentClient("hlea_x", relay_host="localhost", relay_port=8000)
         assert client.control_uri == "ws://localhost:8000/_hle/agent"
 
+    def test_ws_for_loopback_addresses(self):
+        for host in ("127.0.0.1", "::1"):
+            client = AgentClient("hlea_x", relay_host=host, relay_port=8000)
+            assert client.control_uri == f"ws://{host}:8000/_hle/agent"
+
+    def test_wss_for_localhost_lookalike(self):
+        client = AgentClient("hlea_x", relay_host="localhost.example.net", relay_port=443)
+        assert client.control_uri == "wss://localhost.example.net:443/_hle/agent"
+
 
 class TestPreflightRequests:
     """The server asks, the agent probes, the agent answers.
