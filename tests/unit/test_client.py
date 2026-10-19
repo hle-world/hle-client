@@ -215,6 +215,26 @@ class TestLocalProxyForwardHttp:
             ):
                 assert safe_proxied_path(path, base) == path, (base, path)
 
+    def test_matrix_param_and_double_encoded_traversal_is_rejected(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for base in ("http://h:8080/", "http://h:8080/public/"):
+            for path in (
+                "/a/..;/x",
+                "/a/%2e%2e;/x",
+                "/a/..;jsessionid=1/x",
+                "/a/%252e%252e/x",
+                "/a/%252E%252E%252fx",
+                "/a/%25252e%25252e/x",
+            ):
+                assert safe_proxied_path(path, base) is None, (base, path)
+
+    def test_percent_25_and_encoded_slashes_still_pass(self):
+        from hle_client.proxy import safe_proxied_path
+
+        for path in ("/a/100%25/b", "/Items/a%2Fb/Images", "/f/x;v=1/y", "/a/.hidden/b"):
+            assert safe_proxied_path(path, "http://h:8080/public/") == path, path
+
     def test_encoded_traversal_is_still_rejected_under_a_base_path(self):
         from hle_client.proxy import safe_proxied_path
 
@@ -902,6 +922,9 @@ class TestWebhookPathRestriction:
         [
             # Percent-encoded dot / slash / backslash (upstream may decode them).
             "/hook/stripe/%2e%2e/x",
+            "/hook/stripe/..;/admin",
+            "/hook/stripe/%2e%2e;/admin",
+            "/hook/stripe/%252e%252e/admin",
             "/hook/stripe/%2E%2E/admin",
             "/hook/stripe/..%2fx",
             "/hook/stripe/%2f..%2fx",

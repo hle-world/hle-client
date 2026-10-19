@@ -33,6 +33,8 @@ from hle_client.proxy import (
     UPSTREAM_ERROR_HEADER,
     LocalProxy,
     ProxyConfig,
+    decode_path_fully,
+    has_parent_segment,
     safe_proxied_path,
     sni_hostname_for,
     upstream_verify,
@@ -388,13 +390,10 @@ def _service_check_data(
 # Webhook path restriction (pure, unit-tested in isolation)
 # --------------------------------------------------------------------------
 
-# Percent-encoded dot, slash and backslash. ``posixpath.normpath`` does not
-# decode, so a request such as ``/hook/stripe/%2e%2e/admin`` would pass a naive
-# prefix check while the upstream (many Java/Spring, some Go/Node routers)
-# decodes it into ``/admin``. Decode before normalising and reject anything
-# that does not round-trip, then forward only the validated path.
-_ENCODED_PATH_SEPARATOR = re.compile(r"%(2e|2f|5c)", re.IGNORECASE)
-_ENCODED_PATH_CHARS = {"2e": ".", "2f": "/", "5c": "\\"}
+# ``posixpath.normpath`` does not decode, so a request such as
+# ``/hook/stripe/%2e%2e/admin`` (or the double-encoded ``%252e%252e``, or
+# ``..;/``) would pass a naive prefix check while the upstream decodes it into
+# ``/admin``. The check therefore runs on the fully decoded path.
 
 
 def _validated_webhook_path(raw_path: str, prefix: str) -> str | None:
@@ -410,10 +409,8 @@ def _validated_webhook_path(raw_path: str, prefix: str) -> str | None:
     """
     if not isinstance(raw_path, str):
         return None
-    decoded = _ENCODED_PATH_SEPARATOR.sub(
-        lambda m: _ENCODED_PATH_CHARS[m.group(1).lower()], raw_path
-    )
-    if "\\" in decoded or ".." in decoded.split("/"):
+    decoded = decode_path_fully(raw_path)
+    if "\\" in decoded or has_parent_segment(decoded):
         return None
     normalized = posixpath.normpath(decoded)
     # Match exact path or path with trailing segments (segment boundary).

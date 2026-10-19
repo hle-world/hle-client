@@ -258,17 +258,52 @@ METADATA_TARGETS = frozenset(
 def is_metadata_target(host: str) -> bool:
     """Whether *host* is a cloud metadata endpoint, however it is spelled.
 
-    Parsed rather than compared as a string, so an IPv4-mapped spelling
-    (``::ffff:169.254.169.254``) cannot slip past.
+    Parsed rather than compared as a string. The scope id of an IPv6 literal is
+    dropped, and every spelling that embeds an IPv4 address (IPv4-mapped,
+    IPv4-compatible, 6to4, Teredo, NAT64) is unwrapped, so none of them slips
+    past. A scoped (``%eth0``) address inside a metadata or link-local range is
+    refused outright.
     """
+    text = _normalize_host(host)
+    scoped = "%" in text
+    text = text.split("%", 1)[0]
     try:
-        address = ipaddress.ip_address(_normalize_host(host))
+        address = ipaddress.ip_address(text)
     except ValueError:
         return False
-    if str(address) in METADATA_TARGETS:
-        return True
-    mapped = getattr(address, "ipv4_mapped", None)
-    return mapped is not None and str(mapped) in METADATA_TARGETS
+    for candidate in _embedded_addresses(address):
+        if candidate in _METADATA_ADDRESSES:
+            return True
+    if scoped and address.version == 6:
+        return address in _METADATA_V6_RANGE or address in _LINK_LOCAL_V6
+    return False
+
+
+_METADATA_ADDRESSES = frozenset(ipaddress.ip_address(a) for a in METADATA_TARGETS)
+_METADATA_V6_RANGE = ipaddress.ip_network("fd00:ec2::/32")
+_LINK_LOCAL_V6 = ipaddress.ip_network("fe80::/10")
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+
+
+def _embedded_addresses(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """The address plus every IPv4 address it embeds."""
+    found: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [address]
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            found.append(address.ipv4_mapped)
+        if address.sixtofour is not None:
+            found.append(address.sixtofour)
+        if address.teredo is not None:
+            server, client = address.teredo
+            found.extend([server, client])
+        low = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if address in _NAT64 or address in _NAT64_LOCAL or int(address) >> 32 == 0:
+            # NAT64 and IPv4-compatible forms carry the IPv4 in the low 32 bits.
+            found.append(low)
+    return found
 
 
 def is_allowed(

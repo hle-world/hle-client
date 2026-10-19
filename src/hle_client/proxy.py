@@ -154,6 +154,29 @@ def _remove_dot_segments(path: str) -> str:
     return "".join(output) or "/"
 
 
+def decode_path_fully(path: str, rounds: int = 3) -> str:
+    """Percent-decode *path* until it stops changing (at most *rounds* times).
+
+    Used for checking only. An upstream behind another proxy may decode twice,
+    so ``%252e%252e`` has to be seen as ``..``. A lone ``%25`` is not rejected.
+    """
+    for _ in range(rounds):
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    return path
+
+
+def has_parent_segment(decoded: str) -> bool:
+    """Whether any segment is ``..`` once a ``;param`` suffix is ignored.
+
+    Servlet containers and some proxies drop ``;matrix`` parameters before
+    resolving dot segments, so ``..;/`` climbs exactly like ``../``.
+    """
+    return any(seg.split(";", 1)[0] == ".." for seg in decoded.split("/"))
+
+
 def safe_proxied_path(path: str, target_url: str) -> str | None:
     """Return *path* if it stays under *target_url*'s base path, else ``None``.
 
@@ -171,14 +194,12 @@ def safe_proxied_path(path: str, target_url: str) -> str | None:
     """
     if not path.startswith("/") or path.startswith("//") or "\\" in path:
         return None
-    decoded = unquote(path)
-    if "\\" in decoded:
+    decoded = decode_path_fully(path)
+    if "\\" in decoded or has_parent_segment(decoded):
         return None
     base_path = _base_path(target_url)
     if base_path == "/":
         return path
-    if ".." in decoded.split("/"):
-        return None
     normalized = _remove_dot_segments(path)
     if not _remove_dot_segments(base_path + normalized.lstrip("/")).startswith(base_path):
         return None

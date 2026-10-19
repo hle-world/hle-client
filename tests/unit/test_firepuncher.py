@@ -545,6 +545,35 @@ class TestMetadataRefusal:
     def test_metadata_is_detected_through_an_ipv4_mapped_spelling(self):
         assert is_metadata_target("::ffff:169.254.169.254")
 
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "fd00:ec2::254%eth0",  # scope id
+            "[fd00:ec2::254%25eth0]".replace("%25", "%"),
+            "FD00:EC2:0:0:0:0:0:254",  # long, upper-case form
+            "::ffff:169.254.169.254",  # IPv4-mapped
+            "::ffff:a9fe:a9fe",  # IPv4-mapped, hex
+            "::169.254.169.254",  # IPv4-compatible
+            "2002:a9fe:a9fe::",  # 6to4
+            "64:ff9b::a9fe:a9fe",  # NAT64
+            "64:ff9b::169.254.170.2",  # NAT64, ECS endpoint
+            "fe80::1%eth0",  # scoped link-local
+            "169.254.169.254.",  # trailing dot
+        ],
+    )
+    def test_metadata_is_detected_in_every_spelling(self, host):
+        assert is_metadata_target(host), host
+        assert not is_allowed([ForwardRule(host="::/0")], host, 80)
+
+    def test_teredo_embedding_metadata_is_detected(self):
+        # Teredo stores the client IPv4 bit-inverted in the low 32 bits.
+        assert not is_metadata_target("2001:0:4136:e378:8000:63bf:3fff:fdd2")  # ordinary
+        assert is_metadata_target("2001:0:a9fe:a9fe::1")  # server field
+
+    def test_ordinary_addresses_are_not_metadata(self):
+        for host in ("10.0.0.5", "::ffff:10.0.0.5", "fd00::1", "2002:c0a8:101::", "example.com"):
+            assert not is_metadata_target(host), host
+
     def test_the_operator_can_opt_metadata_back_in(self):
         rules = [ForwardRule(host="169.254.169.254", port=80)]
         assert is_allowed(rules, "169.254.169.254", 80, allow_metadata=True)
