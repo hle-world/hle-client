@@ -90,8 +90,11 @@ def _ensure_private_dir(directory: Path) -> None:
     if not mode & 0o077:
         return
     if directory != CONFIG_DIR:
+        # Path and mode only, never a credential.
+        # nosemgrep: python-logger-credential-disclosure
         logger.warning("Credential directory %s has mode %o, not 0700", directory, mode)
         return
+    # nosemgrep: python-logger-credential-disclosure
     logger.warning("Credential directory %s had mode %o; tightening to 0700", directory, mode)
     try:
         directory.chmod(0o700)
@@ -117,6 +120,7 @@ def _write_private_file(path: Path, content: str) -> None:
     except OSError:
         loose = False
     if loose:
+        # nosemgrep: python-logger-credential-disclosure
         logger.warning("Credential file %s had loose permissions; rewriting 0600", path)
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW

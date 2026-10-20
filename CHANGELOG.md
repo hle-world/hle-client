@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+Everything here is backward compatible: existing installs, existing service
+files and scripts that pass credentials the old way keep working.
+
+### Security
+
+- A new `sudo hle daemon install` runs the system service as the user who ran
+  `sudo` instead of root, so the service no longer executes from that user's
+  writable install tree as root. `--run-as` still wins. A new install that
+  would still run as root (for example `--run-as root`) from a tree a
+  non-root user can write is refused, with a hint to use `--run-as <user>` or a
+  root-owned copy. `daemon refresh`, self-updates and remote installs leave an
+  existing service as it was installed (they log a warning for a root service
+  in a writable tree); reinstall the daemon to move it to the new default.
+- `hle agent enroll --stdin` reads the agent token from stdin, keeping it out
+  of the process list and shell history. The installer now takes the token from
+  `HLE_AGENT_TOKEN` (with `--agent`) and pipes it to `hle agent enroll
+  --stdin`; `--token` still works but is visible to other local users via `ps`.
+  Older clients without `--stdin` fall back to the argument form.
+- The installer's "Verifying package integrity" step only compared version
+  strings; it is now called "Checking installed version".
+- CI: a pinned Semgrep job (`p/python`, `p/security-audit`, `p/owasp-top-ten`)
+  scans `src/hle_client` (hle-client#238).
+
 ## v2610.12 — 2026-10-19
 
 Security hardening release. Everything is backward compatible with existing

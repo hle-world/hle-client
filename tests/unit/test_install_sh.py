@@ -292,7 +292,7 @@ class TestEnsureVenvSupport:
         assert "python venv package" in result.stderr
 
 
-def _run_parse(*args: str) -> subprocess.CompletedProcess[str]:
+def _run_parse(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     source = INSTALL_SH.read_text()
     funcs = "\n\n".join(
         _extract_function(source, name) for name in ("validate_agent_name", "parse_args")
@@ -309,6 +309,7 @@ def _run_parse(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, **(env or {})},
     )
 
 
@@ -340,6 +341,30 @@ class TestAgentNameArg:
         result = _run_parse("--token", "hle_x", "--name", "laptop")
         assert result.returncode == 1
         assert "not both" in result.stderr
+
+    def test_token_can_come_from_the_environment(self):
+        # The form curl|sh and cloud-init are told to use: the token never
+        # reaches this script's argv, so `ps` cannot see it.
+        result = _run_parse("--agent", env={"HLE_AGENT_TOKEN": "hle_env"})
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "AGENT=1 NAME= SET=0 TOKEN=hle_env\n"
+
+    def test_the_environment_alone_does_not_turn_on_enrollment(self):
+        # HLE_AGENT_TOKEN is also set on machines that already run an agent; a
+        # plain install or upgrade there must not re-enroll.
+        result = _run_parse(env={"HLE_AGENT_TOKEN": "hle_env"})
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "AGENT=0 NAME= SET=0 TOKEN=\n"
+
+    def test_name_ignores_an_inherited_environment_token(self):
+        result = _run_parse("--name", "laptop", env={"HLE_AGENT_TOKEN": "hle_env"})
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "AGENT=1 NAME=laptop SET=1 TOKEN=\n"
+
+    def test_an_explicit_token_wins_over_the_environment(self):
+        result = _run_parse("--token", "hle_arg", env={"HLE_AGENT_TOKEN": "hle_env"})
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "AGENT=1 NAME= SET=0 TOKEN=hle_arg\n"
 
 
 def _run_agent_enroll(
@@ -374,15 +399,27 @@ def _run_agent_enroll(
     return result, logged
 
 
-def _run_token_enroll(tmp_path: Path, *, client_has_force: bool) -> tuple[int, str, str]:
+def _run_token_enroll(
+    tmp_path: Path, *, client_has_force: bool, client_has_stdin: bool = True
+) -> tuple[int, str, str, str]:
+    """Run agent_enroll with a token, and report how the token was passed.
+
+    Returns (exit code, stderr, logged argv, text delivered on stdin).
+    """
     log = tmp_path / "hle.log"
-    funcs = _extract_function(INSTALL_SH.read_text(), "agent_enroll")
-    help_text = "--name TEXT  --force" if client_has_force else "--name TEXT"
+    stdin_log = tmp_path / "stdin.log"
+    funcs = "\n\n".join(
+        _extract_function(INSTALL_SH.read_text(), name)
+        for name in ("agent_enroll_supports", "agent_enroll")
+    )
+    flags = ("  --stdin" if client_has_stdin else "") + ("  --force" if client_has_force else "")
+    help_text = f"--name TEXT{flags}"
     body = (
-        f"LOG='{log}'\n"
+        f"LOG='{log}'\nSTDIN_LOG='{stdin_log}'\n"
         "hle() {\n"
         '    if [ "$3" = "--help" ]; then echo "' + help_text + '"; return 0; fi\n'
         '    echo "$@" >> "$LOG"\n'
+        '    case " $* " in *" --stdin "*) cat >> "$STDIN_LOG" ;; esac\n'
         "}\n"
         "AGENT_TOKEN='hle_tok'\nAGENT_NAME=''\nagent_enroll\n"
     )
@@ -392,21 +429,39 @@ def _run_token_enroll(tmp_path: Path, *, client_has_force: bool) -> tuple[int, s
         text=True,
         check=False,
     )
-    return result.returncode, result.stderr, log.read_text().strip()
+    logged = log.read_text().strip() if log.exists() else ""
+    piped = stdin_log.read_text() if stdin_log.exists() else ""
+    return result.returncode, result.stderr, logged, piped
 
 
 class TestAgentEnrollToken:
-    def test_token_rerun_passes_force_so_it_still_replaces(self, tmp_path):
-        code, err, logged = _run_token_enroll(tmp_path, client_has_force=True)
+    def test_token_is_piped_not_put_in_argv(self, tmp_path):
+        code, err, logged, piped = _run_token_enroll(
+            tmp_path, client_has_force=True, client_has_stdin=True
+        )
         assert code == 0, err
-        assert logged == "agent enroll --force hle_tok"
+        assert logged == "agent enroll --stdin --force"
+        assert "hle_tok" not in logged
+        assert piped == "hle_tok"
 
     def test_an_older_pinned_client_without_force_still_enrolls(self, tmp_path):
         # `--version` can install a client that predates --force; passing it
         # there would fail the whole install with "no such option".
-        code, err, logged = _run_token_enroll(tmp_path, client_has_force=False)
+        code, err, logged, piped = _run_token_enroll(
+            tmp_path, client_has_force=False, client_has_stdin=True
+        )
         assert code == 0, err
-        assert logged == "agent enroll hle_tok"
+        assert logged == "agent enroll --stdin"
+        assert piped == "hle_tok"
+
+    def test_a_client_without_stdin_falls_back_to_the_argument(self, tmp_path):
+        # Clients older than --stdin take the token as an argument, as before.
+        code, err, logged, piped = _run_token_enroll(
+            tmp_path, client_has_force=True, client_has_stdin=False
+        )
+        assert code == 0, err
+        assert logged == "agent enroll --force hle_tok"
+        assert piped == ""
 
 
 class TestAgentEnrollName:

@@ -24,6 +24,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -220,6 +221,102 @@ def find_hle_path() -> str:
     if candidate.exists():
         return str(candidate)
     return "hle"
+
+
+def _invoking_user() -> str | None:
+    """The real user behind ``sudo``, or ``None`` when there is not one.
+
+    Under ``sudo hle daemon install`` ``getpass.getuser()`` returns ``root``
+    (sudo sets ``LOGNAME``/``USER``), so a system unit would run as root while
+    its ``ExecStart`` points into the invoking user's writable layout — anything
+    running as that user could replace what root runs on the next restart.
+    ``SUDO_USER`` names the caller; using it keeps the service running as the
+    user who owns the tree it executes.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return None
+    name = os.environ.get("SUDO_USER") or ""
+    return name if name and name != "root" else None
+
+
+def _system_run_as(run_as: str | None, user_mode: bool, *, harden: bool) -> str | None:
+    """The OS user a system unit runs as.
+
+    Per-user units already run as the invoking user. With ``harden`` (a new
+    ``hle daemon install``) a system unit defaults to the user who ran sudo
+    rather than root, so its ``ExecStart`` stays inside that user's layout
+    without root executing from it. Without it (a refresh, or a remote
+    install) the historical default applies: an existing root service keeps
+    running as the user it was installed for.
+    """
+    if user_mode:
+        return None
+    if run_as:
+        return run_as
+    return (_invoking_user() if harden else None) or getpass.getuser()
+
+
+def _path_owned_by_nonroot(path: Path) -> bool:
+    """Whether *path*, or any parent directory, is owned or writable by a non-root user.
+
+    A root service must not execute from a tree a non-root account can change:
+    whoever controls the directory can replace the binary that root runs on the
+    next start. Every ancestor is checked because a writable parent is enough.
+    A relative path is skipped — it resolves through the manager's ``PATH``, so
+    there is nothing here to reason about.
+    """
+    if not path.is_absolute():
+        return False
+    try:
+        target = path.resolve()
+    except OSError:
+        return False
+    for entry in (target, *target.parents):
+        try:
+            info = entry.stat()
+        except OSError:
+            # A path that is not there cannot be tampered with from here.
+            return False
+        if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return True
+    return False
+
+
+def _refuse_root_service_from_writable_tree(
+    hle_path: str, run_as_user: str | None, user_mode: bool, *, harden: bool = True
+) -> None:
+    """Refuse a root unit whose ``ExecStart`` lives in a user-writable tree.
+
+    Only a new install is refused (``harden``). A refresh or remote install
+    rebuilds a service that already exists and works; refusing there would
+    leave it on a stale unit file, so it warns instead.
+
+    A per-user unit, and a system unit pinned to a non-root user with
+    ``--run-as``, execute as that user and so may live anywhere that user can
+    write. Only a unit that will run as root has to execute from a root-owned
+    tree, and it is refused outright when it does not.
+    """
+    if user_mode or run_as_user not in (None, "root"):
+        return
+    if not _path_owned_by_nonroot(Path(hle_path)):
+        return
+    if not harden:
+        logger.warning(
+            "Service runs as root from %s, which a non-root user can write; "
+            "reinstall it with --run-as <user> or from a root-owned copy.",
+            hle_path,
+        )
+        return
+    raise HleError(
+        f"Refusing to install a root service that runs {hle_path}, which is inside "
+        "a directory a non-root user can write.",
+        hint=(
+            "A system service must not execute from a user-writable tree: anything "
+            "running as that user could replace the binary and have root run it.\n"
+            "Install a root-owned copy (for example under /opt/hle), or pass "
+            "--run-as <user> to run the service as that unprivileged user."
+        ),
+    )
 
 
 def unit_name(label: str, name: str | None = None) -> str:
@@ -719,12 +816,15 @@ def _systemd_install(
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    harden: bool = False,
 ) -> None:
-    run_as_user = run_as or (None if user_mode else getpass.getuser())
+    run_as_user = _system_run_as(run_as, user_mode, harden=harden)
+    hle_path = find_hle_path()
+    _refuse_root_service_from_writable_tree(hle_path, run_as_user, user_mode, harden=harden)
     env_path = _env_file_path(label=label, name=name, user_mode=user_mode)
     unit = render_unit(
         label=label,
-        hle_path=find_hle_path(),
+        hle_path=hle_path,
         run_args=run_args,
         agent_config=agent_config,
         env=env,
@@ -1020,16 +1120,19 @@ def _launchd_install(
     agent_config: str | None = None,
     spec: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    harden: bool = False,
 ) -> None:
     # Per-user agents run as the invoking user already; only system daemons
     # need an explicit UserName so the tunnel reads that user's config.
-    run_as_user = None if user_mode else (run_as or getpass.getuser())
+    run_as_user = _system_run_as(run_as, user_mode, harden=harden)
+    hle_path = find_hle_path()
+    _refuse_root_service_from_writable_tree(hle_path, run_as_user, user_mode, harden=harden)
     plabel = launchd_label(label, name)
     env_path = _env_file_path(label=label, name=name, user_mode=user_mode)
     plist = render_launchd_plist(
         label=label,
         plist_label=plabel,
-        hle_path=find_hle_path(),
+        hle_path=hle_path,
         run_args=run_args,
         run_as_user=run_as_user,
         log_dir=_launchd_log_dir(user_mode),
@@ -1617,13 +1720,19 @@ def _rcd_install(
     spec: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
     home: str | None = None,
+    harden: bool = False,
 ) -> None:
     svc = rc_service_name(label, name)
+    # rc.d has no per-user services, so the unit runs as an OS user; a new
+    # install defaults to the sudo caller so root does not execute from their tree.
+    run_as_user = run_as or (_invoking_user() if harden else None)
+    hle_path = find_hle_path()
+    _refuse_root_service_from_writable_tree(hle_path, run_as_user, False, harden=harden)
     script = render_rc_script(
         label=label,
-        hle_path=find_hle_path(),
+        hle_path=hle_path,
         run_args=run_args,
-        run_as_user=run_as,
+        run_as_user=run_as_user,
         agent_config=agent_config,
         env=env,
         name=name,
@@ -1823,13 +1932,20 @@ def restart_service(name: str, user_mode: bool | None = None) -> bool:
     return False
 
 
-def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
+def _install_from_spec(
+    spec: dict[str, Any], *, plat: str, start: bool, harden: bool = False
+) -> None:
     """Write and start one service from its spec, on whichever manager runs here.
 
     The single place a service gets generated, so ``hle daemon install`` and a
     later ``hle daemon refresh`` cannot drift apart — a refresh that rebuilt
     something subtly different from what install writes would be worse than no
     refresh at all.
+
+    ``harden`` is set only by a new ``hle daemon install``: it defaults a system
+    unit to the ``sudo`` caller and refuses a root unit that would execute from
+    a user-writable tree. A refresh and a remote install leave it off, so an
+    existing service keeps running as it was installed.
     """
     label = str(spec["label"])
     env: dict[str, str] = {}
@@ -1890,6 +2006,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             spec=stamped,
             env=env,
             home=spec.get("home"),
+            harden=harden,
         )
     elif plat == "darwin":
         _launchd_install(
@@ -1902,6 +2019,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             agent_config=spec.get("agent_config"),
             spec=stamped,
             env=env,
+            harden=harden,
         )
     else:
         _systemd_install(
@@ -1916,6 +2034,7 @@ def _install_from_spec(spec: dict[str, Any], *, plat: str, start: bool) -> None:
             agent_config=spec.get("agent_config"),
             spec=stamped,
             env=env,
+            harden=harden,
         )
 
 
@@ -2257,7 +2376,7 @@ def install(
         # client older than TunnelSpec can still replay this stamp.
         spec["tunnel"] = tunnel.model_dump()
         spec["allow"] = list(allow)
-    _install_from_spec(spec, plat=plat, start=start)
+    _install_from_spec(spec, plat=plat, start=start, harden=True)
 
     if agent_mode:
         console.print(

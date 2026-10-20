@@ -11,8 +11,10 @@
 #   # Enroll with the account key this machine is logged in with:
 #   curl -fsSL https://get.hle.world | sh -s -- --agent --name laptop
 #
-#   # Fully unattended (CI, cloud-init, Ansible):
-#   curl -fsSL https://get.hle.world | sh -s -- --agent --token hle_xxxxx
+#   # Fully unattended (CI, cloud-init, Ansible). The token comes from the
+#   # environment, so it never appears in this script's argv (visible to every
+#   # local user via `ps`) or in shell history:
+#   curl -fsSL https://get.hle.world | HLE_AGENT_TOKEN=hle_xxxxx sh -s -- --agent
 set -e
 
 PACKAGE="hle-client"
@@ -38,7 +40,9 @@ Options:
   --version <v>     Install a specific hle-client version
   --agent           Enroll this machine as an HLE agent and run it as a service
   --token <token>   Agent token (hle_...) from the dashboard; implies --agent.
-                    Without it, --agent prompts on the terminal.
+                    Because it is on this command line it is visible to other
+                    local users via `ps`; prefer HLE_AGENT_TOKEN in the
+                    environment. Without a token, --agent prompts on the terminal.
   --name <name>     With --agent: enroll using your saved account key, naming
                     the agent <name>; implies --agent. Mutually exclusive with
                     --token. Needs no terminal prompt.
@@ -81,6 +85,16 @@ parse_args() {
             *) echo "Unknown option: $1"; usage; exit 1 ;;
         esac
     done
+
+    # With --agent, the token can come from the environment, so curl|sh and
+    # cloud-init need not put it on the command line where `ps` and shell
+    # history expose it. Only an explicit --agent opts in (HLE_AGENT_TOKEN is
+    # also set on machines that already run an agent, and a plain upgrade must
+    # not re-enroll them), and --name or an explicit --token take precedence.
+    if [ "$AGENT" -eq 1 ] && [ -z "$AGENT_TOKEN" ] && [ "$AGENT_NAME_SET" -ne 1 ] \
+        && [ -n "${HLE_AGENT_TOKEN:-}" ]; then
+        AGENT_TOKEN="$HLE_AGENT_TOKEN"
+    fi
 
     if [ "$AGENT_NAME_SET" -eq 1 ]; then
         if [ -n "$AGENT_TOKEN" ]; then
@@ -238,17 +252,18 @@ ensure_local_bin() {
     esac
 }
 
-# Verify installed package integrity
-verify_install() {
+# Report the version that ended up installed. This is not an integrity check:
+# it compares version strings, nothing more, so it is named for what it does.
+check_installed_version() {
     PYTHON="$1"
-    info "Verifying package integrity..."
-    # Check the installed package metadata matches PyPI
+    info "Checking installed version..."
+    # Check the installed package metadata matches what was asked for
     INSTALLED_VERSION=$("$PYTHON" -c "import hle_client; print(hle_client.__version__)" 2>/dev/null) || return 0
     if [ -n "$VERSION" ] && [ "$INSTALLED_VERSION" != "$VERSION" ]; then
         error "Version mismatch: expected $VERSION, got $INSTALLED_VERSION"
         exit 1
     fi
-    info "Verified: hle-client==$INSTALLED_VERSION"
+    info "Installed: hle-client==$INSTALLED_VERSION"
 }
 
 # --- Installation methods ---
@@ -369,7 +384,7 @@ install_with_venv() {
     "$VENV_DIR/bin/pip" install --quiet "${PACKAGE}==${TARGET_VERSION}"
 
     # Verify before pointing anything at it
-    verify_install "$VENV_DIR/bin/python"
+    check_installed_version "$VENV_DIR/bin/python"
 
     # Remember what current pointed at, then repoint it in one rename.
     if [ -L "$HLE_HOME/current" ]; then
@@ -501,19 +516,33 @@ refresh_existing_services() {
 
 # --- Agent setup ---
 
-# Enroll this machine as an agent. The token is passed to `hle agent enroll`,
-# which checks the token shape and writes ~/.config/hle/agent.toml (0600).
-# It is never written to disk by this script, nor echoed back.
+# True when the `hle agent enroll` on PATH advertises the flag in $1.
+agent_enroll_supports() {
+    hle agent enroll --help 2>/dev/null | grep -q -- "$1"
+}
+
+# Enroll this machine as an agent. The token is piped to `hle agent enroll
+# --stdin`, which checks its shape and writes ~/.config/hle/agent.toml (0600),
+# so the token never lands in a command line that `ps` can read. It is never
+# written to disk by this script, nor echoed back.
 agent_enroll() {
     if [ -n "$AGENT_TOKEN" ]; then
-        # --force: an explicit --token on a re-run replaces the saved one, as it
+        # --force: an explicit token on a re-run replaces the saved one, as it
         # always did; `hle agent enroll` now refuses to overwrite without it.
-        # Clients older than the guard have no --force (and overwrite anyway),
-        # and `--version` can install one, so only pass it where it exists.
-        if hle agent enroll --help 2>/dev/null | grep -q -- '--force'; then
-            hle agent enroll --force "$AGENT_TOKEN" || return 1
+        # --stdin: read the token from stdin instead of argv. Clients older than
+        # either flag (which `--version` can install) lack it, so only pass what
+        # the installed client advertises, and fall back to the argument form
+        # there.
+        ENROLL_ARGS=""
+        if agent_enroll_supports --force; then
+            ENROLL_ARGS="$ENROLL_ARGS --force"
+        fi
+        if agent_enroll_supports --stdin; then
+            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
+            printf '%s' "$AGENT_TOKEN" | hle agent enroll --stdin $ENROLL_ARGS || return 1
         else
-            hle agent enroll "$AGENT_TOKEN" || return 1
+            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
+            hle agent enroll $ENROLL_ARGS "$AGENT_TOKEN" || return 1
         fi
         return 0
     fi
@@ -537,7 +566,7 @@ agent_enroll() {
 
     if ! has_tty; then
         warn "No agent token and no terminal to prompt on."
-        warn "Re-run with: --agent --token hle_xxxxx"
+        warn "Re-run with HLE_AGENT_TOKEN set, or: --agent --token hle_xxxxx"
         return 1
     fi
 
