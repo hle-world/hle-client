@@ -1004,3 +1004,102 @@ class TestLaunchdInstallRestartsARunningService:
     def test_a_system_daemon_is_kickstarted_in_the_system_domain(self, tmp_path, monkeypatch):
         calls = self._install(tmp_path, monkeypatch, user_mode=False)
         assert calls[-1] == ("kickstart", "-k", "system/world.hle.agent")
+
+
+class TestSystemServiceOwnership:
+    """A root unit must not execute from the invoking user's writable layout.
+
+    ``sudo hle daemon install agent`` used to render ``User=root`` while
+    ``ExecStart`` pointed into alice's venv, so anything running as alice could
+    replace what root runs on the next restart. The default is now the ``sudo``
+    caller, and a unit that still runs as root is refused when its exec path is
+    writable by a non-root user.
+    """
+
+    def _install(
+        self,
+        tmp_path,
+        monkeypatch,
+        *,
+        run_as: str | None = None,
+        sudo_user: str | None = "alice",
+        euid: int = 0,
+        hle_path: str | None = None,
+        harden: bool = True,
+    ) -> Path:
+        system_dir = tmp_path / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", system_dir)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(service_cmd, "_unit_path_in_other_scope", lambda *a: None)
+        monkeypatch.setattr(service_cmd, "_systemctl", lambda *a, **k: None)
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: euid)
+        if sudo_user is None:
+            monkeypatch.delenv("SUDO_USER", raising=False)
+        else:
+            monkeypatch.setenv("SUDO_USER", sudo_user)
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: hle_path or "/usr/bin/hle")
+        service_cmd._systemd_install(
+            label=AGENT_LABEL,
+            run_args=["agent", "run"],
+            name=None,
+            user_mode=False,
+            run_as=run_as,
+            start=False,
+            harden=harden,
+        )
+        return system_dir / unit_name(AGENT_LABEL, None)
+
+    @staticmethod
+    def _writable_hle(tmp_path) -> Path:
+        exe = tmp_path / "alice" / ".local" / "share" / "hle" / "current" / "bin" / "hle"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("#!/bin/sh\n")
+        return exe
+
+    def test_sudo_user_becomes_the_service_user(self, tmp_path, monkeypatch):
+        written = self._install(tmp_path, monkeypatch)
+        assert "User=alice" in written.read_text()
+
+    def test_an_explicit_run_as_still_wins(self, tmp_path, monkeypatch):
+        written = self._install(tmp_path, monkeypatch, run_as="bob")
+        text = written.read_text()
+        assert "User=bob" in text
+        assert "User=alice" not in text
+
+    def test_a_root_unit_from_a_user_writable_tree_is_refused(self, tmp_path, monkeypatch):
+        exe = self._writable_hle(tmp_path)
+        with pytest.raises(HleError, match="non-root user can write"):
+            self._install(tmp_path, monkeypatch, run_as="root", sudo_user=None, hle_path=str(exe))
+
+    def test_the_sudo_user_may_run_from_their_own_tree(self, tmp_path, monkeypatch):
+        exe = self._writable_hle(tmp_path)
+        written = self._install(tmp_path, monkeypatch, hle_path=str(exe))
+        assert "User=alice" in written.read_text()
+
+    def test_a_refresh_does_not_switch_an_existing_service_user(self, tmp_path, monkeypatch):
+        # Services installed before the guard keep their user on refresh, even
+        # when the refresh itself runs under sudo.
+        exe = self._writable_hle(tmp_path)
+        written = self._install(
+            tmp_path, monkeypatch, sudo_user="alice", hle_path=str(exe), harden=False
+        )
+        assert "User=alice" not in written.read_text()
+
+    def test_a_refresh_does_not_refuse_an_existing_root_service(self, tmp_path, monkeypatch):
+        # Refusing would leave the service on a stale unit and make `hle update`
+        # report a failure for a service that works.
+        exe = self._writable_hle(tmp_path)
+        written = self._install(
+            tmp_path, monkeypatch, run_as="root", sudo_user=None, hle_path=str(exe), harden=False
+        )
+        assert "User=root" in written.read_text()
+
+    def test_refresh_service_does_not_harden(self, monkeypatch):
+        seen: dict[str, object] = {}
+        stamp = {"label": AGENT_LABEL, "run_args": ["agent", "run"], "run_as": None}
+        monkeypatch.setattr(service_cmd, "current_platform", lambda: "linux")
+        monkeypatch.setattr(service_cmd, "service_spec", lambda *a, **k: dict(stamp))
+        monkeypatch.setattr(service_cmd, "_install_from_spec", lambda spec, **kw: seen.update(kw))
+        assert service_cmd.refresh_service("hle-agent.service", False) == "refreshed"
+        assert not seen.get("harden")
