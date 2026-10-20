@@ -25,6 +25,14 @@ Installs via pipx (preferred), uv, or pip-in-venv. Supports `--version`:
 curl -fsSL https://get.hle.world | sh -s -- --version 2610.12
 ```
 
+To install the agent unattended (CI, cloud-init, Ansible), pass its token in
+`HLE_AGENT_TOKEN` rather than on the command line, so it stays out of `ps` and
+shell history:
+
+```bash
+curl -fsSL https://get.hle.world | HLE_AGENT_TOKEN=hle_xxxxx sh -s -- --agent
+```
+
 ### pipx
 
 ```bash
@@ -212,6 +220,13 @@ hle agent status --ready            # Exit 0 only while this agent is connected
 hle agent list                      # Agents on your account, and whether they are online
 hle agent services                  # Services this machine can see and could expose
 hle agent logout                    # Remove the saved token
+```
+
+For scripts, an enrollment token can be read from stdin instead of an argument,
+so it never appears in the process list or shell history:
+
+```bash
+printf %s "$HLE_AGENT_TOKEN" | hle agent enroll --stdin
 ```
 
 `hle agent status --ready` is meant for supervisors: it exits 0 only while the

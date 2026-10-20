@@ -487,6 +487,29 @@ class TestAgentCli:
         assert "Enrolled" in result.output
         assert "token" in cfg.read_text()
 
+    def test_enroll_reads_the_token_from_stdin(self, tmp_path: Path) -> None:
+        # A token on stdin never reaches argv, so it is invisible to `ps` and
+        # absent from shell history.
+        runner = CliRunner()
+        cfg = tmp_path / "agent.toml"
+        token = "hle_" + "a" * 32
+        with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
+            result = runner.invoke(main, ["agent", "enroll", "--stdin"], input=token + "\n")
+        assert result.exit_code == 0, result.output
+        assert token in cfg.read_text()
+        assert token not in result.output
+
+    def test_enroll_stdin_and_argument_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        cfg = tmp_path / "agent.toml"
+        with patch("hle_client.config.AGENT_CONFIG_PATH", cfg):
+            result = runner.invoke(
+                main, ["agent", "enroll", "hle_" + "a" * 32, "--stdin"], input="hle_" + "b" * 32
+            )
+        assert result.exit_code == 2
+        assert "not both" in result.output
+        assert not cfg.exists()
+
     def test_enroll_reports_where_the_token_went(self, tmp_path: Path, monkeypatch) -> None:
         # HLE_AGENT_CONFIG moves the file; the message used to name the default anyway.
         cfg = tmp_path / "elsewhere.toml"

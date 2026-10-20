@@ -685,10 +685,28 @@ def agent() -> None:
     help="Enroll using the account key you're logged in with, naming the agent. "
     "Needs --force to replace an existing token.",
 )
+@click.option(
+    "--stdin",
+    "from_stdin",
+    is_flag=True,
+    default=False,
+    help="Read the token from stdin instead of an argument, so it stays out of "
+    "the process list and shell history.",
+)
 @click.option("--force", is_flag=True, default=False, help="Replace an existing agent token.")
 @click.pass_context
-def enroll(ctx: click.Context, token: str | None, name: str | None, force: bool) -> None:
+def enroll(
+    ctx: click.Context, token: str | None, name: str | None, from_stdin: bool, force: bool
+) -> None:
     """Save an agent enrollment token. Now: hle auth login --agent-token."""
+    if from_stdin:
+        # A token on stdin never reaches argv, so other local users cannot read
+        # it out of `ps` and it is not kept in shell history.
+        if token is not None:
+            raise UsageError("Pass either a TOKEN or --stdin, not both.")
+        if name is not None:
+            raise UsageError("Pass either --stdin or --name, not both.")
+        token = sys.stdin.read().strip()
     if token is not None and name is not None:
         raise UsageError("Pass either a TOKEN or --name, not both.")
     if name is not None:
