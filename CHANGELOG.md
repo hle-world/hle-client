@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2610.13 — 2026-10-20
 
 Everything here is backward compatible: existing installs, existing service
 files and scripts that pass credentials the old way keep working.
