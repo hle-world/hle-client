@@ -115,3 +115,31 @@ jobs:
 
       - name: TruffleHog scan
         run: trufflehog filesystem . --only-verified
+
+  semgrep:
+    name: Semgrep (Python SAST)
+    # Fork PRs run PR-head code: keep them off the self-hosted pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'arc-runner-hle-client' }}
+    timeout-minutes: 15
+    container:
+      image: python:3.13-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned: a new Semgrep release must not change what fails the build.
+      # setuptools<81 still ships pkg_resources, which a Semgrep dependency
+      # imports.
+      - name: Install Semgrep (pinned to 1.97.0)
+        run: pip install "semgrep==1.97.0" "setuptools<81"
+
+      # Findings fail the job. A reviewed false positive is silenced in place
+      # with a `# nosemgrep: <rule-id>` comment, as elsewhere in src/.
+      - name: Run Semgrep
+        run: |
+          semgrep \
+            --config p/python \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --metrics=off \
+            --error \
+            src/hle_client
