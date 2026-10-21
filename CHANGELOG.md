@@ -1,5 +1,26 @@
 # Changelog
 
+## v2610.14 — 2026-10-22
+
+### Changed
+
+- `hle auth login` takes any credential from the dashboard and works out
+  which kind it is: `hle auth login <key>`, or run it bare and paste. An account
+  key is saved for your account; an agent token enrols this machine. The
+  separate agent-token option is gone from `--help` (`--agent-token` still
+  works as a hidden alias, and so does `--api-key`). The client asks the relay
+  (`GET /api/auth/credential`, relay v2610.40 or later); if the relay is older
+  or unreachable it falls back to the key prefix, so a legacy `hlea_` token
+  still enrols as an agent (hle-client#241).
+
+### Fixed
+
+- `hle fp ... python3 script.py` no longer crashes a-Shell on iPad/iPhone.
+  a-Shell runs commands inside its own process, so starting a second Python
+  interpreter from `hle` segfaulted. On iOS, `hle fp` now refuses a Python
+  command with exit code 126 and explains how to run the forward and the
+  program in two windows (hle-client#242).
+
 ## v2610.13 — 2026-10-20
 
 Everything here is backward compatible: existing installs, existing service
