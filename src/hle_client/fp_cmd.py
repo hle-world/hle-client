@@ -21,11 +21,12 @@ from dataclasses import dataclass
 import click
 import websockets
 
-from hle_client import __version__, shutdown
+from hle_client import __version__, platform_info, shutdown
 from hle_client.context import require_api_key
 from hle_client.errors import HleError
 from hle_client.firepuncher import FpLocalClient
 from hle_client.output import sanitize
+from hle_client.platform_info import is_python_command
 from hle_client.richcompat import Console
 from hle_common.fp_protocol import (
     LOCAL_NETWORKS,
@@ -474,13 +475,37 @@ async def _run_all(
             waiter.cancel()
 
         console.print(f"[dim]Running:[/dim] {' '.join(command)}")
-        return await _run_command(command, forwards)
+        return await _run_command(command, forwards, agent=agent)
     finally:
         await _cancel_all(tasks)
 
 
-async def _run_command(command: list[str], forwards: list[Forward]) -> int:
+def is_ios() -> bool:
+    """Whether this is an iOS shell; see :mod:`hle_client.platform_info`."""
+    return platform_info.is_ios()
+
+
+def _ios_python_refusal(agent: str, forward: Forward) -> str:
+    """The two-window advice for a Python command that iOS cannot start.
+
+    a-Shell emulates a child process inside its own process, so a second
+    interpreter on top of the running one aborts the runtime. The forward
+    itself is fine; it is only the trailing command that cannot run here.
+    """
+    return (
+        "Running a Python command after the forward isn't possible on iOS: "
+        "the shell can't start a second Python while hle is running. Run the "
+        f"forward on its own (`hle fp {agent} {forward.target_port} "
+        f"--port {forward.bind_port}`) in one window and your command in "
+        f"another, with `HLE_FP_PORT={forward.bind_port}`."
+    )
+
+
+async def _run_command(command: list[str], forwards: list[Forward], agent: str = "") -> int:
     """Run *command* to completion with the forward ports in its environment."""
+    if is_ios() and command and is_python_command(command[0]):
+        raise HleError(_ios_python_refusal(agent, forwards[0]), exit_code=126)
+
     env = dict(os.environ)
     env["HLE_FP_PORT"] = str(forwards[0].bind_port)
     env["HLE_FP_HOST"] = forwards[0].bind_host
