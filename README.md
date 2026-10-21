@@ -257,6 +257,10 @@ allowed, but the cloud metadata service (`169.254.169.254`, `169.254.170.2`,
 cannot hand over the instance's IAM credentials. An operator on the agent host
 can opt back in with `HLE_FIREPUNCHER_ALLOW_METADATA=true`.
 
+On iPad/iOS (a-Shell) the shell cannot start a second Python process, so a
+trailing Python command is refused with exit 126: run the forward in one window
+and the Python command in another, with `HLE_FP_PORT` set to the local port.
+
 ### `hle daemon`
 
 Install and manage a background service, so a tunnel, agent or forward
