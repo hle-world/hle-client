@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from hle_client import config
-from hle_client.errors import ApiError, HleError, server_detail
+from hle_client.errors import ApiError, AuthError, HleError, server_detail
 from hle_client.ops.models import Agent
 from hle_common.credentials import is_agent_credential
 
@@ -27,6 +27,63 @@ async def list_agents(api: ApiClient) -> list[Agent]:
             raise HleError("Agents are not enabled on this server.") from None
         raise err from None
     return [Agent.from_api(row) for row in rows]
+
+
+@dataclass(frozen=True, slots=True)
+class Credential:
+    """What the relay says a credential is: an account key, or an agent's.
+
+    ``name`` and ``active`` describe an agent credential; an API key has
+    neither and is always active.
+    """
+
+    kind: str  # "api_key" | "agent"
+    name: str | None = None
+    active: bool = True
+
+
+async def classify_credential(api: ApiClient) -> Credential | None:
+    """Ask the relay whether a credential is an account key or an agent token.
+
+    Returns ``None`` when the relay cannot say — it is unreachable, or too old
+    to know the endpoint — so the caller falls back to the credential's prefix.
+    A credential the relay refuses (401) raises instead: nothing was saved, and
+    the string the person pasted was not recognised.
+    """
+    try:
+        data = await api.get_credential()
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code in (404, 405) or code >= 500:
+            return None
+        if code == 401:
+            raise AuthError(
+                "The server does not recognise this credential. Check you copied all of it.",
+                status=code,
+            ) from None
+        raise ApiError.from_exception(exc) from None
+    except httpx.HTTPError:
+        return None
+    except ValueError:  # a body that is not JSON: not the endpoint we asked for
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    kind = str(data.get("kind") or "").strip().lower()
+    if kind not in ("api_key", "agent"):
+        return None
+    nested: dict[str, Any] = {}
+    if isinstance(data.get("agent"), dict):
+        nested = data["agent"]
+    name = data.get("name") or nested.get("name")
+    active = data.get("active")
+    if active is None:
+        active = nested.get("active", True)
+    return Credential(
+        kind=kind,
+        name=str(name) if name else None,
+        active=bool(active),
+    )
 
 
 @dataclass(frozen=True, slots=True)

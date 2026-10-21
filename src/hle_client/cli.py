@@ -42,6 +42,7 @@ from hle_client.tunnel_options import (
     validate_label_and_apex,
 )
 from hle_client.update_cmd import update as update_command
+from hle_common.credentials import is_agent_credential
 from hle_common.tunnel_spec import TunnelSpec
 
 console = Console()
@@ -117,7 +118,7 @@ def main(
 
     \b
     Get started:
-      hle auth login                              Save your API key
+      hle auth login                              Save any key from the dashboard
       hle tunnel create ha http://localhost:8123  Expose a service
       hle status                                  What is running on this machine
 
@@ -387,7 +388,8 @@ def auth() -> None:
 
 
 @auth.command()
-@click.option("--api-key", default=None, help="API key to save (skips browser prompt)")
+@click.argument("credential", required=False)
+@click.option("--api-key", default=None, help="The credential to save (alias for CREDENTIAL).")
 @click.option(
     "--agent-token",
     default=None,
@@ -395,44 +397,51 @@ def auth() -> None:
     # Bare `--agent-token` prompts for it, so the token need not be typed
     # into shell history — what `agent enroll` with no argument did.
     flag_value="",
-    help="Agent enrollment token to save instead. Alone, prompts for it.",
+    hidden=True,
+    help="Force agent enrolment instead of asking the server. Alone, prompts for it.",
 )
 @click.option(
-    "--force", is_flag=True, default=False, help="With --agent-token: replace an existing token."
+    "--force", is_flag=True, default=False, help="Replace an existing agent token on this machine."
 )
 @click.pass_context
 def login(
-    ctx: click.Context, api_key: str | None, agent_token: str | None = None, force: bool = False
+    ctx: click.Context,
+    credential: str | None = None,
+    api_key: str | None = None,
+    agent_token: str | None = None,
+    force: bool = False,
 ) -> None:
-    """Save a credential for this machine.
+    """Paste any key from the dashboard; HLE works out which kind it is.
 
-    One place to put a credential, whichever kind you were given. An agent
-    enrollment token used to have its own verb in its own group, so "where do
-    I put this?" had two answers depending on which string you were holding.
-    `hle agent enroll TOKEN` still works; it is this command.
+    One place to put a credential, whichever kind you were given. Both are
+    hle_ keys now, so the server is asked which one it is: an account key
+    is saved for your account, an agent token enrols this machine. A legacy
+    hlea_ token still enrols as an agent.
 
     \b
     Examples:
-      hle auth login                        Paste an API key from the dashboard
-      hle auth login --api-key hle_...      Non-interactive
-      hle auth login --agent-token hle_...  Enrol this machine as an agent
-      hle auth login --agent-token          Same, pasting the token at a prompt
+      hle auth login                       Paste any key from the dashboard
     """
     if agent_token is not None:
         _save_agent_token(ctx, agent_token or None, force=force)
         return
 
-    if api_key is None:
+    if api_key and credential and api_key.strip() != credential.strip():
+        raise click.UsageError("Give the credential once: either CREDENTIAL or --api-key.")
+    token = (api_key or credential or "").strip()
+    if not token:
         console.print("Opening [cyan]https://hle.world/dashboard[/cyan] ...")
         webbrowser.open("https://hle.world/dashboard")
-        console.print("Copy your API key from the dashboard and paste it here.\n")
-        api_key = str(prompt(ctx, "API key", hide_input=True))
+        console.print("Copy any key from the dashboard and paste it here.\n")
+        token = str(prompt(ctx, "Credential", hide_input=True)).strip()
 
-    if not config.API_KEY_PATTERN.match(api_key):
-        raise HleError("Invalid API key format. Expected 'hle_' followed by 32 hex characters.")
+    if not _looks_like_a_credential(token):
+        raise HleError(
+            "Invalid API key format. Expected 'hle_' followed by 32 hex "
+            "characters (or a legacy 'hlea_' token)."
+        )
 
-    config.save_api_key(api_key)
-    console.print("[green]Saved[/green] to ~/.config/hle/config.toml")
+    _login_with_credential(ctx, token, force=force)
 
 
 _ALREADY_ENROLLED = (
@@ -445,13 +454,71 @@ _NOT_LOGGED_IN = (
 )
 
 
+def _looks_like_a_credential(token: str) -> bool:
+    """Whether the string has the shape of a credential the relay issues.
+
+    Both kinds are ``hle_`` + 32 hex now, so the shape cannot tell them apart;
+    this only answers whether it could be one at all. Legacy agent tokens keep
+    their ``hlea_`` prefix.
+    """
+    return is_agent_credential(token)
+
+
+def _save_api_key(token: str) -> None:
+    """Save an account key to ``config.toml``."""
+    config.save_api_key(token)
+    console.print("[green]Saved[/green] API key for your account")
+
+
+def _login_with_credential(ctx: click.Context, token: str, *, force: bool = False) -> None:
+    """Save ``token`` where the relay says it belongs.
+
+    Both kinds look identical, so the relay is asked what this one is. When it
+    cannot say — unreachable, or too old for the endpoint — the credential's
+    prefix decides, with a note saying the kind was not checked.
+    """
+    credential = asyncio.run(ops_agents.classify_credential(api(ctx, token)))
+    if credential is None:
+        _login_without_the_check(ctx, token, force=force)
+        return
+
+    if credential.kind == "api_key":
+        _save_api_key(token)
+        return
+
+    if not credential.active:
+        raise HleError(
+            "This agent was deleted or deactivated — create a new one in the dashboard.",
+        )
+    _save_agent_token(ctx, token, force=force, name=credential.name)
+
+
+def _login_without_the_check(ctx: click.Context, token: str, *, force: bool = False) -> None:
+    """Fall back to the credential's prefix when the relay cannot classify it."""
+    if token.startswith(config.AGENT_TOKEN_PREFIX):
+        _save_agent_token(ctx, token, force=force)
+        console.print("[dim]Could not check this token's kind with the server.[/dim]")
+        return
+    _save_api_key(token)
+    console.print(
+        "[dim]Could not check this key's kind with the server; saved it as an API key. "
+        "Run `hle auth login --agent-token` to enrol this machine as an agent.[/dim]"
+    )
+
+
 def _refuse_if_enrolled(force: bool) -> None:
     """Refuse to replace an existing agent token unless ``--force`` was given."""
     if not force and config.load_agent_token():
         raise HleError(_ALREADY_ENROLLED)
 
 
-def _save_agent_token(ctx: click.Context, token: str | None, *, force: bool = False) -> None:
+def _save_agent_token(
+    ctx: click.Context,
+    token: str | None,
+    *,
+    force: bool = False,
+    name: str | None = None,
+) -> None:
     """Validate and save an agent enrollment token, prompting when none was given."""
     _refuse_if_enrolled(force)
     if token is None:
@@ -462,7 +529,10 @@ def _save_agent_token(ctx: click.Context, token: str | None, *, force: bool = Fa
 
     # Report where it actually went: HLE_AGENT_CONFIG can move it.
     saved = ops_agents.enroll(token).replace(str(Path.home()), "~", 1)
-    console.print(f"[green]Enrolled[/green] — token saved to {saved}")
+    if name:
+        console.print(f'[green]Enrolled as agent[/green] "{name}" — token saved to {saved}')
+    else:
+        console.print(f"[green]Enrolled[/green] — token saved to {saved}")
     console.print(
         "Start the agent with: [cyan]hle agent run[/cyan]  (or: hle daemon install agent)"
     )

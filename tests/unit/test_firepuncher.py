@@ -1050,3 +1050,92 @@ class TestStreamCap:
         # attempted rather than refused by the cap.
         assert len(out.of_type(FpMsgType.ERROR)) == MAX_STREAMS + 5
         assert not agent._pending_opens
+
+
+class TestIosPythonCommand:
+    """A trailing Python command segfaults a-Shell, so refuse it with the fix.
+
+    iOS has no fork/exec: a-Shell runs the command inside its own process, and
+    starting a second interpreter on top of the running one aborts the runtime.
+    The forward itself is fine; only the command has to move to another window.
+    """
+
+    @staticmethod
+    def _forwards():
+        from hle_client.fp_cmd import Forward
+
+        return [
+            Forward(target_host="localhost", target_port=22, bind_host="127.0.0.1", bind_port=9922)
+        ]
+
+    @staticmethod
+    def _record_launches(monkeypatch):
+        """Replace the spawner, returning the argv lists it was handed."""
+        from hle_client import fp_cmd
+
+        launched: list[tuple] = []
+
+        class _Proc:
+            async def wait(self):
+                return 0
+
+        async def fake_exec(*args, **kwargs):
+            launched.append(args)
+            return _Proc()
+
+        monkeypatch.setattr(fp_cmd.asyncio, "create_subprocess_exec", fake_exec)
+        return launched
+
+    async def test_a_python_command_is_refused_on_ios(self, monkeypatch):
+        from hle_client import fp_cmd
+
+        launched = self._record_launches(monkeypatch)
+        monkeypatch.setattr(fp_cmd, "is_ios", lambda: True)
+
+        with pytest.raises(HleError) as excinfo:
+            await fp_cmd._run_command(["python3", "x.py"], self._forwards(), agent="rpi")
+
+        assert excinfo.value.exit_code == 126
+        message = str(excinfo.value)
+        assert "rpi" in message
+        assert "HLE_FP_PORT=9922" in message
+        assert "one window" in message and "another" in message
+        assert launched == []  # nothing was started
+
+    async def test_the_running_interpreter_is_refused_too(self, monkeypatch):
+        import sys
+
+        from hle_client import fp_cmd
+
+        launched = self._record_launches(monkeypatch)
+        monkeypatch.setattr(fp_cmd, "is_ios", lambda: True)
+
+        with pytest.raises(HleError) as excinfo:
+            await fp_cmd._run_command([sys.executable, "x.py"], self._forwards(), agent="rpi")
+
+        assert excinfo.value.exit_code == 126
+        assert launched == []
+
+    async def test_a_non_python_command_still_runs_on_ios(self, monkeypatch):
+        from hle_client import fp_cmd
+
+        launched = self._record_launches(monkeypatch)
+        monkeypatch.setattr(fp_cmd, "is_ios", lambda: True)
+
+        code = await fp_cmd._run_command(
+            ["ssh", "-p", "9922", "me@127.0.0.1"], self._forwards(), agent="rpi"
+        )
+
+        assert code == 0
+        assert launched == [("ssh", "-p", "9922", "me@127.0.0.1")]
+
+    async def test_python_runs_as_today_off_ios(self, monkeypatch):
+        from hle_client import fp_cmd
+
+        launched = self._record_launches(monkeypatch)
+        monkeypatch.setattr(fp_cmd, "is_ios", lambda: False)
+
+        code = await fp_cmd._run_command(["python3", "x.py"], self._forwards(), agent="rpi")
+
+        assert code == 0
+        assert launched == [("python3", "x.py")]

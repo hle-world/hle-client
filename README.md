@@ -213,7 +213,7 @@ this machine. Endpoints added or removed in the dashboard take effect without
 a restart.
 
 ```bash
-hle auth login --agent-token        # Paste the token at the prompt
+hle auth login                      # Paste the agent token at the prompt
 hle agent run                       # Run in the foreground
 hle agent status                    # Is a token configured here?
 hle agent status --ready            # Exit 0 only while this agent is connected
@@ -256,6 +256,10 @@ allowed, but the cloud metadata service (`169.254.169.254`, `169.254.170.2`,
 `fd00:ec2::254`) is always refused, even when a rule covers it, so a forward
 cannot hand over the instance's IAM credentials. An operator on the agent host
 can opt back in with `HLE_FIREPUNCHER_ALLOW_METADATA=true`.
+
+On iPad/iOS (a-Shell) the shell cannot start a second Python process, so a
+trailing Python command is refused with exit 126: run the forward in one window
+and the Python command in another, with `HLE_FP_PORT` set to the local port.
 
 ### `hle daemon`
 
@@ -311,12 +315,15 @@ hle update --version 2610.13   # pin an exact version
 
 ### `hle auth`
 
-Manage the credentials saved on this machine.
+Manage the credentials saved on this machine. Account API keys and agent
+tokens look the same (`hle_` plus 32 hex characters), so `hle auth login`
+asks the server which one you pasted and saves it in the right place.
 
 ```bash
-hle auth login                              # Save an API key (opens dashboard)
-hle auth login --api-key <KEY>              # Save key non-interactively
-hle auth login --agent-token <TOKEN>        # Enrol this machine as an agent
+hle auth login                              # Paste any key (opens dashboard)
+hle auth login hle_...                      # Save it non-interactively
+hle auth login --api-key <KEY>              # The same, as a flag
+hle auth login --agent-token <TOKEN>        # Force agent enrolment (skips detection)
 hle auth status                             # Which credentials exist, and where from
 hle auth logout                             # Remove saved key
 ```

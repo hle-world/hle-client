@@ -388,3 +388,22 @@ class ApiClient:
             resp.raise_for_status()
             payload: dict[str, Any] = resp.json()
             return payload.get("user", payload)
+
+    async def get_credential(self) -> dict[str, Any]:
+        """Ask the relay what kind of credential this is.
+
+        Both kinds are ``hle_`` keys now, so the shape cannot tell them apart:
+        the relay answers ``kind`` (``api_key`` or ``agent``), and an agent
+        also carries its ``name`` and whether it is still ``active``. A 404
+        means the relay predates the endpoint; the caller falls back to the
+        credential's prefix.
+        """
+        async with self._client_ctx() as client:
+            resp = await client.get(
+                f"{self._base_url}/api/auth/credential",
+                headers=self._headers,
+                timeout=5.0,
+            )
+            resp.raise_for_status()
+            result: dict[str, Any] = resp.json()
+            return result
