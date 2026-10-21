@@ -46,6 +46,41 @@ class TestListAgents:
         assert info.value.exit_code == 3
 
 
+class TestClassifyCredential:
+    """The relay is the only thing that can tell the two hle_ shapes apart."""
+
+    async def test_an_account_key(self):
+        cred = await agents.classify_credential(api(get_credential={"kind": "api_key"}))
+        assert cred is not None
+        assert (cred.kind, cred.active) == ("api_key", True)
+
+    async def test_an_agent_carries_its_name_and_state(self):
+        cred = await agents.classify_credential(
+            api(get_credential={"kind": "agent", "name": "laptop", "active": True})
+        )
+        assert cred is not None
+        assert (cred.kind, cred.name, cred.active) == ("agent", "laptop", True)
+
+    async def test_a_404_means_the_relay_is_too_old(self):
+        a = api()
+        a.errors["get_credential"] = _http_error(404)
+        assert await agents.classify_credential(a) is None
+
+    async def test_an_unreachable_relay_is_none(self):
+        a = api()
+        a.errors["get_credential"] = httpx.ConnectError("down")
+        assert await agents.classify_credential(a) is None
+
+    async def test_a_401_is_an_auth_error(self):
+        a = api()
+        a.errors["get_credential"] = _http_error(401)
+        with pytest.raises(AuthError, match="does not recognise"):
+            await agents.classify_credential(a)
+
+    async def test_an_unknown_kind_is_none(self):
+        assert await agents.classify_credential(api(get_credential={"kind": "?"})) is None
+
+
 class TestLocal:
     def test_status_reflects_the_saved_token(self, tmp_path, monkeypatch):
         monkeypatch.delenv("HLE_AGENT_TOKEN", raising=False)

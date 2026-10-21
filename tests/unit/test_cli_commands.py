@@ -367,19 +367,29 @@ class TestErrorHandling:
         assert "hle auth login" in result.output
 
 
+def _credential_api(**response: object) -> AsyncMock:
+    """An ApiClient whose credential lookup answers with ``response``."""
+    client = AsyncMock()
+    client.get_credential = AsyncMock(return_value=response)
+    return client
+
+
 class TestAuthLogin:
     def test_with_api_key(self, tmp_path: Path) -> None:
         runner = CliRunner()
         config_file = tmp_path / "config.toml"
+        key = "hle_" + "a" * 32
         with (
             patch("hle_client.config.CONFIG_FILE", config_file),
             patch("hle_client.config.CONFIG_DIR", tmp_path),
+            patch("hle_client.api.ApiClient", return_value=_credential_api(kind="api_key")),
         ):
-            result = runner.invoke(main, ["auth", "login", "--api-key", "hle_" + "a" * 32])
+            result = runner.invoke(main, ["auth", "login", "--api-key", key])
         assert result.exit_code == 0
         assert "Saved" in result.output
+        assert "API key for your account" in result.output
         assert config_file.exists()
-        assert "hle_" + "a" * 32 in config_file.read_text()
+        assert key in config_file.read_text()
 
     def test_interactive(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -388,6 +398,7 @@ class TestAuthLogin:
         with (
             patch("hle_client.config.CONFIG_FILE", config_file),
             patch("hle_client.config.CONFIG_DIR", tmp_path),
+            patch("hle_client.api.ApiClient", return_value=_credential_api(kind="api_key")),
             patch("hle_client.cli.webbrowser.open"),
         ):
             result = runner.invoke(main, ["auth", "login"], input=valid_key + "\n")
@@ -406,6 +417,136 @@ class TestAuthLogin:
         result = runner.invoke(main, ["auth", "login", "--api-key", "hle_abc"])
         assert result.exit_code == 1
         assert "Invalid API key format" in result.output
+
+
+class TestAuthLoginDetectsTheKind:
+    """One login for either credential: the server says which one it is."""
+
+    def _login(self, argv, response=None, error=None, tmp_path=None, input=None):
+        client = AsyncMock()
+        if error is not None:
+            client.get_credential = AsyncMock(side_effect=error)
+        else:
+            client.get_credential = AsyncMock(return_value=response or {})
+        config_file = tmp_path / "config.toml"
+        agent_file = tmp_path / "agent.toml"
+        with (
+            patch("hle_client.api.ApiClient", return_value=client),
+            patch("hle_client.config.CONFIG_FILE", config_file),
+            patch("hle_client.config.CONFIG_DIR", tmp_path),
+            patch("hle_client.config.AGENT_CONFIG_PATH", agent_file),
+            patch("hle_client.cli.webbrowser.open"),
+        ):
+            result = CliRunner().invoke(main, argv, input=input)
+        return result, config_file, agent_file
+
+    def test_an_account_key_is_saved_to_config(self, tmp_path: Path) -> None:
+        key = "hle_" + "1" * 32
+        result, cfg, agent = self._login(
+            ["auth", "login", key], response={"kind": "api_key"}, tmp_path=tmp_path
+        )
+        assert result.exit_code == 0, result.output
+        assert "Saved API key for your account" in result.output
+        assert key in cfg.read_text()
+        assert not agent.exists()
+
+    def test_an_agent_token_enrols_and_leaves_config_alone(self, tmp_path: Path) -> None:
+        token = "hle_" + "2" * 32
+        result, cfg, agent = self._login(
+            ["auth", "login", token],
+            response={"kind": "agent", "name": "laptop", "active": True},
+            tmp_path=tmp_path,
+        )
+        assert result.exit_code == 0, result.output
+        assert 'Enrolled as agent "laptop"' in result.output
+        assert token in agent.read_text()
+        assert not cfg.exists()
+
+    def test_positional_argument_works(self, tmp_path: Path) -> None:
+        key = "hle_" + "3" * 32
+        result, cfg, _ = self._login(
+            ["auth", "login", key], response={"kind": "api_key"}, tmp_path=tmp_path
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_an_already_enrolled_machine_refuses_without_force(self, tmp_path: Path) -> None:
+        (tmp_path / "agent.toml").write_text('token = "hle_' + "9" * 32 + '"\n')
+        token = "hle_" + "4" * 32
+        result, cfg, agent = self._login(
+            ["auth", "login", token],
+            response={"kind": "agent", "name": "laptop", "active": True},
+            tmp_path=tmp_path,
+        )
+        assert result.exit_code == 1
+        assert "already enrolled" in result.output
+        assert token not in agent.read_text()
+
+    def test_an_inactive_agent_errors_and_saves_nothing(self, tmp_path: Path) -> None:
+        token = "hle_" + "5" * 32
+        result, cfg, agent = self._login(
+            ["auth", "login", token],
+            response={"kind": "agent", "name": "old", "active": False},
+            tmp_path=tmp_path,
+        )
+        assert result.exit_code == 1
+        assert "deleted or deactivated" in result.output
+        assert not cfg.exists()
+        assert not agent.exists()
+
+    def test_a_401_says_the_credential_was_not_recognised(self, tmp_path: Path) -> None:
+        import httpx
+
+        request = httpx.Request("GET", "https://hle.world/api/auth/credential")
+        response = httpx.Response(401, request=request)
+        error = httpx.HTTPStatusError("401", request=request, response=response)
+        token = "hle_" + "6" * 32
+        result, cfg, agent = self._login(
+            ["auth", "login", token], error=error, tmp_path=tmp_path
+        )
+        assert result.exit_code == 3
+        assert "does not recognise" in result.output
+        assert not cfg.exists()
+        assert not agent.exists()
+
+    def test_an_unreachable_server_falls_back_to_an_api_key(self, tmp_path: Path) -> None:
+        import httpx
+
+        token = "hle_" + "7" * 32
+        result, cfg, _ = self._login(
+            ["auth", "login", token],
+            error=httpx.ConnectError("no route"),
+            tmp_path=tmp_path,
+        )
+        assert result.exit_code == 0, result.output
+        assert token in cfg.read_text()
+        assert "Could not check" in result.output
+
+    def test_a_404_falls_back_to_agent_by_prefix(self, tmp_path: Path) -> None:
+        import httpx
+
+        request = httpx.Request("GET", "https://hle.world/api/auth/credential")
+        response = httpx.Response(404, request=request)
+        error = httpx.HTTPStatusError("404", request=request, response=response)
+        token = "hlea_" + "8" * 40
+        result, cfg, agent = self._login(
+            ["auth", "login", token], error=error, tmp_path=tmp_path
+        )
+        assert result.exit_code == 0, result.output
+        assert token in agent.read_text()
+        assert not cfg.exists()
+
+    def test_server_unreachable_legacy_prefix_still_enrols(self, tmp_path: Path) -> None:
+        import httpx
+
+        token = "hlea_" + "9" * 40
+        result, cfg, agent = self._login(
+            ["auth", "login", token],
+            error=httpx.ConnectError("down"),
+            tmp_path=tmp_path,
+        )
+        assert result.exit_code == 0, result.output
+        assert token in agent.read_text()
+        assert not cfg.exists()
 
 
 class TestAuthStatus:

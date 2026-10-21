@@ -213,7 +213,7 @@ this machine. Endpoints added or removed in the dashboard take effect without
 a restart.
 
 ```bash
-hle auth login --agent-token        # Paste the token at the prompt
+hle auth login                     # Paste the agent token at the prompt
 hle agent run                       # Run in the foreground
 hle agent status                    # Is a token configured here?
 hle agent status --ready            # Exit 0 only while this agent is connected
@@ -311,12 +311,15 @@ hle update --version 2610.13   # pin an exact version
 
 ### `hle auth`
 
-Manage the credentials saved on this machine.
+Manage the credentials saved on this machine. Account API keys and agent
+tokens look the same (`hle_` plus 32 hex characters), so `hle auth login`
+asks the server which one you pasted and saves it in the right place.
 
 ```bash
-hle auth login                              # Save an API key (opens dashboard)
-hle auth login --api-key <KEY>              # Save key non-interactively
-hle auth login --agent-token <TOKEN>        # Enrol this machine as an agent
+hle auth login                              # Paste any key (opens dashboard)
+hle auth login hle_...                      # Save it non-interactively
+hle auth login --api-key <KEY>              # The same, as a flag
+hle auth login --agent-token <TOKEN>        # Force agent enrolment (skips detection)
 hle auth status                             # Which credentials exist, and where from
 hle auth logout                             # Remove saved key
 ```
