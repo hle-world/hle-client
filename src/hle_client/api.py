@@ -402,6 +402,7 @@ class ApiClient:
             resp = await client.get(
                 f"{self._base_url}/api/auth/credential",
                 headers=self._headers,
+                timeout=5.0,
             )
             resp.raise_for_status()
             result: dict[str, Any] = resp.json()

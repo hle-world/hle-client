@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -54,7 +54,7 @@ async def classify_credential(api: ApiClient) -> Credential | None:
         data = await api.get_credential()
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
-        if code == 404:
+        if code in (404, 405) or code >= 500:
             return None
         if code == 401:
             raise AuthError(
@@ -62,15 +62,19 @@ async def classify_credential(api: ApiClient) -> Credential | None:
                 status=code,
             ) from None
         raise ApiError.from_exception(exc) from None
-    except (httpx.ConnectError, httpx.TimeoutException):
-        return None
     except httpx.HTTPError:
         return None
+    except ValueError:  # a body that is not JSON: not the endpoint we asked for
+        return None
 
+    if not isinstance(data, dict):
+        return None
     kind = str(data.get("kind") or "").strip().lower()
     if kind not in ("api_key", "agent"):
         return None
-    nested = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    nested: dict[str, Any] = {}
+    if isinstance(data.get("agent"), dict):
+        nested = data["agent"]
     name = data.get("name") or nested.get("name")
     active = data.get("active")
     if active is None:

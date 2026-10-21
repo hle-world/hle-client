@@ -38,7 +38,7 @@ hle agent status  [command]  hidden=False  help='Show whether an agent token is 
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
 hle auth  [group]  hidden=False  help='Manage API key authentication.'
     option   --help                       name=help type=boolean required=False multiple=False nargs=1 flag=True envvar=None default_set=True hidden=False
-hle auth login  [command]  hidden=False  help="Paste any key from the dashboard; HLE works out whether it's an account key or an agent token."
+hle auth login  [command]  hidden=False  help='Paste any key from the dashboard; HLE works out which kind it is.'
     argument credential                   name=credential type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=True hidden=False
     option   --api-key                    name=api_key type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=False
     option   --agent-token                name=agent_token type=text required=False multiple=False nargs=1 flag=False envvar=None default_set=False hidden=True

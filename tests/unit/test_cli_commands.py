@@ -422,7 +422,7 @@ class TestAuthLogin:
 class TestAuthLoginDetectsTheKind:
     """One login for either credential: the server says which one it is."""
 
-    def _login(self, argv, response=None, error=None, tmp_path=None, input=None):
+    def _login(self, argv, response=None, error=None, tmp_path=None, stdin=None):
         client = AsyncMock()
         if error is not None:
             client.get_credential = AsyncMock(side_effect=error)
@@ -437,7 +437,7 @@ class TestAuthLoginDetectsTheKind:
             patch("hle_client.config.AGENT_CONFIG_PATH", agent_file),
             patch("hle_client.cli.webbrowser.open"),
         ):
-            result = CliRunner().invoke(main, argv, input=input)
+            result = CliRunner().invoke(main, argv, input=stdin)
         return result, config_file, agent_file
 
     def test_an_account_key_is_saved_to_config(self, tmp_path: Path) -> None:
@@ -500,9 +500,7 @@ class TestAuthLoginDetectsTheKind:
         response = httpx.Response(401, request=request)
         error = httpx.HTTPStatusError("401", request=request, response=response)
         token = "hle_" + "6" * 32
-        result, cfg, agent = self._login(
-            ["auth", "login", token], error=error, tmp_path=tmp_path
-        )
+        result, cfg, agent = self._login(["auth", "login", token], error=error, tmp_path=tmp_path)
         assert result.exit_code == 3
         assert "does not recognise" in result.output
         assert not cfg.exists()
@@ -528,9 +526,7 @@ class TestAuthLoginDetectsTheKind:
         response = httpx.Response(404, request=request)
         error = httpx.HTTPStatusError("404", request=request, response=response)
         token = "hlea_" + "8" * 40
-        result, cfg, agent = self._login(
-            ["auth", "login", token], error=error, tmp_path=tmp_path
-        )
+        result, cfg, agent = self._login(["auth", "login", token], error=error, tmp_path=tmp_path)
         assert result.exit_code == 0, result.output
         assert token in agent.read_text()
         assert not cfg.exists()
@@ -547,6 +543,60 @@ class TestAuthLoginDetectsTheKind:
         assert result.exit_code == 0, result.output
         assert token in agent.read_text()
         assert not cfg.exists()
+        assert "Could not check" in result.output
+
+    def test_a_server_error_falls_back_instead_of_blocking_login(self, tmp_path: Path) -> None:
+        import httpx
+
+        request = httpx.Request("GET", "https://hle.world/api/auth/credential")
+        response = httpx.Response(502, request=request)
+        error = httpx.HTTPStatusError("502", request=request, response=response)
+        token = "hle_" + "a" * 32
+        result, cfg, _ = self._login(["auth", "login", token], error=error, tmp_path=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert token in cfg.read_text()
+
+    def test_api_key_flag_is_detected_too(self, tmp_path: Path) -> None:
+        token = "hle_" + "b" * 32
+        result, cfg, agent = self._login(
+            ["auth", "login", "--api-key", token],
+            response={"kind": "agent", "agent": {"id": 1, "name": "nas"}},
+            tmp_path=tmp_path,
+        )
+        assert result.exit_code == 0, result.output
+        assert 'Enrolled as agent "nas"' in result.output
+        assert token in agent.read_text()
+        assert not cfg.exists()
+
+    def test_the_prompt_path_detects_an_agent(self, tmp_path: Path) -> None:
+        token = "hle_" + "c" * 32
+        result, cfg, agent = self._login(
+            ["auth", "login"],
+            response={"kind": "agent", "agent": {"id": 1, "name": "nas"}},
+            tmp_path=tmp_path,
+            stdin=token + "\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert token in agent.read_text()
+        assert token not in result.output
+        assert not cfg.exists()
+
+    def test_agent_token_flag_skips_the_server(self, tmp_path: Path) -> None:
+        token = "hle_" + "d" * 32
+        client = AsyncMock()
+        with (
+            patch("hle_client.api.ApiClient", return_value=client),
+            patch("hle_client.config.AGENT_CONFIG_PATH", tmp_path / "agent.toml"),
+            patch("hle_client.config.CONFIG_DIR", tmp_path),
+        ):
+            result = CliRunner().invoke(main, ["auth", "login", "--agent-token", token])
+        assert result.exit_code == 0, result.output
+        client.get_credential.assert_not_called()
+        assert token in (tmp_path / "agent.toml").read_text()
+
+    def test_help_hides_agent_token(self) -> None:
+        result = CliRunner().invoke(main, ["auth", "login", "--help"])
+        assert "--agent-token" not in result.output
 
 
 class TestAuthStatus:

@@ -213,7 +213,7 @@ this machine. Endpoints added or removed in the dashboard take effect without
 a restart.
 
 ```bash
-hle auth login                     # Paste the agent token at the prompt
+hle auth login                      # Paste the agent token at the prompt
 hle agent run                       # Run in the foreground
 hle agent status                    # Is a token configured here?
 hle agent status --ready            # Exit 0 only while this agent is connected

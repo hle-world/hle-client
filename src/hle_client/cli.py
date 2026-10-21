@@ -42,6 +42,7 @@ from hle_client.tunnel_options import (
     validate_label_and_apex,
 )
 from hle_client.update_cmd import update as update_command
+from hle_common.credentials import is_agent_credential
 from hle_common.tunnel_spec import TunnelSpec
 
 console = Console()
@@ -400,7 +401,7 @@ def auth() -> None:
     help="Force agent enrolment instead of asking the server. Alone, prompts for it.",
 )
 @click.option(
-    "--force", is_flag=True, default=False, help="With --agent-token: replace an existing token."
+    "--force", is_flag=True, default=False, help="Replace an existing agent token on this machine."
 )
 @click.pass_context
 def login(
@@ -410,24 +411,23 @@ def login(
     agent_token: str | None = None,
     force: bool = False,
 ) -> None:
-    """Paste any key from the dashboard; HLE works out whether it's an account key or an agent token.
+    """Paste any key from the dashboard; HLE works out which kind it is.
 
     One place to put a credential, whichever kind you were given. Both are
-    ``hle_`` keys now, so the server is asked which one it is: an account key
+    hle_ keys now, so the server is asked which one it is: an account key
     is saved for your account, an agent token enrols this machine. A legacy
-    ``hlea_`` token still enrols as an agent.
+    hlea_ token still enrols as an agent.
 
     \b
     Examples:
       hle auth login                       Paste any key from the dashboard
-      hle auth login hle_...               Non-interactive
-      hle auth login --api-key hle_...     The same, as a flag
-      hle auth login --agent-token         Force agent enrolment (no check)
     """
     if agent_token is not None:
         _save_agent_token(ctx, agent_token or None, force=force)
         return
 
+    if api_key and credential and api_key.strip() != credential.strip():
+        raise click.UsageError("Give the credential once: either CREDENTIAL or --api-key.")
     token = (api_key or credential or "").strip()
     if not token:
         console.print("Opening [cyan]https://hle.world/dashboard[/cyan] ...")
@@ -461,10 +461,7 @@ def _looks_like_a_credential(token: str) -> bool:
     this only answers whether it could be one at all. Legacy agent tokens keep
     their ``hlea_`` prefix.
     """
-    return (
-        config.API_KEY_PATTERN.match(token) is not None
-        or token.startswith(config.AGENT_TOKEN_PREFIX)
-    )
+    return is_agent_credential(token)
 
 
 def _save_api_key(token: str) -> None:
@@ -500,6 +497,7 @@ def _login_without_the_check(ctx: click.Context, token: str, *, force: bool = Fa
     """Fall back to the credential's prefix when the relay cannot classify it."""
     if token.startswith(config.AGENT_TOKEN_PREFIX):
         _save_agent_token(ctx, token, force=force)
+        console.print("[dim]Could not check this token's kind with the server.[/dim]")
         return
     _save_api_key(token)
     console.print(
