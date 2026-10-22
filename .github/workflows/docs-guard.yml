@@ -28,3 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/docs-guard
+
+  public-hygiene:
+    # Fork PRs run PR-head code: keep them off the self-hosted pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'arc-runner-hle-client' }}
+    timeout-minutes: 5
+    container:
+      image: python:3.12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The container user differs from the checkout's owner; without this,
+      # git grep refuses the repo ("dubious ownership").
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: bash scripts/check-public-hygiene.sh
