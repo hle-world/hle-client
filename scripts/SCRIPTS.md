@@ -5,6 +5,7 @@
 | `scripts/release.sh` | Bump the version everywhere, add a CHANGELOG entry, open a release PR. Merging the PR creates the GitHub release, which publishes to PyPI and updates Homebrew. | `<version>` `--dry-run` `--tag` |
 | `scripts/capture_wire_baseline.py` | Snapshot the JSON every wire model produces, for protocol compatibility checking. The output is the fixture `tests/unit/test_wire_compat.py` asserts against. | `-o/--output <path>` |
 | `scripts/pre-commit` | Git hook: lint and format checks before a commit. | — |
+| `scripts/check-public-hygiene.sh` | Fail if the tree contains private infrastructure details (private repo names, LAN IPs, session URLs). | — |
 
 ## Regenerating the wire baseline
 
