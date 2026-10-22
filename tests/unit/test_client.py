@@ -792,6 +792,75 @@ class TestTunnelRegistrationHandshake:
         assert reg_msg.payload["service_url"] == "http://h:80/"
         assert "u:p" not in sent_messages[0]
 
+    async def _capture_registration_payload(self, tunnel: Tunnel) -> dict:
+        """Drive a handshake and return the registration payload the client sent."""
+        mock_ws = AsyncMock()
+        sent_messages: list[str] = []
+        mock_ws.send = AsyncMock(side_effect=lambda m: sent_messages.append(m))
+        ack = ProtocolMessage(
+            type=MessageType.TUNNEL_ACK,
+            payload={
+                "tunnel_id": "t-reg",
+                "subdomain": "reg-abc",
+                "public_url": "https://reg-abc.hle.world",
+                "websocket_enabled": True,
+                "user_code": "abc",
+                "service_label": tunnel.config.service_label,
+            },
+        )
+        mock_ws.recv = AsyncMock(return_value=ack.model_dump_json())
+        mock_ws.__aiter__ = MagicMock(return_value=_AsyncIter([]))
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("hle_client.tunnel.websockets.connect", return_value=mock_ctx):
+            await tunnel._proxy.start()
+            await tunnel._connect_once()
+            await tunnel._proxy.stop()
+
+        reg_msg = ProtocolMessage.model_validate_json(sent_messages[0])
+        assert reg_msg.payload is not None
+        return reg_msg.payload
+
+    async def test_registration_registers_presented_upstream_host(self):
+        # Dial the pinned ClusterIP but present the authority the upstream sees,
+        # so the relay can rewrite absolute redirects back to the tunnel.
+        tunnel = _tunnel(
+            service_url="http://10.43.0.10:32400",
+            service_label="plex",
+            api_key="hle_testkey_upstream_host",
+            upstream_host="plex.ns.svc:32400",
+        )
+
+        payload = await self._capture_registration_payload(tunnel)
+
+        assert payload["service_url"] == "http://plex.ns.svc:32400"
+
+    async def test_registration_without_upstream_host_is_unchanged(self):
+        tunnel = _tunnel(
+            service_url="http://10.43.0.10:32400",
+            service_label="plex",
+            api_key="hle_testkey_no_upstream_host",
+        )
+
+        payload = await self._capture_registration_payload(tunnel)
+
+        assert payload["service_url"] == "http://10.43.0.10:32400"
+
+    async def test_registration_with_upstream_host_keeps_path(self):
+        tunnel = _tunnel(
+            service_url="http://10.0.0.1:8080/app",
+            service_label="app",
+            api_key="hle_testkey_upstream_path",
+            upstream_host="app.ns.svc:8080",
+        )
+
+        payload = await self._capture_registration_payload(tunnel)
+
+        assert payload["service_url"] == "http://app.ns.svc:8080/app"
+
     async def test_wrong_ack_type_raises(self):
         tunnel = _tunnel(api_key="hle_testkey_for_bad_ack", service_label="test")
 
