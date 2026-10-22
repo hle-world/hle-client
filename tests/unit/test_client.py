@@ -14,7 +14,12 @@ import pytest
 import websockets.exceptions
 from websockets.frames import Close
 
-from hle_client.proxy import LocalProxy, ProxyConfig
+from hle_client.proxy import (
+    CONTENT_LENGTH_HEADER,
+    LocalProxy,
+    ProxyConfig,
+    _collect_response_headers,
+)
 from hle_client.tunnel import Tunnel, TunnelConfig, TunnelFatalError, _validated_webhook_path
 from hle_common.models import (
     ProxiedHttpRequest,
@@ -514,6 +519,113 @@ class TestLocalProxyForwardHttp:
 
         assert status == 502
         assert b"Bad Gateway" in body
+        await proxy.stop()
+
+
+class _MockStreamResponse:
+    """Minimal async-context httpx stream response for stubbing."""
+
+    def __init__(self, status_code: int, raw: list[tuple[bytes, bytes]]) -> None:
+        self.status_code = status_code
+        self.headers = httpx.Headers(raw)
+
+    async def aiter_bytes(self, chunk_size: int):
+        yield b"body"
+
+    async def __aenter__(self) -> _MockStreamResponse:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class TestLocalProxyContentLength:
+    async def test_unencoded_content_length_is_forwarded(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response(200, {"content-length": "1234"})
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        _, headers, _ = await proxy.forward_http(method="GET", path="/file", headers={})
+
+        assert headers[CONTENT_LENGTH_HEADER] == "1234"
+        assert "content-length" not in headers
+        await proxy.stop()
+
+    async def test_content_encoding_gzip_suppresses_the_header(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response(
+            200, {"content-length": "1234", "content-encoding": "gzip"}
+        )
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        _, headers, _ = await proxy.forward_http(method="GET", path="/file", headers={})
+
+        assert CONTENT_LENGTH_HEADER not in headers
+        assert "content-length" not in headers
+        await proxy.stop()
+
+    async def test_identity_encoding_still_forwards(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response(
+            200, {"content-length": "42", "content-encoding": "identity"}
+        )
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        _, headers, _ = await proxy.forward_http(method="GET", path="/file", headers={})
+
+        assert headers[CONTENT_LENGTH_HEADER] == "42"
+        await proxy.stop()
+
+    async def test_upstream_supplied_header_is_stripped(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response(200, {CONTENT_LENGTH_HEADER: "999"})
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        _, headers, _ = await proxy.forward_http(method="GET", path="/file", headers={})
+
+        assert CONTENT_LENGTH_HEADER not in headers
+        await proxy.stop()
+
+    async def test_non_numeric_content_length_is_dropped(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        mock_resp = _mock_httpx_response(200, {"content-length": "abc"})
+        proxy._http_client.request = AsyncMock(return_value=mock_resp)
+
+        _, headers, _ = await proxy.forward_http(method="GET", path="/file", headers={})
+
+        assert CONTENT_LENGTH_HEADER not in headers
+        await proxy.stop()
+
+    def test_duplicate_content_length_is_dropped(self):
+        headers = _collect_response_headers(
+            [(b"content-length", b"10"), (b"content-length", b"10")]
+        )
+        assert CONTENT_LENGTH_HEADER not in headers
+
+    async def test_streamed_response_forwards_the_length(self):
+        proxy = _proxy()
+        await proxy.start()
+
+        raw = [(b"content-length", b"1234"), (b"content-type", b"text/plain")]
+        proxy._http_client.stream = MagicMock(return_value=_MockStreamResponse(200, raw))
+
+        yields = [item async for item in proxy.stream_http(method="GET", path="/file", headers={})]
+
+        status, headers, _ = yields[0]
+        assert status == 200
+        assert headers is not None
+        assert headers[CONTENT_LENGTH_HEADER] == "1234"
+        assert "content-length" not in headers
         await proxy.stop()
 
 

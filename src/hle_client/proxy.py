@@ -41,10 +41,24 @@ def upstream_chunk_size() -> int:
     return size if size > 0 else DEFAULT_HTTP_CHUNK_SIZE
 
 
-# Headers to strip from responses before sending back through the tunnel.
+# Headers to strip from responses before sending back through the tunnel. An
+# upstream-supplied ``x-hle-content-length`` is stripped too, so only our own
+# (see ``CONTENT_LENGTH_HEADER``) ever reaches the relay.
 _STRIP_RESPONSE_HEADERS = frozenset(
-    {"content-encoding", "content-length", "transfer-encoding", "connection"}
+    {
+        "content-encoding",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "x-hle-content-length",
+    }
 )
+
+# Header carrying the upstream body length back to the relay. ``content-length``
+# itself is stripped (the body is re-chunked after httpx decodes it), but the
+# relay needs the size of an unencoded body to resume a large download in byte
+# ranges when the viewer is slow.
+CONTENT_LENGTH_HEADER = "x-hle-content-length"
 
 # Marker header attached to synthetic upstream-error responses (502/504) so the
 # tunnel layer can emit a diagnostic and strip it before the response reaches
@@ -218,13 +232,26 @@ def _collect_response_headers(
 
     Single-value headers are stored as plain strings.  Headers that appear
     more than once are stored as a list of strings.
+
+    A single, digit-only upstream ``content-length`` is forwarded as
+    ``x-hle-content-length`` when the body is unencoded (no
+    ``content-encoding``, or ``identity``). Any upstream ``x-hle-content-length``
+    is dropped.
     """
     result: dict[str, str | list[str]] = {}
+    content_lengths: list[str] = []
+    encodings: list[str] = []
     for raw_name, raw_value in raw_headers:
         name = raw_name.decode("latin-1").lower()
+        value = raw_value.decode("latin-1")
+        if name == "content-length":
+            content_lengths.append(value)
+            continue
+        if name == "content-encoding":
+            encodings.append(value)
+            continue
         if name in _STRIP_RESPONSE_HEADERS:
             continue
-        value = raw_value.decode("latin-1")
         existing = result.get(name)
         if existing is None:
             result[name] = value
@@ -232,6 +259,13 @@ def _collect_response_headers(
             existing.append(value)
         else:
             result[name] = [existing, value]
+
+    if len(content_lengths) == 1:
+        length = content_lengths[0]
+        if length.isascii() and length.isdigit() and 1 <= len(length) <= 18:
+            unencoded = all(enc.strip().lower() == "identity" for enc in encodings)
+            if unencoded:
+                result[CONTENT_LENGTH_HEADER] = length
     return result
 
 
