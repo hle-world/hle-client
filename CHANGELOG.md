@@ -2,7 +2,15 @@
 
 ## v2610.16 — 2026-10-22
 
-<!-- TODO: Fill in release notes before merging -->
+### Security
+
+- PyPI releases carry provenance again. Since 1.5.0 the package was uploaded
+  with an API token, which PyPI cannot attest, so PyPI showed "Loss of
+  provenance". Uploads now use Trusted Publishing with PEP 740 attestations,
+  and the release fails if PyPI shows no provenance for the new files
+  (hle-client#248). Earlier releases were checked: each matches a GitHub
+  release, and the 2610.15 wheel is file-for-file identical to a build from
+  its tag. No client code changed in this release.
 
 ## v2610.15 — 2026-10-22
 
