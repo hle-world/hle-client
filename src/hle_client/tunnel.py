@@ -251,6 +251,23 @@ def _sanitize_ws_url(url: str) -> str:
     return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
 
 
+def _registered_service_url(config: TunnelConfig) -> str:
+    """The URL the upstream actually sees, for the registration message.
+
+    When a tunnel dials a pinned address but presents another authority
+    (``upstream_host``), the relay rewrites an upstream redirect back to the
+    tunnel only when the redirect's host matches the registered
+    ``service_url``. Apps build absolute redirects from the Host they were
+    given, so register that presented authority — keeping scheme, path,
+    params, query and fragment. Without ``upstream_host`` the configured
+    ``service_url`` is registered unchanged.
+    """
+    if not config.upstream_host:
+        return config.service_url
+    parsed = urlparse(config.service_url)
+    return urlunparse(parsed._replace(netloc=config.upstream_host))
+
+
 def _upstream_connect_diagnostics(url: str, exc: BaseException) -> dict[str, Any]:
     """Structured diagnostics for a failed upstream WS connect.
 
@@ -870,7 +887,7 @@ class Tunnel:
 
             # --- Registration handshake ---
             registration = TunnelRegistration(
-                service_url=self.config.service_url,
+                service_url=_registered_service_url(self.config),
                 service_label=self.config.service_label,
                 api_key=api_key,
                 client_version=__version__,
@@ -1419,11 +1436,10 @@ class Tunnel:
         parsed = urlparse(self.config.service_url)
         canonical_host = parsed.hostname or ""
         canonical_port = parsed.port
-        presented_url = self.config.service_url
+        presented_url = _registered_service_url(self.config)
         # Origin never carries userinfo; strip it from the authority.
         origin_netloc = parsed.netloc.rpartition("@")[2]
         if self.config.upstream_host:
-            presented_url = urlunparse(parsed._replace(netloc=self.config.upstream_host))
             origin_netloc = self.config.upstream_host
         local_ws_url = _build_local_ws_url(presented_url, open_req.path)
         if local_ws_url is None:
