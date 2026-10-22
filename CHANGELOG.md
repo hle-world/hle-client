@@ -1,5 +1,19 @@
 # Changelog
 
+## v2610.17 — 2026-10-22
+
+### Fixed
+
+- Large downloads through a tunnel finish for slow viewers. The client
+  re-streams a decoded body, so it drops `Content-Length`. Without it, the
+  relay's range paging (hle v2610.39) never engaged, and a big file such as
+  an Audiobookshelf book was cut off at the relay's per-stream cap. The
+  client now passes the upstream length to the relay as
+  `x-hle-content-length` when the body is not content-encoded. The relay
+  uses it to page any file type and never shows it to the viewer
+  (hle-client#251). Relays from v2610.43 on already page common binary
+  downloads without it.
+
 ## v2610.16 — 2026-10-22
 
 ### Security
