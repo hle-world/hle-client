@@ -151,6 +151,9 @@ jobs:
     # `needs` context only exposes direct dependencies, and the matrix below
     # reads the plugin list from `needs.build.outputs.plugins`.
     needs: [publish, build]
+    # Same fork guard as `publish`; and an empty plugin list would be an empty
+    # matrix, which GitHub rejects as an error rather than skipping.
+    if: github.repository == 'hle-world/hle-client' && needs.build.outputs.plugins != '[]'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
