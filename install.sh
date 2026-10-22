@@ -521,6 +521,14 @@ agent_enroll_supports() {
     hle agent enroll --help 2>/dev/null | grep -q -- "$1"
 }
 
+# True when an agent token is already configured. `hle agent status` exits 0
+# whether or not one exists — "no token" is an answer, not a failure — so the
+# output is what tells the two apart. Older clients printed the same line and
+# exited 1, so matching the text keeps them working too.
+agent_is_enrolled() {
+    ! hle agent status 2>/dev/null | grep -q "No agent token"
+}
+
 # Enroll this machine as an agent. The token is piped to `hle agent enroll
 # --stdin`, which checks its shape and writes ~/.config/hle/agent.toml (0600),
 # so the token never lands in a command line that `ps` can read. It is never
@@ -551,7 +559,7 @@ agent_enroll() {
     # the common case, and demanding a fresh token for it is both pointless and
     # unanswerable — the token is shown once, at creation, and re-enrolling
     # against a new one abandons the agent identity the dashboard knows.
-    if hle agent status >/dev/null 2>&1; then
+    if agent_is_enrolled; then
         info "This machine is already enrolled — keeping its existing agent token."
         return 0
     fi
@@ -617,7 +625,7 @@ setup_agent() {
     # forever, logging "No agent token" while `service ... status` reports a
     # healthy pid, so the install looks successful and the agent never
     # connects. Better to stop here and say so.
-    if ! hle agent status >/dev/null 2>&1; then
+    if ! agent_is_enrolled; then
         error "Enrollment reported success but no agent token is readable."
         error "Not installing the service: it would restart forever without one."
         error "Retry with:  hle agent enroll"
