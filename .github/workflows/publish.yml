@@ -29,27 +29,96 @@ jobs:
       - name: Test
         run: pytest tests/ -v
 
-  publish:
+  # Build on the ARC runner, where the repository and container image already
+  # are. Uploading is split out below so the upload runs on a GitHub-hosted
+  # runner: Trusted Publishing (OIDC → PEP 740 attestations) needs a runner
+  # PyPI trusts, and the Docker-based publish action does not run inside an
+  # ARC container job.
+  build:
+    name: Build distributions
     needs: test
     runs-on: arc-runner-hle-client
     container:
       image: python:3.13-slim
-    environment: pypi
+    outputs:
+      plugins: ${{ steps.plugins.outputs.plugins }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install build and publish tools
-        run: pip install build twine
+      - name: Install build
+        run: pip install build
 
       - name: Build sdist and wheel
         run: python -m build
 
+      - name: Build each plugin
+        run: |
+          # POSIX sh: these steps run under `sh -e`, so no `shopt`. An
+          # unmatched glob stays literal, which the -d test catches.
+          set -eu
+          for plugin in plugins/*/; do
+            [ -d "$plugin" ] || continue
+            [ -f "${plugin}pyproject.toml" ] || continue
+            name=$(basename "$plugin")
+            echo "::group::${name}"
+            python -m build --outdir "dist-plugins/${name}" "$plugin"
+            echo "::endgroup::"
+          done
+
+      - name: List plugins for the publish matrix
+        id: plugins
+        run: |
+          set -eu
+          list="["
+          sep=""
+          for dir in dist-plugins/*/; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            list="${list}${sep}\"${name}\""
+            sep=","
+          done
+          list="${list}]"
+          echo "plugins=${list}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload core distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-dist
+          path: dist/
+          if-no-files-found: error
+
+      - name: Upload plugin distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin-dist
+          path: dist-plugins/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    # Trusted Publishing is configured against this repository only; a fork
+    # cannot have it, so it must not try to upload.
+    if: github.repository == 'hle-world/hle-client'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download core distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: core-dist
+          path: dist/
+
+      # No password: the action mints a short-lived token from the OIDC
+      # identity and attaches PEP 740 attestations to every uploaded file.
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          attestations: true
 
       # PyPI upload succeeding does NOT mean the version is installable yet —
       # the CDN/index takes a bit to propagate. Downstream repos (hle-webapp →
@@ -78,60 +147,87 @@ jobs:
     name: Publish plugins to PyPI
     # After the core, because a plugin depends on the client version being
     # released here. Publishing it first would put a package on PyPI whose
-    # dependency does not exist yet.
-    needs: publish
-    runs-on: arc-runner-hle-client
-    container:
-      image: python:3.13-slim
+    # dependency does not exist yet. `build` is also a direct need because the
+    # `needs` context only exposes direct dependencies, and the matrix below
+    # reads the plugin list from `needs.build.outputs.plugins`.
+    needs: [publish, build]
+    # Same fork guard as `publish`; and an empty plugin list would be an empty
+    # matrix, which GitHub rejects as an error rather than skipping.
+    if: github.repository == 'hle-world/hle-client' && needs.build.outputs.plugins != '[]'
+    runs-on: ubuntu-latest
     environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.build.outputs.plugins) }}
+    # A plugin without a Trusted Publisher configured fails only its own leg.
+    # The core release is what this workflow exists to ship, and it is already
+    # on PyPI by the time this runs; a plugin miss must not mark it failed.
+    continue-on-error: true
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download plugin distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plugin-dist
+          path: dist-plugins/
 
-      - name: Install build and publish tools
-        run: pip install build twine
+      - name: Publish ${{ matrix.plugin }} to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist-plugins/${{ matrix.plugin }}/
+          # A plugin at a version already on PyPI is not an error: the core
+          # releases more often than a plugin changes.
+          skip-existing: true
 
-      - name: Build and publish each plugin
+  # The regression guard: a release published without attestations is exactly
+  # what this workflow was changed to stop. The integrity API is the same data
+  # PyPI shows as "Verified", so if it is 200 here, the badge is green there.
+  verify-provenance:
+    name: Verify PyPI provenance
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download core distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: core-dist
+          path: dist/
+
+      - name: Check each file has provenance
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          # POSIX sh: these steps run under `sh -e`, so no `shopt`. An
-          # unmatched glob stays literal, which the -d test catches.
           set -eu
-          failed=""
-          for plugin in plugins/*/; do
-            [ -d "$plugin" ] || continue
-            [ -f "${plugin}pyproject.toml" ] || continue
-            name=$(basename "$plugin")
-            echo "::group::${name}"
-            # A plugin at a version already on PyPI is not an error: the core
-            # releases more often than a plugin changes, and re-uploading the
-            # same version fails the whole job for no reason.
-            python -m build --outdir "dist-${name}" "$plugin"
-            # A 403 here is almost always the token's scope, not a broken
-            # build: PYPI_API_TOKEN is scoped to hle-client, and a
-            # project-scoped token cannot create a project that does not exist
-            # yet. That is a one-time setup step for a new plugin, and it must
-            # not mark the core release — already published by the job above —
-            # as failed.
-            if ! twine upload --skip-existing "dist-${name}"/*; then
-              echo "::warning::Could not upload ${name}. If it is new to PyPI, the"\
-                   "release token is scoped to hle-client and cannot create it:"\
-                   "reserve the name with an account-scoped token once, or"\
-                   "configure Trusted Publishing for ${name}."
-              failed="${failed} ${name}"
+          VERSION="${RELEASE_TAG#v}"
+          for file in dist/*; do
+            [ -f "$file" ] || continue
+            filename=$(basename "$file")
+            url="https://pypi.org/integrity/hle-client/${VERSION}/${filename}/provenance"
+            echo "Checking ${url}"
+            ok=""
+            # Propagation lags the upload; give it ~5 minutes before failing.
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' \
+                -H 'Accept: application/vnd.pypi.integrity.v1+json' \
+                "$url")
+              if [ "$code" = "200" ]; then
+                echo "${filename}: provenance OK after attempt ${i}."
+                ok="yes"
+                break
+              fi
+              echo "  ${filename}: HTTP ${code} (attempt ${i}/30); sleeping 10s..."
+              sleep 10
+            done
+            if [ -z "$ok" ]; then
+              echo "::error::No provenance for ${filename} after ~5 minutes"
+              exit 1
             fi
-            echo "::endgroup::"
           done
-
-          # Reported in the summary rather than as a failed job. The core
-          # release is what this workflow exists to ship, and it is already on
-          # PyPI by the time this runs; failing here would call a good release
-          # bad. The warnings above say which plugin and why.
-          if [ -n "${failed}" ]; then
-            echo "Plugins not published:${failed}" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
   notify-operator:
     name: Notify hle-operator
