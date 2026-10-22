@@ -2,7 +2,18 @@
 
 ## v2610.15 — 2026-10-22
 
-<!-- TODO: Fill in release notes before merging -->
+### Fixed
+
+- The installer (`get.hle.world`, `--agent`) no longer claims a machine is
+  already enrolled when it has no agent token. It used `hle agent status`'s
+  exit code, which is 0 either way, so it skipped the token prompt and the
+  service then failed with "No agent token". It now reads the output, so an
+  interactive install asks for the token again (hle-client#245).
+- pfSense: `service hle_agent start` refused with "Cannot 'start' hle_agent …
+  use 'onestart'" on boxes where `/etc/rc.conf.local` is not read. The enable
+  flag is now also written to `/etc/rc.conf.d/hle_agent` (removed on
+  uninstall), and the service install falls back to `onestart` if `start`
+  still refuses (hle-client#245).
 
 ## v2610.14 — 2026-10-22
 
