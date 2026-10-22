@@ -372,7 +372,8 @@ def _run_agent_enroll(
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     log = tmp_path / "hle.log"
     source = INSTALL_SH.read_text()
-    funcs = _extract_function(source, "agent_enroll")
+    funcs = "\n\n".join(_extract_function(source, f) for f in ("agent_is_enrolled", "agent_enroll"))
+    status = "return 0" if enrolled else 'echo "No agent token configured"; return 1'
     body = (
         "info() { :; }\n"
         "warn() { :; }\n"
@@ -381,7 +382,7 @@ def _run_agent_enroll(
         "hle() {\n"
         '    echo "$@" >> "$LOG"\n'
         '    if [ "$1" = "agent" ] && [ "$2" = "status" ]; then\n'
-        f"        return {0 if enrolled else 1}\n"
+        f"        {status}\n"
         "    fi\n"
         "    return 0\n"
         "}\n"
@@ -475,3 +476,61 @@ class TestAgentEnrollName:
         result, logged = _run_agent_enroll(tmp_path, name="laptop", enrolled=True)
         assert result.returncode == 0, result.stderr
         assert logged.strip() == "agent status"
+
+
+def _run_agent_enroll_no_name(
+    tmp_path: Path, *, status_output: str, status_code: int
+) -> subprocess.CompletedProcess[str]:
+    """Run agent_enroll with no token, no name and no terminal.
+
+    `hle agent status` exits 0 whether or not a token exists, so the output is
+    the only thing that tells the two apart. The stub prints *status_output*.
+    """
+    funcs = "\n\n".join(
+        _extract_function(INSTALL_SH.read_text(), f) for f in ("agent_is_enrolled", "agent_enroll")
+    )
+    body = (
+        'info() { printf "INFO %s\\n" "$1"; }\n'
+        'warn() { printf "WARN %s\\n" "$1" >&2; }\n'
+        "has_tty() { return 1; }\n"
+        "hle() {\n"
+        '    if [ "$1" = "agent" ] && [ "$2" = "status" ]; then\n'
+        f"        printf '%s\\n' '{status_output}'\n"
+        f"        return {status_code}\n"
+        "    fi\n"
+        "    return 0\n"
+        "}\n"
+        "AGENT_TOKEN=''\nAGENT_NAME=''\nagent_enroll\n"
+    )
+    return subprocess.run(  # noqa: S603 — fixed argv, local script
+        ["sh", "-c", f"{funcs}\n{body}", "install.sh"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+class TestAgentEnrollDetectsAMissingToken:
+    def test_no_token_output_is_not_enrolled(self, tmp_path):
+        """Exits 0 with no token; the installer must not read that as enrolled."""
+        result = _run_agent_enroll_no_name(
+            tmp_path, status_output="No agent token configured", status_code=0
+        )
+        assert result.returncode != 0
+        assert "already enrolled" not in result.stdout + result.stderr
+        assert "no terminal to prompt on" in result.stderr
+
+    def test_a_configured_token_is_enrolled(self, tmp_path):
+        result = _run_agent_enroll_no_name(
+            tmp_path, status_output="Token: hlea_xxxx", status_code=0
+        )
+        assert result.returncode == 0
+        assert "already enrolled" in result.stdout
+
+    def test_an_older_client_exiting_1_is_still_not_enrolled(self, tmp_path):
+        """Older clients printed the same line and exited 1."""
+        result = _run_agent_enroll_no_name(
+            tmp_path, status_output="No agent token configured", status_code=1
+        )
+        assert result.returncode != 0
+        assert "already enrolled" not in result.stdout + result.stderr

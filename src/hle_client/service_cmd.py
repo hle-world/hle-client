@@ -72,6 +72,11 @@ _RCD_DIR = Path("/usr/local/etc/rc.d")
 _PLATFORM_FILE = Path("/etc/platform")
 # pfSense keeps local service settings here, not in the global rc.conf.
 _RC_CONF_LOCAL = Path("/etc/rc.conf.local")
+# Per-service rc.conf fragment. `load_rc_config <name>` always sources
+# /etc/rc.conf.d/<name> for that service — on every FreeBSD, before the rc
+# script runs — and pfSense does not regenerate it. Unlike rc.conf.local,
+# which load_rc_config may not read, this is what `service <svc> start` sees.
+_RC_CONF_D = Path("/etc/rc.conf.d")
 # The global file. pfSense rewrites it from config.xml, so a flag an older
 # install wrote here does not survive; ensure_pfsense_boot_hook moves it out.
 _RC_CONF = Path("/etc/rc.conf")
@@ -1454,6 +1459,42 @@ def _rc_conf_sets(path: Path, var: str, value: str = "YES") -> bool:
     return pattern.search(text) is not None
 
 
+def _rc_conf_d_path(svc: str) -> Path:
+    return _RC_CONF_D / svc
+
+
+def _write_rc_conf_d(svc: str) -> bool:
+    """Write the enable flag where ``load_rc_config`` is sure to read it.
+
+    Returns whether it wrote. ``load_rc_config <name>`` sources
+    ``/etc/rc.conf.d/<name>`` for that service on every FreeBSD, and pfSense
+    does not regenerate it, so this is what makes ``service <svc> start``
+    accept a service that ``rc.conf.local`` did not enable.
+    """
+    var = f"{svc}_enable"
+    path = _rc_conf_d_path(svc)
+    if _rc_conf_sets(path, var):
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_service_file(path, f'{var}="YES"\n', private=False)
+    except PermissionError:
+        raise HleError(
+            f"Permission denied writing {path}.",
+            hint="Re-run as root (rc.d has no per-user services).",
+        ) from None
+    return True
+
+
+def _remove_rc_conf_d(svc: str) -> None:
+    """Delete a service's ``rc.conf.d`` fragment, tolerating one already gone."""
+    path = _rc_conf_d_path(svc)
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        raise HleError(f"Permission denied removing {path}.", hint="Re-run as root.") from None
+
+
 def ensure_pfsense_boot_hook(svc: str) -> bool:
     """Make pfSense start ``svc`` at boot, healing an install older than 2610.6.
 
@@ -1489,6 +1530,11 @@ def ensure_pfsense_boot_hook(svc: str) -> bool:
     var = f"{svc}_enable"
     if not _rc_conf_sets(_RC_CONF_LOCAL, var):
         _sysrc(f"{var}=YES", "-f", str(_RC_CONF_LOCAL))
+        changed = True
+    # Also write it where load_rc_config is certain to read it, so `service
+    # <svc> start` does not refuse with "not enabled" on a box whose rc.conf.local
+    # is not sourced.
+    if _write_rc_conf_d(svc):
         changed = True
     if _rc_conf_sets(_RC_CONF, var):
         _sysrc(var, "-x")
@@ -1613,11 +1659,60 @@ def _legacy_agent_spec(name: str, user_mode: bool) -> dict[str, Any] | None:
     }
 
 
+def _write_stream(stream: Any, data: bytes) -> None:
+    """Write captured *data* to *stream*, binary if it has a buffer."""
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        buffer.write(data)
+        buffer.flush()
+    else:
+        stream.write(data.decode(errors="replace"))
+        stream.flush()
+
+
+def _replay_output(result: subprocess.CompletedProcess[bytes]) -> None:
+    """Write a captured command's output back to this process's streams.
+
+    Used by :func:`_service_cmd`, which captures so a caller can read rc.subr's
+    message — the "not enabled" refusal, in particular — without hiding it from
+    the user.
+    """
+    stdout = getattr(result, "stdout", None)
+    if stdout:
+        _write_stream(sys.stdout, stdout)
+    stderr = getattr(result, "stderr", None)
+    if stderr:
+        _write_stream(sys.stderr, stderr)
+
+
 def _service_cmd(*args: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["service", *args], check=False)  # noqa: S603 — argv built internally
+    """Run ``service <args>``, echoing its output as if it were not captured."""
+    result = subprocess.run(  # noqa: S603 — argv built internally
+        ["service", *args], check=False, capture_output=True
+    )
+    _replay_output(result)
+    return result
 
 
-def _rcd_restart_outside_session(svc: str) -> subprocess.CompletedProcess[bytes]:
+def _rcd_start(svc: str) -> subprocess.CompletedProcess[bytes]:
+    """Start *svc*, falling back to ``onestart`` when rc.d says it is not enabled.
+
+    On pfSense ``load_rc_config`` may not read the file the enable flag was
+    written to, so ``service <svc> start`` refuses even though the boot hook
+    starts the service fine. ``onestart`` skips the enable check; retry only
+    when rc.subr names it, so a genuine start failure is not papered over.
+    """
+    result = _service_cmd(svc, "start")
+    stderr = getattr(result, "stderr", b"")
+    if result.returncode != 0 and is_pfsense() and b"onestart" in stderr:
+        console.print(f"[yellow]{svc} is not enabled for `start`; using onestart.[/yellow]")
+        result = _service_cmd(svc, "onestart")
+    return result
+
+
+def _rcd_restart_outside_session(
+    svc: str, *, onestart: bool = False
+) -> subprocess.CompletedProcess[bytes]:
     """``service <svc> restart`` in its own session, with no terminal attached.
 
     On a firewall the agent usually carries the tunnel the operator reached the
@@ -1626,9 +1721,12 @@ def _rcd_restart_outside_session(svc: str) -> subprocess.CompletedProcess[bytes]
     down and the box unreachable (see ``restart_service``). A new session and no
     inherited stdio means the hangup, and a closed pipe, cannot reach it; it
     still runs to completion so the exit code is real.
+
+    ``onestart`` uses ``onerestart``, which skips the enable check on pfSense
+    where ``restart`` would refuse with "not enabled".
     """
     return subprocess.run(  # noqa: S603 — argv built internally
-        ["service", svc, "restart"],
+        ["service", svc, "onerestart" if onestart else "restart"],
         check=False,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
@@ -1765,8 +1863,10 @@ def _rcd_install(
         # install) as before.
         if _rcd_running(svc):
             result = _rcd_restart_outside_session(svc)
+            if result.returncode != 0 and is_pfsense():
+                result = _rcd_restart_outside_session(svc, onestart=True)
         else:
-            result = _service_cmd(svc, "start")
+            result = _rcd_start(svc)
         if result.returncode == 0 and _rcd_settles(svc):
             console.print(f"[green]Started[/green] {svc}")
         else:
@@ -1784,6 +1884,7 @@ def _rcd_uninstall(*, label: str, name: str | None) -> None:
     _sysrc(f"{svc}_enable", "-x")
     if is_pfsense():
         _sysrc(f"{svc}_enable", "-x", "-f", str(_RC_CONF_LOCAL))
+        _remove_rc_conf_d(svc)
         hook = _rcd_path(f"{svc}.sh")
         try:
             hook.unlink(missing_ok=True)

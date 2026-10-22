@@ -206,6 +206,7 @@ class TestIsPfSense:
 class TestPfSenseBootHook:
     def _install(self, tmp_path, monkeypatch, *, pfsense: bool) -> None:
         monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "_RC_CONF_D", tmp_path / "rc.conf.d")
         monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/local/bin/hle")
         monkeypatch.setattr(service_cmd, "is_pfsense", lambda: pfsense)
         monkeypatch.setattr(service_cmd, "_sysrc", lambda *a: None)
@@ -242,6 +243,7 @@ class TestPfSenseBootHook:
     def test_install_on_pfsense_enables_through_the_local_rc_conf(self, tmp_path, monkeypatch):
         calls: list[tuple[str, ...]] = []
         monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "_RC_CONF_D", tmp_path / "rc.conf.d")
         monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/local/bin/hle")
         monkeypatch.setattr(service_cmd, "is_pfsense", lambda: True)
         monkeypatch.setattr(service_cmd, "_sysrc", lambda *a: calls.append(a))
@@ -249,6 +251,7 @@ class TestPfSenseBootHook:
             label="agent", run_args=build_agent_args(), name=None, run_as=None, start=False
         )
         assert ("hle_agent_enable=YES", "-f", str(service_cmd._RC_CONF_LOCAL)) in calls
+        assert (tmp_path / "rc.conf.d" / "hle_agent").read_text() == 'hle_agent_enable="YES"\n'
 
     def test_install_on_freebsd_writes_no_hook_and_keeps_the_plain_enable(
         self, tmp_path, monkeypatch
@@ -267,10 +270,13 @@ class TestPfSenseBootHook:
 
     def test_uninstall_on_pfsense_removes_both_scripts(self, tmp_path, monkeypatch):
         self._install(tmp_path, monkeypatch, pfsense=True)
+        fragment = tmp_path / "rc.conf.d" / "hle_agent"
+        assert fragment.exists()
         monkeypatch.setattr(service_cmd, "_service_cmd", lambda *a: _Result(0))
         service_cmd._rcd_uninstall(label="agent", name=None)
         assert not (tmp_path / "hle_agent").exists()
         assert not (tmp_path / "hle_agent.sh").exists()
+        assert not fragment.exists()
 
     def test_refresh_rewrites_the_wrapper(self, tmp_path, monkeypatch):
         self._install(tmp_path, monkeypatch, pfsense=True)
@@ -355,6 +361,54 @@ class TestRcdInstallRestartsARunningService:
             assert seen[stream] is subprocess.DEVNULL
 
 
+class TestRcdStartFallsBackToOnestart:
+    """`service <svc> start` refuses when rc.d says the service is not enabled.
+
+    pfSense may not read the file the enable flag was written to, so the install
+    falls back to `onestart`, which skips the enable check — but only when
+    rc.subr itself names it, so a real failure is not papered over.
+    """
+
+    class _Result:
+        def __init__(self, returncode: int = 0, stderr: bytes = b"") -> None:
+            self.returncode = returncode
+            self.stderr = stderr
+
+    def _start(
+        self, monkeypatch, *, pfsense: bool, results: list
+    ) -> tuple[object, list[tuple[str, ...]]]:
+        calls: list[tuple[str, ...]] = []
+        monkeypatch.setattr(service_cmd, "is_pfsense", lambda: pfsense)
+        queue = list(results)
+
+        def fake(*a):
+            calls.append(a)
+            return queue.pop(0)
+
+        monkeypatch.setattr(service_cmd, "_service_cmd", fake)
+        return service_cmd._rcd_start("hle_agent"), calls
+
+    def test_pfsense_not_enabled_retries_with_onestart(self, monkeypatch):
+        refusal = self._Result(1, b"Cannot 'start' hle_agent. ... use 'onestart' instead.")
+        result, calls = self._start(monkeypatch, pfsense=True, results=[refusal, self._Result(0)])
+        assert result.returncode == 0
+        assert calls == [("hle_agent", "start"), ("hle_agent", "onestart")]
+
+    def test_a_non_pfsense_failure_is_not_retried(self, monkeypatch):
+        result, calls = self._start(
+            monkeypatch, pfsense=False, results=[self._Result(1, b"use onestart")]
+        )
+        assert result.returncode == 1
+        assert calls == [("hle_agent", "start")]
+
+    def test_a_pfsense_failure_without_the_hint_is_not_retried(self, monkeypatch):
+        result, calls = self._start(
+            monkeypatch, pfsense=True, results=[self._Result(1, b"some other error")]
+        )
+        assert result.returncode == 1
+        assert calls == [("hle_agent", "start")]
+
+
 class TestRcScriptInterpreterGuard:
     """A venv whose interpreter is gone must not respawn every second.
 
@@ -400,6 +454,7 @@ class TestEnsurePfSenseBootHook:
         monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
         monkeypatch.setattr(service_cmd, "_RC_CONF", tmp_path / "rc.conf")
         monkeypatch.setattr(service_cmd, "_RC_CONF_LOCAL", tmp_path / "rc.conf.local")
+        monkeypatch.setattr(service_cmd, "_RC_CONF_D", tmp_path / "rc.conf.d")
         monkeypatch.setattr(service_cmd, "_sysrc", lambda *a: calls.append(a))
         return calls
 
@@ -416,8 +471,17 @@ class TestEnsurePfSenseBootHook:
         calls = self._setup(tmp_path, monkeypatch)
         (tmp_path / "hle_agent.sh").write_text(service_cmd.render_pfsense_boot_hook("hle_agent"))
         (tmp_path / "rc.conf.local").write_text('hle_agent_enable="YES"\n')
+        (tmp_path / "rc.conf.d").mkdir()
+        (tmp_path / "rc.conf.d" / "hle_agent").write_text('hle_agent_enable="YES"\n')
         assert service_cmd.ensure_pfsense_boot_hook("hle_agent") is False
         assert calls == []
+
+    def test_the_flag_is_also_written_where_load_rc_config_reads_it(self, tmp_path, monkeypatch):
+        """`load_rc_config` may not read rc.conf.local on pfSense, so the flag
+        also goes to /etc/rc.conf.d/<svc>, which it always sources."""
+        self._setup(tmp_path, monkeypatch)
+        assert service_cmd.ensure_pfsense_boot_hook("hle_agent") is True
+        assert (tmp_path / "rc.conf.d" / "hle_agent").read_text() == 'hle_agent_enable="YES"\n'
 
     def test_a_stale_hook_is_rewritten(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -545,6 +609,7 @@ class TestRefreshServiceHealsTheBootHook:
 
     def test_a_spec_less_pfsense_agent_is_rebuilt_from_its_script(self, tmp_path, monkeypatch):
         monkeypatch.setattr(service_cmd, "_RCD_DIR", tmp_path)
+        monkeypatch.setattr(service_cmd, "_RC_CONF_D", tmp_path / "rc.conf.d")
         monkeypatch.setattr(service_cmd, "current_platform", lambda: "freebsd")
         monkeypatch.setattr(service_cmd, "is_pfsense", lambda: True)
         monkeypatch.setattr(service_cmd, "_sysrc", lambda *a: None)
