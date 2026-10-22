@@ -1,12 +1,5 @@
 # Changelog
 
-## v2610.17 — 2026-10-22
-
-### Added
-
-- Forward the upstream body length (`x-hle-content-length`) for unencoded
-  responses so large downloads can resume in byte ranges (hle-client#251).
-
 ## v2610.16 — 2026-10-22
 
 ### Security
