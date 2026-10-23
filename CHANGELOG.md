@@ -1,5 +1,24 @@
 # Changelog
 
+## v2610.18 — 2026-10-23
+
+### Fixed
+
+- Apps behind the Kubernetes operator or k8s agent targets that redirect to
+  themselves (Plex's `/web`, for example) now load through the tunnel. Those
+  tunnels dial a pinned ClusterIP and present the Service's name as Host, but
+  registered the IP with the relay. The relay only rewrites an upstream's own
+  redirects when the host matches, so the browser was sent to an in-cluster
+  name it can't reach. The client now registers the presented URL; what it
+  dials is unchanged (hle-client#256).
+
+### Changed
+
+- CI fails if tracked files mention private repositories, the maintainer's
+  LAN or session URLs (`scripts/check-public-hygiene.sh`). The out-of-date
+  `SECURITY_AUDIT.md` (v1.15.0) was removed; `SECURITY.md` stays
+  (hle-client#254).
+
 ## v2610.17 — 2026-10-22
 
 ### Fixed
