@@ -1,23 +1,21 @@
 name: Security Scan
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   schedule:
+    # Nightly security scan — 03:00 UTC
+    - cron: '0 3 * * *'
     # Weekly security scan — Monday 06:00 UTC
     - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# See test.yml: a superseded run holding a slot on a small self-hosted pool is
-# what everything else queues behind. The scheduled weekly scan has no ref of
-# its own to collide with, so it is unaffected.
+# Scheduled and manual runs have no ref of their own to supersede, so each run
+# gets its own group and is never cancelled.
 concurrency:
-  group: security-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: security-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   bandit:
