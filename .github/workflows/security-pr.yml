@@ -33,6 +33,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Semgrep's --baseline-commit runs git in the container, which must trust
+      # the workspace.
+      - name: Trust the workspace
+        if: ${{ !cancelled() }}
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install Bandit
         if: ${{ !cancelled() }}
         run: pip install bandit[toml]
@@ -41,7 +47,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           bandit -r src/ \
-            -f json -o bandit-results.json \
+            -f json -o /tmp/bandit-results.json \
             --severity-level medium \
             --confidence-level medium \
             -s B101 \
@@ -50,10 +56,10 @@ jobs:
       - name: Display results
         if: ${{ !cancelled() }}
         run: |
-          if [ -f bandit-results.json ]; then
+          if [ -f /tmp/bandit-results.json ]; then
             python -c "
           import json, sys
-          data = json.load(open('bandit-results.json'))
+          data = json.load(open('/tmp/bandit-results.json'))
           results = data.get('results', [])
           if not results:
               print('No issues found.')
