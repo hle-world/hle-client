@@ -640,6 +640,18 @@ class TestHelloContent:
         assert hello["successor_of"] is None
         assert hello["successor_nonce"] is None
 
+    async def test_a_docker_install_from_a_versioned_layout_advertises_update_docker(
+        self, monkeypatch, tmp_path
+    ):
+        import hle_client.agent as agent_mod
+
+        # A Docker image that runs the agent from its own versioned layout can
+        # self-update like any installer agent; the capability says so.
+        monkeypatch.setattr(agent_mod, "detect_install_method", lambda: "docker")
+        hello = await self._hello_sent(monkeypatch, supported=True, home=tmp_path)
+        assert hello["install_method"] == "docker"
+        assert "update:docker" in hello["capabilities"]
+
     async def test_a_brew_install_says_so_but_claims_no_capability(self, monkeypatch, tmp_path):
         import hle_client.agent as agent_mod
 

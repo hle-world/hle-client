@@ -329,21 +329,30 @@ def can_self_update(
 ) -> UpdateSupport:
     """Classify this install and say whether the agent may update it.
 
-    Supported: the installer's venv (flat or versioned), pipx, uv. Everything
-    else is owned by something outside the process — a brew keg, a docker
-    image, the OS's Python — and the operator has to run that tool instead.
+    Supported: the installer's venv (flat or versioned), pipx, uv, and a
+    Docker image only when it runs the agent from that same versioned layout.
+    Everything else is owned by something outside the process — a brew keg, an
+    old docker image, the OS's Python — and the operator has to run that tool
+    instead.
     """
     if in_docker is None:
         in_docker = os.path.exists("/.dockerenv")
+    prefix = prefix or sys.prefix
+    executable = executable or sys.executable
     if in_docker:
+        # The image owns the version unless it runs the agent from the same
+        # versioned layout the installer does. `layout_home` is only non-None
+        # when the running interpreter (`sys.prefix`) lives inside that layout,
+        # so an old image that ships the agent in its system site-packages keeps
+        # reporting unsupported:docker.
+        if layout_home(prefix, home) is not None:
+            return UpdateSupport(True, "docker")
         return UpdateSupport(False, "docker", "unsupported:docker")
 
     # The classifier lives in the CLI module; imported here so this module
     # stays click-free at import time.
     from hle_client.update_cmd import PIPX, UV, VENV, detect_install_method
 
-    prefix = prefix or sys.prefix
-    executable = executable or sys.executable
     method = detect_install_method(prefix, executable)
     if method in (PIPX, UV):
         return UpdateSupport(True, method)

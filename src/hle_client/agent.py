@@ -36,6 +36,7 @@ from hle_client.proxy import sni_hostname_for
 from hle_client.tunnel import Tunnel, TunnelConfig, to_tunnel_config
 from hle_common import close_codes
 from hle_common.agent_protocol import (
+    EXIT_RESTART_FOR_UPDATE,
     HANDOVER_CAPABILITY,
     K8S_DECLARED_CAPABILITY,
     AgentHello,
@@ -520,7 +521,8 @@ class AgentClient:
         """Non-zero when the process must exit so its service manager relaunches it.
 
         Set after a self-update swapped ``current`` (the relaunch is the new
-        version) and after a watchdog rollback (the relaunch is the old one).
+        version) and after a watchdog rollback (the relaunch is the old one),
+        both as :data:`~hle_common.agent_protocol.EXIT_RESTART_FOR_UPDATE`.
         Non-zero on purpose: ``Restart=on-failure`` units would not come back
         from a clean exit, and ``Restart=always`` ones do either way.
         """
@@ -1284,7 +1286,10 @@ class AgentClient:
         self._successor_task = None
 
     async def _restart_process(self, ws: Any) -> None:
-        self._exit_code = 1
+        # The swap (or the automatic rollback) is done; the supervisor has to
+        # start `current` again. 75 says so explicitly, and any supervisor that
+        # restarts on non-zero keeps working.
+        self._exit_code = EXIT_RESTART_FOR_UPDATE
         self._running = False
         if self._backoff is not None:
             self._backoff.cancel()

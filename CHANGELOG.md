@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Docker agents can be updated remotely once the image runs the agent from a
+  versioned layout on `/data` (needs a matching hle-docker image). Agents now
+  exit with code 75 after swapping versions so a supervisor can restart them
+  (hle-client#259).
+
 ## v2610.18 — 2026-10-23
 
 ### Fixed
