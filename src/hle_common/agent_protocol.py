@@ -52,12 +52,22 @@ from hle_common.wire import WireModel
 AGENT_PROTOCOL_VERSION = "1.5"
 
 # Install methods whose venv the agent owns outright and can stage a new version
-# into. Everything else (brew keg, docker image, system pip, PEP 668 interpreter)
-# is owned by something outside the process, and the dashboard has to tell the
-# operator what to run instead of pretending it can do it for them.
-SELF_UPDATE_METHODS: frozenset[str] = frozenset({"venv", "pipx", "uv"})
+# into. `docker` is here because an image that runs the agent from a versioned
+# layout on its data volume owns that layout just as the installer does; an
+# image that ships the agent in its system site-packages does not advertise the
+# capability (see `agent_update.can_self_update`). Everything else (brew keg,
+# system pip, PEP 668 interpreter) is owned by something outside the process,
+# and the dashboard has to tell the operator what to run instead of pretending
+# it can do it for them.
+SELF_UPDATE_METHODS: frozenset[str] = frozenset({"venv", "pipx", "uv", "docker"})
 
 UPDATE_CAPABILITY_PREFIX = "update:"
+
+# The exit code an agent uses after it has swapped (or rolled back) its
+# installed version and wants its supervisor to start the new `current`. Any
+# supervisor that restarts on non-zero exit (systemd, launchd, rc.d daemon(8))
+# keeps working because 75 is non-zero.
+EXIT_RESTART_FOR_UPDATE = 75
 
 # Hello `capabilities` values an agent advertises so the server knows which of
 # the 1.4 features it may use with this peer. Kept as constants so the agent and

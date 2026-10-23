@@ -263,7 +263,7 @@ def update(ctx: click.Context, check: bool, target_version: str | None, yes: boo
             ),
         )
 
-    if method == DOCKER:
+    if method == DOCKER and _versioned_home(method) is None:
         raise HleError(
             "This client runs inside the hle-docker image; the image owns its version.",
             hint=(
@@ -304,8 +304,15 @@ def update(ctx: click.Context, check: bool, target_version: str | None, yes: boo
 
 
 def _versioned_home(method: str) -> Path | None:
-    """The installer's versioned layout, when this client runs from it."""
-    if method != VENV:
+    """The installer's versioned layout, when this client runs from it.
+
+    A Docker image that runs the agent from a versioned layout on its data
+    volume owns that layout just as the installer does, so it updates the same
+    way; an image that ships the agent in its system site-packages has no such
+    layout and stays refused. `layout_home()` is the single test for both,
+    shared with `agent_update.can_self_update`.
+    """
+    if method not in (VENV, DOCKER):
         return None
     from hle_client.agent_update import layout_home
 

@@ -224,7 +224,6 @@ class TestUpdateRefusesWhereItWouldBreakThings:
     @pytest.mark.parametrize(
         ("method", "expected"),
         [
-            (DOCKER, "docker compose pull"),
             (HA_ADDON, "Add-ons"),
             (KUBERNETES, "helm upgrade"),
             (EDITABLE, "git pull"),
@@ -235,6 +234,33 @@ class TestUpdateRefusesWhereItWouldBreakThings:
         assert result.exit_code == 1
         assert expected in result.output
         mock_run.assert_not_called()
+
+    def test_docker_without_the_versioned_layout_is_refused(self):
+        """An image that ships the agent in site-packages still owns the version."""
+        with (
+            patch("hle_client.update_cmd.pypi_latest_version", return_value="9999.1"),
+            patch("hle_client.update_cmd.detect_install_method", return_value=DOCKER),
+            patch("hle_client.agent_update.layout_home", return_value=None),
+            patch("hle_client.update_cmd.subprocess.run") as mock_run,
+        ):
+            result = CliRunner().invoke(main, ["update", "--yes"])
+        assert result.exit_code == 1
+        assert "docker compose pull" in result.output
+        mock_run.assert_not_called()
+
+    def test_docker_with_the_versioned_layout_updates(self, tmp_path):
+        """Once the image runs from versions/<v>, `hle update` installs side by side."""
+        with (
+            patch("hle_client.update_cmd.pypi_latest_version", return_value="9999.1"),
+            patch("hle_client.update_cmd.detect_install_method", return_value=DOCKER),
+            patch("hle_client.agent_update.layout_home", return_value=tmp_path),
+            patch("hle_client.update_cmd._versioned_update", return_value="9999.1") as mock_update,
+            patch("hle_client.update_cmd._restart_services") as mock_restart,
+        ):
+            result = CliRunner().invoke(main, ["update", "--yes"])
+        assert result.exit_code == 0, result.output
+        mock_update.assert_called_once_with(tmp_path, "9999.1")
+        mock_restart.assert_called_once()
 
     def test_check_still_works_on_docker(self):
         """`--check` only reads PyPI, so a container install is not refused."""

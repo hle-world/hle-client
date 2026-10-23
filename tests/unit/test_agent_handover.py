@@ -24,6 +24,7 @@ from hle_client.agent_update import UpdateSupport
 from hle_common import close_codes
 from hle_common.agent_protocol import (
     AGENT_PROTOCOL_VERSION,
+    EXIT_RESTART_FOR_UPDATE,
     HANDOVER_CAPABILITY,
     AgentHello,
     EndpointSpec,
@@ -460,7 +461,7 @@ class TestIncumbentHandover:
         await client._run_update(request(), ws)
         assert spawned == []  # no canary
         assert up.calls == ["stage", "verify", "swap"]
-        assert client.exit_code == 1
+        assert client.exit_code == EXIT_RESTART_FOR_UPDATE
         assert ws.closed
 
     async def test_a_successor_that_dies_is_reported_and_the_incumbent_stays(self, tmp_path):

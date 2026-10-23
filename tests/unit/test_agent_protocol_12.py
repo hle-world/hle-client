@@ -79,13 +79,11 @@ class TestUpdateModels:
 
 
 class TestUpdateCapability:
-    @pytest.mark.parametrize("method", ["venv", "pipx", "uv"])
+    @pytest.mark.parametrize("method", ["venv", "pipx", "uv", "docker"])
     def test_self_owned_venvs_can_update(self, method):
         assert update_capability(method) == f"update:{method}"
 
-    @pytest.mark.parametrize(
-        "method", ["brew", "docker", "pip", "externally-managed", "unknown", None, ""]
-    )
+    @pytest.mark.parametrize("method", ["brew", "pip", "externally-managed", "unknown", None, ""])
     def test_everything_else_cannot(self, method):
         assert update_capability(method) is None
 
@@ -93,7 +91,9 @@ class TestUpdateCapability:
         """The detector's identifiers and this mapping must not drift apart."""
         from hle_client import update_cmd
 
-        assert {update_cmd.VENV, update_cmd.PIPX, update_cmd.UV} == SELF_UPDATE_METHODS
+        methods = {update_cmd.VENV, update_cmd.PIPX, update_cmd.UV, update_cmd.DOCKER}
+        assert methods == SELF_UPDATE_METHODS
+        assert update_capability(update_cmd.DOCKER) == "update:docker"
         assert update_capability(update_cmd.BREW) is None
         assert update_capability(update_cmd.PIP) is None
         assert update_capability(update_cmd.EXTERNALLY_MANAGED) is None

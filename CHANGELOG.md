@@ -14,6 +14,10 @@
 
 ### Changed
 
+- Docker agents can be updated remotely once the image runs the agent from a
+  versioned layout on `/data` (needs a matching hle-docker image). Agents now
+  exit with code 75 after swapping versions so a supervisor can restart them
+  (hle-client#259).
 - CI fails if tracked files mention private repositories, the maintainer's
   LAN or session URLs (`scripts/check-public-hygiene.sh`). The out-of-date
   `SECURITY_AUDIT.md` (v1.15.0) was removed; `SECURITY.md` stays

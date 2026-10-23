@@ -56,7 +56,7 @@ from hle_client.agent_update import (
     versioned_layout_present,
     write_update_state,
 )
-from hle_common.agent_protocol import UpdateRequest
+from hle_common.agent_protocol import EXIT_RESTART_FOR_UPDATE, UpdateRequest
 
 
 def _calver_key(version: str) -> tuple[int, int]:
@@ -238,9 +238,26 @@ class TestCanSelfUpdate:
         s = can_self_update(prefix="/x", executable="/x/bin/python", home=tmp_path)
         assert s == UpdateSupport(False, method, f"unsupported:{method}")
 
-    def test_docker_wins(self, tmp_path):
-        s = can_self_update(prefix="/x", executable="p", home=tmp_path, in_docker=True)
-        assert s.reason == "unsupported:docker"
+    def test_docker_outside_the_layout_is_unsupported(self, tmp_path):
+        # An old image ships the agent in its system site-packages, so
+        # `sys.prefix` is not inside any versioned layout: unchanged.
+        home = make_home(tmp_path)
+        s = can_self_update(prefix="/x", executable="p", home=home, in_docker=True)
+        assert s == UpdateSupport(False, "docker", "unsupported:docker")
+
+    def test_docker_from_the_versioned_layout_can_update(self, tmp_path):
+        """/.dockerenv no longer wins once the image runs from a versioned layout.
+
+        The image owns the agent in its system site-packages; when it runs the
+        agent out of versions/<v> on its data volume, that layout is the
+        image's own, so an update is possible exactly as for installer agents.
+        """
+        home = make_home(tmp_path)
+        prefix = str(home / VERSIONS_DIR / OLD)
+        s = can_self_update(
+            prefix=prefix, executable=prefix + "/bin/python", home=home, in_docker=True
+        )
+        assert s == UpdateSupport(True, "docker")
 
 
 # --------------------------------------------------------------------------- #
@@ -725,7 +742,7 @@ class TestAckAndProgress:
         ]
         assert up.calls == ["stage", "verify", "swap"]
         assert ws.closed
-        assert client.exit_code == 1
+        assert client.exit_code == EXIT_RESTART_FOR_UPDATE
         assert client._running is False
         assert read_update_state(tmp_path) == UpdateState(
             "r1", __version__, NEW, read_update_state(tmp_path).started_at
@@ -874,7 +891,7 @@ class TestWatchdog:
         await client._after_welcome(ws)
         await exited(client)
         assert up.calls == ["rollback"]
-        assert client.exit_code == 1
+        assert client.exit_code == EXIT_RESTART_FOR_UPDATE
         assert client._running is False
         assert ws.closed
         assert read_update_state(tmp_path) is None
@@ -891,7 +908,7 @@ class TestWatchdog:
         client, up, _ = self._armed(tmp_path, health_timeout=0.05)
         await exited(client)
         assert up.calls == ["rollback"]
-        assert client.exit_code == 1
+        assert client.exit_code == EXIT_RESTART_FOR_UPDATE
         assert read_failed_marker(tmp_path) is not None
 
     async def test_a_slow_rollback_is_not_cancelled_by_its_own_timer(self, tmp_path):
@@ -921,7 +938,7 @@ class TestWatchdog:
         failed = read_failed_marker(tmp_path)
         assert failed is not None
         assert "rollback failed: previous is gone" in failed.reason
-        assert client.exit_code == 1
+        assert client.exit_code == EXIT_RESTART_FOR_UPDATE
 
     async def test_a_fatal_close_during_the_watch_rolls_back(self, tmp_path, monkeypatch):
         import websockets.exceptions
@@ -939,7 +956,7 @@ class TestWatchdog:
         monkeypatch.setattr(client, "_connect_once", refused)
         await client.run()
         assert up.calls == ["rollback"]
-        assert client.exit_code == 1
+        assert client.exit_code == EXIT_RESTART_FOR_UPDATE
         failed = read_failed_marker(tmp_path)
         assert failed is not None and "relay refused" in failed.reason
 
@@ -955,7 +972,7 @@ class TestWatchdog:
         monkeypatch.setattr(client, "_connect_once", unreachable)
         await asyncio.wait_for(client.run(), timeout=2.0)
         assert up.calls == ["rollback"]
-        assert client.exit_code == 1
+        assert client.exit_code == EXIT_RESTART_FOR_UPDATE
         assert read_failed_marker(tmp_path) is not None
 
     async def test_a_new_request_during_the_watch_is_busy(self, tmp_path):
