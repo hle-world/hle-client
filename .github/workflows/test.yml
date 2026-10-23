@@ -1,20 +1,21 @@
 name: Test
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly full-matrix run — Monday 04:00 UTC
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Only the newest push to a branch matters. Without this, every push leaves its
-# predecessor's jobs queued, and on a small self-hosted pool those stale runs
-# are what everything else waits behind.
+# Only the newest push to a PR matters. A push to main is no longer tested
+# here, so scheduled and manual runs are keyed by run id and never cancelled.
 concurrency:
-  group: test-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: test-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -29,7 +30,9 @@ jobs:
       image: python:${{ matrix.python-version }}-slim
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # PRs test the oldest and newest supported Python; the weekly and
+        # manual runs cover everything in between.
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.11", "3.13"]' || '["3.11", "3.12", "3.13"]') }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

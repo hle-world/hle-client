@@ -1,0 +1,141 @@
+name: Security PR
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  security-pr:
+    name: Security PR
+    # Fork PRs run PR-head code: keep them off the self-hosted pool.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'arc-runner-hle-client' }}
+    timeout-minutes: 15
+    container:
+      image: python:3.13-slim
+    env:
+      # Never interpolate this into a `run:` block; use it via the shell.
+      BASE: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Install git and curl
+        if: ${{ !cancelled() }}
+        run: apt-get update && apt-get install -y git curl
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Semgrep's --baseline-commit runs git in the container, which must trust
+      # the workspace.
+      - name: Trust the workspace
+        if: ${{ !cancelled() }}
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Bandit
+        if: ${{ !cancelled() }}
+        run: pip install bandit[toml]
+
+      - name: Run Bandit
+        if: ${{ !cancelled() }}
+        run: |
+          bandit -r src/ \
+            -f json -o /tmp/bandit-results.json \
+            --severity-level medium \
+            --confidence-level medium \
+            -s B101 \
+            || true
+
+      - name: Display results
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f /tmp/bandit-results.json ]; then
+            python -c "
+          import json, sys
+          data = json.load(open('/tmp/bandit-results.json'))
+          results = data.get('results', [])
+          if not results:
+              print('No issues found.')
+              sys.exit(0)
+          for r in results:
+              sev = r['issue_severity']
+              conf = r['issue_confidence']
+              print(f\"[{sev}/{conf}] {r['filename']}:{r['line_number']} -- {r['issue_text']}\")
+          print(f\"\n{len(results)} issue(s) found.\")
+          if any(r['issue_severity'] in ('HIGH', 'MEDIUM') for r in results):
+              sys.exit(1)
+          "
+          fi
+
+      - name: Install TruffleHog (pinned to v3.88.9)
+        if: ${{ !cancelled() }}
+        run: |
+          TRUFFLEHOG_VERSION="3.88.9"
+          ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+          curl -sSfL -o /tmp/trufflehog.tar.gz \
+            "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${ARCH}.tar.gz"
+          tar -xzf /tmp/trufflehog.tar.gz -C /usr/local/bin trufflehog
+          rm /tmp/trufflehog.tar.gz
+          trufflehog --version
+
+      - name: TruffleHog scan
+        if: ${{ !cancelled() }}
+        run: trufflehog filesystem . --only-verified
+
+      # Pinned: a new Semgrep release must not change what fails the build.
+      # setuptools<81 still ships pkg_resources, which a Semgrep dependency
+      # imports.
+      - name: Install Semgrep (pinned to 1.97.0)
+        if: ${{ !cancelled() }}
+        run: pip install "semgrep==1.97.0" "setuptools<81"
+
+      # Findings fail the job. Only findings this PR introduces are reported,
+      # by diffing against the merge base.
+      - name: Run Semgrep
+        if: ${{ !cancelled() }}
+        run: |
+          semgrep \
+            --config p/python \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --metrics=off \
+            --baseline-commit "$BASE" \
+            --error \
+            src/hle_client
+
+      - name: Check for dependency changes
+        id: deps
+        if: ${{ !cancelled() }}
+        run: |
+          if git diff --name-only "$BASE"...HEAD | grep -qE '^(pyproject\.toml|uv\.lock)$'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        if: ${{ !cancelled() && steps.deps.outputs.changed == 'true' }}
+        run: pip install uv
+
+      - name: Install dependencies
+        if: ${{ !cancelled() && steps.deps.outputs.changed == 'true' }}
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Install pip-audit
+        if: ${{ !cancelled() && steps.deps.outputs.changed == 'true' }}
+        run: pip install pip-audit
+
+      - name: Upgrade pip
+        if: ${{ !cancelled() && steps.deps.outputs.changed == 'true' }}
+        run: pip install --upgrade pip
+
+      - name: Run pip-audit
+        if: ${{ !cancelled() && steps.deps.outputs.changed == 'true' }}
+        run: pip-audit --desc --fix --dry-run 2>&1
