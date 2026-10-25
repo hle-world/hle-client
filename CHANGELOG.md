@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2610.19 — 2026-10-25
 
 ### Changed
 
@@ -8,6 +8,18 @@
   versioned layout on `/data` (needs a matching hle-docker image). Agents now
   exit with code 75 after swapping versions so a supervisor can restart them
   (hle-client#259).
+
+### Added
+
+- `ApiClient`'s per-tunnel settings methods (access rules, PIN, share links,
+  basic auth, auth mode) accept a keyword-only `zone=`. A label held on two
+  zones by the same account needs it: without it the relay answers 409 and
+  asks the caller to pick. Omitting it behaves as before (hle-client#263).
+
+### CI
+
+- Main pushes are no longer re-tested; Security Scan runs nightly plus one
+  light job per PR; the PR test matrix is trimmed (hle-client#262).
 
 ## v2610.18 — 2026-10-23
 
