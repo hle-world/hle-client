@@ -4,12 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
 from hle_client.api import ApiClient, ApiClientConfig
+
+_ZONE_METHOD_CALLS: list[tuple[str, tuple[Any, ...], str]] = [
+    ("list_access_rules", ("app-x7k",), "get"),
+    ("add_access_rule", ("app-x7k", "a@b.com"), "post"),
+    ("delete_access_rule", ("app-x7k", 1), "delete"),
+    ("get_tunnel_pin_status", ("app-x7k",), "get"),
+    ("set_tunnel_pin", ("app-x7k", "1234"), "put"),
+    ("remove_tunnel_pin", ("app-x7k",), "delete"),
+    ("create_share_link", ("app-x7k",), "post"),
+    ("list_share_links", ("app-x7k",), "get"),
+    ("delete_share_link", ("app-x7k", 1), "delete"),
+    ("get_tunnel_basic_auth_status", ("app-x7k",), "get"),
+    ("set_tunnel_basic_auth", ("app-x7k", "u", "p"), "put"),
+    ("remove_tunnel_basic_auth", ("app-x7k",), "delete"),
+    ("get_tunnel_auth_mode", ("app-x7k",), "get"),
+    ("set_tunnel_auth_mode", ("app-x7k", "sso"), "patch"),
+]
 
 
 class TestApiClientConfig:
@@ -142,6 +160,51 @@ class TestApiClientMethods:
             pytest.raises(httpx.HTTPStatusError),
         ):
             await client.delete_access_rule("app-x7k", 999)
+
+
+class TestZoneQueryParameter:
+    """Per-tunnel settings methods take an optional keyword-only ``zone``.
+
+    A tunnel is ``(zone, subdomain)``; when one account holds the same label on
+    two zones the relay answers 409 unless the caller picks the zone.
+    """
+
+    @pytest.fixture
+    def client(self) -> ApiClient:
+        return ApiClient(ApiClientConfig(api_key="hle_testkey"))
+
+    def _response(self, verb: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={},
+            request=httpx.Request(verb.upper(), "https://hle.world/"),
+        )
+
+    @pytest.mark.parametrize(("name", "args", "verb"), _ZONE_METHOD_CALLS)
+    async def test_zone_adds_the_query_parameter(
+        self, client: ApiClient, name: str, args: tuple[Any, ...], verb: str
+    ) -> None:
+        method = getattr(client, name)
+        with patch(
+            f"httpx.AsyncClient.{verb}",
+            new_callable=AsyncMock,
+            return_value=self._response(verb),
+        ) as call:
+            await method(*args, zone="example.com")
+        assert call.await_args.kwargs["params"] == {"zone": "example.com"}
+
+    @pytest.mark.parametrize(("name", "args", "verb"), _ZONE_METHOD_CALLS)
+    async def test_no_zone_sends_no_query_parameter(
+        self, client: ApiClient, name: str, args: tuple[Any, ...], verb: str
+    ) -> None:
+        method = getattr(client, name)
+        with patch(
+            f"httpx.AsyncClient.{verb}",
+            new_callable=AsyncMock,
+            return_value=self._response(verb),
+        ) as call:
+            await method(*args)
+        assert "params" not in call.await_args.kwargs
 
 
 class TestSharedSession:
