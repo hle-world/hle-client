@@ -136,6 +136,11 @@ jobs:
         if: ${{ !cancelled() && steps.deps.outputs.changed == 'true' }}
         run: pip install --upgrade pip
 
+      # Audit the project's resolved dependencies, not the job's environment:
+      # Semgrep (installed above, same job) pins its own packages, and their
+      # advisories are not ours (protobuf 4.x failed v2610.19's release PR).
       - name: Run pip-audit
         if: ${{ !cancelled() && steps.deps.outputs.changed == 'true' }}
-        run: pip-audit --desc --fix --dry-run 2>&1
+        run: |
+          uv pip compile pyproject.toml --extra dev --quiet -o /tmp/audit-requirements.txt
+          pip-audit --desc --no-deps --disable-pip -r /tmp/audit-requirements.txt 2>&1
