@@ -270,9 +270,7 @@ class ApiClient:
             result: dict[str, Any] = resp.json()
             return result
 
-    async def remove_tunnel_pin(
-        self, subdomain: str, *, zone: str | None = None
-    ) -> dict[str, Any]:
+    async def remove_tunnel_pin(self, subdomain: str, *, zone: str | None = None) -> dict[str, Any]:
         """Remove the PIN for a subdomain."""
         async with self._client_ctx() as client:
             resp = await client.delete(
