@@ -79,17 +79,17 @@ def server_url() -> str:
 
 
 def server_host() -> str:
-    """The relay host for the configured server, as ``host[:port]``.
+    """The relay host for the configured server, without a port.
 
-    The port is omitted for https on 443, so the default is just ``hle.world``.
+    The relay URLs are built as ``{host}:{port}``, so the port lives in
+    :func:`server_port` rather than here.
     """
+    return urlparse(server_url()).hostname or ""
+
+
+def server_port() -> int:
+    """The relay port for the configured server: explicit, else 443 / 80."""
     parsed = urlparse(server_url())
-    host = parsed.hostname or ""
-    port = parsed.port
-    if (
-        port is None
-        or (parsed.scheme == "https" and port == 443)
-        or (parsed.scheme == "http" and port == 80)
-    ):
-        return host
-    return f"{host}:{port}"
+    if parsed.port is not None:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80

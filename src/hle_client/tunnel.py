@@ -39,7 +39,7 @@ from hle_client.proxy import (
     sni_hostname_for,
     upstream_verify,
 )
-from hle_client.server import server_host, server_url
+from hle_client.server import server_host, server_port, server_url
 from hle_common import close_codes
 from hle_common.fragmentation import (
     CAPABILITY_FRAGMENTATION,
@@ -99,7 +99,7 @@ class TunnelConfig:
 
     service_url: str
     relay_host: str = field(default_factory=server_host)
-    relay_port: int = 443
+    relay_port: int = field(default_factory=server_port)
     auth_mode: str = "sso"
     service_label: str = ""  # required — set by CLI
     api_key: str | None = None

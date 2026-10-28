@@ -28,7 +28,7 @@ from hle_client.firepuncher import FpLocalClient
 from hle_client.output import sanitize
 from hle_client.platform_info import is_python_command
 from hle_client.richcompat import Console
-from hle_client.server import server_host
+from hle_client.server import server_host, server_port
 from hle_common.fp_protocol import (
     LOCAL_NETWORKS,
     FpHello,
@@ -600,7 +600,7 @@ async def _read_loop(ws: websockets.ClientConnection, client: FpLocalClient) -> 
     help="API key (also reads HLE_API_KEY env var, then ~/.config/hle/config.toml)",
 )
 @click.option("--relay-host", default=server_host, help="Relay host")
-@click.option("--relay-port", default=443, type=int, help="Relay port")
+@click.option("--relay-port", default=server_port, type=int, help="Relay port")
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
 def fp(

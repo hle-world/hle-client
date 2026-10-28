@@ -32,7 +32,7 @@ from hle_client.fp_cmd import fp as fp_command
 from hle_client.ops import agents as ops_agents
 from hle_client.output import OUTPUT_FORMATS, TABLE, Output
 from hle_client.richcompat import Console
-from hle_client.server import server_host, server_url
+from hle_client.server import server_host, server_port, server_url
 from hle_client.service_cmd import ensure_agent_boot_hook
 from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import Tunnel, TunnelFatalError, to_tunnel_config
@@ -791,7 +791,7 @@ def enroll(
     "--token", default=None, envvar="HLE_AGENT_TOKEN", help="Agent token (overrides saved)"
 )
 @click.option("--relay-host", default=server_host, help="Relay host")
-@click.option("--relay-port", default=443, type=int, help="Relay port")
+@click.option("--relay-port", default=server_port, type=int, help="Relay port")
 # Stage B internals. The incumbent passes these to the canary it spawns; a
 # human never types them, so they stay out of --help.
 @click.option("--successor-of", "successor_of", default=None, hidden=True)

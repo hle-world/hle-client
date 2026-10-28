@@ -17,7 +17,7 @@ import pytest
 from hle_client import config
 from hle_client.api import ApiClient, ApiClientConfig
 from hle_client.cli import main
-from hle_client.server import server_host, server_url
+from hle_client.server import server_host, server_port, server_url
 from hle_client.tunnel import TunnelConfig
 
 
@@ -30,11 +30,13 @@ class TestResolution:
     def test_default_is_hle_world(self):
         assert server_url() == "https://hle.world"
         assert server_host() == "hle.world"
+        assert server_port() == 443
 
     def test_env_overrides_default(self, monkeypatch):
         monkeypatch.setenv("HLE_SERVER_URL", "https://stg.example.test:8443/")
         assert server_url() == "https://stg.example.test:8443"
-        assert server_host() == "stg.example.test:8443"
+        assert server_host() == "stg.example.test"
+        assert server_port() == 8443
 
     def test_config_file_overrides_default(self, monkeypatch, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -55,21 +57,21 @@ class TestValidation:
     def test_https_port_and_trailing_slash(self, monkeypatch):
         monkeypatch.setenv("HLE_SERVER_URL", "https://stg.example.test:8443/")
         assert server_url() == "https://stg.example.test:8443"
-        assert server_host() == "stg.example.test:8443"
+        assert (server_host(), server_port()) == ("stg.example.test", 8443)
 
-    def test_https_default_port_is_omitted_from_host(self, monkeypatch):
+    def test_https_explicit_default_port(self, monkeypatch):
         monkeypatch.setenv("HLE_SERVER_URL", "https://stg.example.test:443")
         assert server_url() == "https://stg.example.test:443"
-        assert server_host() == "stg.example.test"
+        assert (server_host(), server_port()) == ("stg.example.test", 443)
 
     def test_http_localhost_is_accepted(self, monkeypatch):
         monkeypatch.setenv("HLE_SERVER_URL", "http://localhost:8000")
         assert server_url() == "http://localhost:8000"
-        assert server_host() == "localhost:8000"
+        assert (server_host(), server_port()) == ("localhost", 8000)
 
-    def test_http_loopback_ip_is_accepted(self, monkeypatch):
-        monkeypatch.setenv("HLE_SERVER_URL", "http://127.0.0.1:8000")
-        assert server_host() == "127.0.0.1:8000"
+    def test_http_without_port_defaults_to_80(self, monkeypatch):
+        monkeypatch.setenv("HLE_SERVER_URL", "http://127.0.0.1")
+        assert (server_host(), server_port()) == ("127.0.0.1", 80)
 
     @pytest.mark.parametrize(
         "value",
@@ -111,7 +113,9 @@ class TestRelayDefaults:
     def test_tunnel_config_default_follows_server_url(self, monkeypatch):
         monkeypatch.setenv("HLE_SERVER_URL", "https://stg.example.test:8443")
         cfg = TunnelConfig(service_url="http://localhost:3000")
-        assert cfg.relay_host == "stg.example.test:8443"
+        assert (cfg.relay_host, cfg.relay_port) == ("stg.example.test", 8443)
+        # Host and port are joined once, never doubled (wss://host:8443:443).
+        assert f"{cfg.relay_host}:{cfg.relay_port}" == "stg.example.test:8443"
 
     def test_tunnel_config_explicit_relay_host_wins(self, monkeypatch):
         monkeypatch.setenv("HLE_SERVER_URL", "https://stg.example.test:8443")
@@ -153,7 +157,8 @@ class TestAgentCliRelayHost:
 
     def test_default_follows_server_url(self, monkeypatch):
         kwargs = self._invoke(monkeypatch, [], "https://stg.example.test:8443")
-        assert kwargs["relay_host"] == "stg.example.test:8443"
+        assert kwargs["relay_host"] == "stg.example.test"
+        assert kwargs["relay_port"] == 8443
 
     def test_explicit_relay_host_wins(self, monkeypatch):
         kwargs = self._invoke(
