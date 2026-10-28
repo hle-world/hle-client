@@ -33,6 +33,7 @@ from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event
 from hle_client.proxy import sni_hostname_for
+from hle_client.server import server_url
 from hle_client.tunnel import Tunnel, TunnelConfig, to_tunnel_config
 from hle_common import close_codes
 from hle_common.agent_protocol import (
@@ -183,7 +184,7 @@ def _fatal_agent_message(code: int | None, reason: str) -> str:
     if code == close_codes.INVALID_CREDENTIAL:
         return (
             f"This agent's enrollment token is invalid or has been revoked. {reason}\n"
-            "Re-enroll from the dashboard: https://hle.world/dashboard"
+            f"Re-enroll from the dashboard: {server_url()}/dashboard"
         )
     return f"The relay stopped this agent and asked it not to reconnect (code {code}). {reason}"
 

@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
+from hle_client.server import server_url
 from hle_common.models import RelayDiscoveryResponse
 
 if TYPE_CHECKING:
@@ -69,7 +70,7 @@ class ApiClient:
     _BASE_URL = "https://hle.world"
 
     def __init__(self, config: ApiClientConfig) -> None:
-        self._base_url = self._BASE_URL
+        self._base_url = server_url()
         self._headers = {"Authorization": f"Bearer {config.api_key}"}
         self._shared_client: httpx.AsyncClient | None = None
         self._shared_loop: asyncio.AbstractEventLoop | None = None

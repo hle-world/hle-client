@@ -43,6 +43,7 @@ from hle_client import __version__, config
 from hle_client.aliases import AliasedGroup, LegacyModeCommand, ModeGroup
 from hle_client.errors import HleError, UsageError
 from hle_client.richcompat import Console, Table
+from hle_client.server import server_url
 from hle_client.tunnel_options import spec_from_params, tunnel_options, validate_label_and_apex
 from hle_common.tunnel_spec import TunnelSpec, cli_fields
 
@@ -2481,7 +2482,7 @@ def install(
 
     if agent_mode:
         console.print(
-            "\n[dim]Add endpoints at https://hle.world/dashboard — the agent picks them "
+            f"\n[dim]Add endpoints at {server_url()}/dashboard — the agent picks them "
             "up within seconds, no restart needed.[/dim]"
         )
     elif fp_mode:
