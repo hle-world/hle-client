@@ -32,6 +32,7 @@ from hle_client.fp_cmd import fp as fp_command
 from hle_client.ops import agents as ops_agents
 from hle_client.output import OUTPUT_FORMATS, TABLE, Output
 from hle_client.richcompat import Console
+from hle_client.server import server_host, server_url
 from hle_client.service_cmd import ensure_agent_boot_hook
 from hle_client.service_cmd import service as service_group
 from hle_client.tunnel import Tunnel, TunnelFatalError, to_tunnel_config
@@ -283,7 +284,7 @@ def expose(
         )
 
     human.print(f"\n[bold]HLE[/bold] v{__version__}  Exposing [cyan]{display_url}[/cyan]")
-    human.print("     Relay   [dim]hle.world[/dim]")
+    human.print(f"     Relay   [dim]{server_host()}[/dim]")
     if service_label:
         human.print(f"     Label   [dim]{service_label}[/dim]")
     human.print(f"     WS      [dim]{'enabled' if websocket else 'disabled'}[/dim]")
@@ -366,7 +367,7 @@ def webhook(
     human.print(f"\n[bold]HLE[/bold] v{__version__}  Webhook forwarder")
     human.print(f"     Path    [cyan]{path}[/cyan]")
     human.print(f"     Forward [cyan]{forward_to}[/cyan]")
-    human.print("     Relay   [dim]hle.world[/dim]")
+    human.print(f"     Relay   [dim]{server_host()}[/dim]")
     human.print()
 
     try:
@@ -430,8 +431,8 @@ def login(
         raise click.UsageError("Give the credential once: either CREDENTIAL or --api-key.")
     token = (api_key or credential or "").strip()
     if not token:
-        console.print("Opening [cyan]https://hle.world/dashboard[/cyan] ...")
-        webbrowser.open("https://hle.world/dashboard")
+        console.print(f"Opening [cyan]{server_url()}/dashboard[/cyan] ...")
+        webbrowser.open(f"{server_url()}/dashboard")
         console.print("Copy any key from the dashboard and paste it here.\n")
         token = str(prompt(ctx, "Credential", hide_input=True)).strip()
 
@@ -523,7 +524,7 @@ def _save_agent_token(
     _refuse_if_enrolled(force)
     if token is None:
         console.print(
-            "Create an agent at [cyan]https://hle.world/dashboard[/cyan] and copy its token.\n"
+            f"Create an agent at [cyan]{server_url()}/dashboard[/cyan] and copy its token.\n"
         )
         token = str(prompt(ctx, "Agent token", hide_input=True))
 
@@ -789,7 +790,7 @@ def enroll(
 @click.option(
     "--token", default=None, envvar="HLE_AGENT_TOKEN", help="Agent token (overrides saved)"
 )
-@click.option("--relay-host", default="hle.world", help="Relay host")
+@click.option("--relay-host", default=server_host, help="Relay host")
 @click.option("--relay-port", default=443, type=int, help="Relay port")
 # Stage B internals. The incumbent passes these to the canary it spawns; a
 # human never types them, so they stay out of --help.
@@ -829,7 +830,7 @@ def run(
         )
     else:
         human.print(f"[green]Agent running[/green] — control: {client.control_uri}")
-        human.print("[dim]Manage endpoints from https://hle.world/dashboard. Ctrl+C to stop.[/dim]")
+        human.print(f"[dim]Manage endpoints from {server_url()}/dashboard. Ctrl+C to stop.[/dim]")
     try:
         shutdown.run(client.run())
     except KeyboardInterrupt:
@@ -942,7 +943,7 @@ def agent_list(ctx: click.Context, api_key: str | None, as_json: bool) -> None:
     if not agents:
         console.print("[dim]No agents yet.[/dim]")
         console.print(
-            "[dim]Create one at https://hle.world/dashboard → Agents, "
+            f"[dim]Create one at {server_url()}/dashboard → Agents, "
             "then run 'hle auth login --agent-token <token>'.[/dim]"
         )
         return
@@ -1042,7 +1043,7 @@ def agent_services(provider: str | None, as_json: bool) -> None:
         table.add_row(s.name, s.namespace or s.provider, s.address, s.suggested_label())
     console.print(table)
     console.print(
-        "\n[dim]Expose any of these from https://hle.world/dashboard → Agents → Endpoints.[/dim]"
+        f"\n[dim]Expose any of these from {server_url()}/dashboard → Agents → Endpoints.[/dim]"
     )
 
 

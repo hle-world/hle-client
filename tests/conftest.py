@@ -47,6 +47,16 @@ def _isolated_agent_config(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) ->
 
 
 @pytest.fixture(autouse=True)
+def _isolated_server_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite on the default server unless a test sets HLE_SERVER_URL.
+
+    A developer pointing their own client at a test server must not change
+    what the tests see; tests that exercise the setting set it themselves.
+    """
+    monkeypatch.delenv("HLE_SERVER_URL", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _not_in_a_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
         if name.startswith("KUBERNETES_"):

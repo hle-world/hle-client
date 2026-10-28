@@ -39,6 +39,7 @@ from hle_client.proxy import (
     sni_hostname_for,
     upstream_verify,
 )
+from hle_client.server import server_host, server_url
 from hle_common import close_codes
 from hle_common.fragmentation import (
     CAPABILITY_FRAGMENTATION,
@@ -97,7 +98,7 @@ class TunnelConfig:
     """Configuration for a tunnel connection."""
 
     service_url: str
-    relay_host: str = "hle.world"
+    relay_host: str = field(default_factory=server_host)
     relay_port: int = 443
     auth_mode: str = "sso"
     service_label: str = ""  # required — set by CLI
@@ -723,7 +724,7 @@ class Tunnel:
         if code == close_codes.TUNNEL_LIMIT:
             return (
                 "Tunnel limit reached. Your plan does not allow more active tunnels.\n"
-                "Stop another tunnel or upgrade at https://hle.world/dashboard"
+                f"Stop another tunnel or upgrade at {server_url()}/dashboard"
             )
         if code == close_codes.INVALID_CREDENTIAL:
             return (

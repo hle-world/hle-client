@@ -367,7 +367,30 @@ hle --no-input ...     # Never prompt; fail instead (for scripts)
 ## Configuration
 
 The HLE client stores configuration in `~/.config/hle/config.toml`, written by
-`hle auth login`. It holds a single `api_key` entry.
+`hle auth login`. It holds an `api_key` entry and an optional `server_url`.
+
+### Server
+
+By default the client talks to `https://hle.world`. Point it at another HLE
+server — a test environment, or a local development server — with
+`HLE_SERVER_URL`, or a `server_url` entry in `~/.config/hle/config.toml`. One
+setting selects the server for the REST API, the relay that tunnels and agents
+connect to, and the dashboard links the client prints.
+
+Resolution order:
+1. `HLE_SERVER_URL` environment variable
+2. `server_url` in `~/.config/hle/config.toml`
+3. `https://hle.world`
+
+The value must be an `https://` URL, or `http://` for `localhost`/`127.0.0.1`. It
+must have no path, query or fragment; one trailing `/` is ignored. An invalid
+value stops the command with an error naming `HLE_SERVER_URL`.
+
+A server with a private certificate authority is trusted the standard way: set
+`SSL_CERT_FILE` to a bundle that contains the system CAs plus your private root.
+Both the API client and the relay WebSocket connections honour it.
+
+### API key
 
 API key resolution order:
 1. `--api-key` CLI flag
