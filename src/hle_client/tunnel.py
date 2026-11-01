@@ -1032,8 +1032,12 @@ class Tunnel:
                     self._spawn(self._handle_speed_test_data(ws, msg))
                 case MessageType.HTTP_REQUEST_CANCEL:
                     request_id = (msg.payload or {}).get("request_id")
-                    if request_id:
+                    if request_id in self._request_bodies:
+                        # Mid-upload: aborting the body raises inside httpx's
+                        # send, which drops the upstream connection. Cancelling
+                        # the task there instead leaves the upstream waiting.
                         self._abort_request_body(request_id)
+                    elif request_id:
                         task = self._active_chunked.pop(request_id, None)
                         if task and not task.done():
                             task.cancel()
@@ -1558,6 +1562,18 @@ class Tunnel:
                     payload=end.model_dump(),
                 )
                 await ws.send(end_msg.model_dump_json())
+        except _RequestBodyAbortedError:
+            # The relay cancelled or overran the upload: answer with a small
+            # error so it is not left waiting, and drop the receive state.
+            logger.debug("Request body aborted for %s", req.request_id)
+            self._request_bodies.pop(req.request_id, None)
+            await self._send_buffered_response(
+                ws,
+                req.request_id,
+                400,
+                {"content-type": "text/plain"},
+                b"Bad Request: request body aborted",
+            )
         except websockets.exceptions.ConnectionClosed:
             logger.debug(
                 "Connection closed while sending chunked response for %s",

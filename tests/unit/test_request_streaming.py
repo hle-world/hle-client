@@ -547,6 +547,34 @@ class TestRequestStreaming:
 
         assert _upstream_saw_abort(upstream)
 
+    async def test_cancel_mid_upload_on_chunked_path_aborts_upstream(self):
+        """The path production takes: the relay always negotiates chunked."""
+        upstream: dict[str, Any] = {}
+        body = os.urandom(4 * 1024 * 1024)
+
+        async def scenario(relay: _FakeRelay, tunnel: Tunnel) -> None:
+            req = _stream_request("cancel", "/slow", len(body))
+            await relay.send_request(req)
+            await relay.send_chunk("cancel", 0, body[:REQUEST_BODY_MAX_CHUNK])
+            await relay.send_cancel("cancel")
+            status, _, _ = await relay.wait_for_response("cancel")
+            assert status == 400
+            await _wait_until(lambda: "cancel" not in tunnel._request_bodies)
+            await _wait_until(lambda: "cancel" not in tunnel._active_chunked)
+
+            ping = ProxiedHttpRequest(
+                request_id="live", method="GET", path="/ping", headers={"content-length": "0"}
+            )
+            await relay.send_request(ping)
+            status, _, _ = await relay.wait_for_response("live", chunked=True)
+            assert status == 200
+
+        async with _upstream(upstream) as url:
+            await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
+            await _wait_until(lambda: _upstream_saw_abort(upstream), timeout=5.0)
+
+        assert _upstream_saw_abort(upstream)
+
     async def test_upstream_answers_early_response_sent_state_freed(self):
         upstream: dict[str, Any] = {}
         body = os.urandom(2 * 1024 * 1024)
