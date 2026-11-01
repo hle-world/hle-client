@@ -502,9 +502,15 @@ class TestRequestStreaming:
 
         async with _upstream(upstream) as url:
             await _run_tunnel(url, [], scenario)
-            await _wait_until(lambda: _upstream_saw_abort(upstream), timeout=5.0)
+            with contextlib.suppress(TimeoutError):
+                await _wait_until(lambda: _upstream_saw_abort(upstream), timeout=5.0)
 
-        assert _upstream_saw_abort(upstream)
+        assert _upstream_saw_abort(upstream), {
+            "errors": upstream.get("errors"),
+            "requests": [
+                (r["method"], r["path"], len(r["body"])) for r in upstream.get("requests", [])
+            ],
+        }
 
     async def test_unknown_request_chunk_is_dropped(self):
         async def scenario(relay: _FakeRelay, tunnel: Tunnel) -> None:
