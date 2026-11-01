@@ -13,7 +13,7 @@ from hle_common.protocol import (
 
 class TestProtocolVersion:
     def test_protocol_version_exists(self):
-        assert PROTOCOL_VERSION == "1.6"
+        assert PROTOCOL_VERSION == "1.7"
 
     def test_protocol_version_is_string(self):
         assert isinstance(PROTOCOL_VERSION, str)
@@ -42,6 +42,9 @@ class TestMessageType:
             "http_response_chunk",
             "http_response_end",
             "http_request_cancel",
+            "http_request_body_chunk",
+            "http_request_body_end",
+            "stream_window_update",
             "ws_open",
             "ws_close",
             "ws_frame",

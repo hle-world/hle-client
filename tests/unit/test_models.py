@@ -205,6 +205,7 @@ class TestProxiedHttpRequest:
         )
         assert req.query_string == ""
         assert req.body is None
+        assert req.body_streamed is False
 
     def test_proxied_http_request_with_body(self):
         req = ProxiedHttpRequest(

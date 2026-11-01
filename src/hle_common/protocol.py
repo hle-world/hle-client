@@ -17,7 +17,12 @@ from hle_common.wire import WireModel
 # run of FRAGMENT frames and is reassembled before dispatch. Generic, so no
 # message type ever needs its own chunking for size again.
 # See hle_common.fragmentation.
-PROTOCOL_VERSION = "1.6"
+#
+# 1.7 adds request body streaming (capability "request_streaming") with
+# per-request credit flow control (STREAM_WINDOW_UPDATE). A request declared
+# with ProxiedHttpRequest.body_streamed follows as HTTP_REQUEST_BODY_CHUNK*
+# then exactly one HTTP_REQUEST_BODY_END. See hle_common.models.
+PROTOCOL_VERSION = "1.7"
 
 
 class MessageType(StrEnum):
@@ -44,6 +49,15 @@ class MessageType(StrEnum):
 
     # Server → client: abort an in-flight chunked request
     HTTP_REQUEST_CANCEL = "http_request_cancel"
+
+    # Request body streaming (protocol 1.7). For a request whose
+    # ProxiedHttpRequest.body_streamed is true the body follows as
+    # HTTP_REQUEST_BODY_CHUNK* then exactly one HTTP_REQUEST_BODY_END
+    # (relay → client). STREAM_WINDOW_UPDATE (client → relay) grants the
+    # sender more credit as the client hands bytes to the upstream.
+    HTTP_REQUEST_BODY_CHUNK = "http_request_body_chunk"
+    HTTP_REQUEST_BODY_END = "http_request_body_end"
+    STREAM_WINDOW_UPDATE = "stream_window_update"
 
     # WebSocket proxying
     WS_OPEN = "ws_open"

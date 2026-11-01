@@ -50,6 +50,8 @@ from hle_common.fp_protocol import (
 from hle_common.fragmentation import Fragment
 from hle_common.models import (
     DiagnosticEvent,
+    HttpRequestBodyChunk,
+    HttpRequestBodyEnd,
     HttpResponseChunk,
     HttpResponseEnd,
     HttpResponseStart,
@@ -58,6 +60,7 @@ from hle_common.models import (
     ProxiedHttpResponse,
     SpeedTestData,
     SpeedTestResult,
+    StreamWindowUpdate,
     TunnelRegistration,
     TunnelRegistrationResponse,
     WsStreamAccept,
@@ -146,6 +149,16 @@ SAMPLES: dict[str, object] = {
         body="Ymxh",
         query_string="a=1&b=2",
     ),
+    # 1.7 request body streaming. body is None; the body follows as chunks.
+    "ProxiedHttpRequest.streamed": ProxiedHttpRequest(
+        request_id="req-1",
+        method="POST",
+        path="/api/x",
+        headers={"content-type": "application/json"},
+        body=None,
+        query_string="a=1&b=2",
+        body_streamed=True,
+    ),
     "ProxiedHttpResponse": ProxiedHttpResponse(
         request_id="req-1",
         status_code=200,
@@ -158,6 +171,13 @@ SAMPLES: dict[str, object] = {
     "HttpResponseChunk": HttpResponseChunk(request_id="req-1", chunk_index=3, data="Ymxh"),
     "HttpResponseEnd.ok": HttpResponseEnd(request_id="req-1"),
     "HttpResponseEnd.err": HttpResponseEnd(request_id="req-1", error="upstream died"),
+    # 1.7 request body streaming (relay -> client) and credit updates (client -> relay).
+    "HttpRequestBodyChunk": HttpRequestBodyChunk(request_id="req-1", chunk_index=3, data="Ymxh"),
+    "HttpRequestBodyEnd.ok": HttpRequestBodyEnd(request_id="req-1", total_bytes=1000),
+    "HttpRequestBodyEnd.aborted": HttpRequestBodyEnd(
+        request_id="req-1", total_bytes=1000, aborted=True
+    ),
+    "StreamWindowUpdate": StreamWindowUpdate(request_id="req-1", bytes=1048576),
     "WsStreamOpen": WsStreamOpen(stream_id="s1", path="/ws", headers={"origin": "x"}),
     "WsStreamAccept": WsStreamAccept(stream_id="s1", subprotocol="tty"),
     "WsStreamFrame": WsStreamFrame(stream_id="s1", data="Ymxh", is_binary=True),
