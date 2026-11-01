@@ -427,7 +427,7 @@ class TestRequestStreaming:
         assert got[0]["body"] == body
         assert got[0]["headers"]["content-length"] == str(len(body))
 
-    async def test_content_length_preserved_on_buffered_path(self):
+    async def test_content_length_preserved_on_chunked_path(self):
         body = os.urandom(3 * 1024 * 1024)
         upstream: dict[str, Any] = {}
 
@@ -435,11 +435,11 @@ class TestRequestStreaming:
             req = _stream_request("clen", "/upload", len(body))
             await relay.send_request(req)
             await relay.send_body("clen", body)
-            status, _, _ = await relay.wait_for_response("clen")
+            status, _, _ = await relay.wait_for_response("clen", chunked=True)
             assert status == 200
 
         async with _upstream(upstream) as url:
-            await _run_tunnel(url, [], scenario)
+            await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
 
         got = upstream["requests"][0]
         assert got["body"] == body
@@ -466,13 +466,13 @@ class TestRequestStreaming:
 
             poller = asyncio.create_task(poll())
             await relay.send_body("slow", body)
-            status, _, _ = await relay.wait_for_response("slow")
+            status, _, _ = await relay.wait_for_response("slow", chunked=True)
             stop.set()
             await poller
             assert status == 200
 
         async with _upstream({}) as url:
-            record, _ = await _run_tunnel(url, [], scenario)
+            record, _ = await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
 
         relay: _FakeRelay = record["relay"]
         assert boxes["max"] <= REQUEST_BODY_INITIAL_WINDOW + REQUEST_BODY_MAX_CHUNK
@@ -497,11 +497,11 @@ class TestRequestStreaming:
                 request_id="after", method="GET", path="/ping", headers={"content-length": "0"}
             )
             await relay.send_request(ping)
-            status, _, _ = await relay.wait_for_response("after")
+            status, _, _ = await relay.wait_for_response("after", chunked=True)
             assert status == 200
 
         async with _upstream(upstream) as url:
-            await _run_tunnel(url, [], scenario)
+            await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
             await _wait_until(lambda: _upstream_saw_abort(upstream), timeout=5.0)
 
         assert _upstream_saw_abort(upstream)
@@ -515,11 +515,11 @@ class TestRequestStreaming:
                 request_id="live", method="GET", path="/ping", headers={"content-length": "0"}
             )
             await relay.send_request(ping)
-            status, _, _ = await relay.wait_for_response("live")
+            status, _, _ = await relay.wait_for_response("live", chunked=True)
             assert status == 200
 
         async with _upstream({}) as url:
-            await _run_tunnel(url, [], scenario)
+            await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
 
     async def test_cancel_mid_upload_aborts_upstream_and_frees_state(self):
         upstream: dict[str, Any] = {}
@@ -538,11 +538,11 @@ class TestRequestStreaming:
                 request_id="live", method="GET", path="/ping", headers={"content-length": "0"}
             )
             await relay.send_request(ping)
-            status, _, _ = await relay.wait_for_response("live")
+            status, _, _ = await relay.wait_for_response("live", chunked=True)
             assert status == 200
 
         async with _upstream(upstream) as url:
-            await _run_tunnel(url, [], scenario)
+            await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
             await _wait_until(lambda: _upstream_saw_abort(upstream), timeout=5.0)
 
         assert _upstream_saw_abort(upstream)
@@ -555,7 +555,7 @@ class TestRequestStreaming:
             req = _stream_request("early", "/maybe413", len(body))
             await relay.send_request(req)
             await relay.send_body("early", body)
-            status, _, _ = await relay.wait_for_response("early")
+            status, _, _ = await relay.wait_for_response("early", chunked=True)
             assert status == 413
             await _wait_until(lambda: "early" not in tunnel._request_bodies)
 
@@ -565,11 +565,11 @@ class TestRequestStreaming:
                 request_id="live", method="GET", path="/ping", headers={"content-length": "0"}
             )
             await relay.send_request(ping)
-            status, _, _ = await relay.wait_for_response("live")
+            status, _, _ = await relay.wait_for_response("live", chunked=True)
             assert status == 200
 
         async with _upstream(upstream) as url:
-            await _run_tunnel(url, [], scenario)
+            await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
 
     async def test_aborted_end_aborts_upstream_request(self):
         upstream: dict[str, Any] = {}
@@ -588,11 +588,11 @@ class TestRequestStreaming:
                 request_id="live", method="GET", path="/ping", headers={"content-length": "0"}
             )
             await relay.send_request(ping)
-            status, _, _ = await relay.wait_for_response("live")
+            status, _, _ = await relay.wait_for_response("live", chunked=True)
             assert status == 200
 
         async with _upstream(upstream) as url:
-            await _run_tunnel(url, [], scenario)
+            await _run_tunnel(url, [CAPABILITY_CHUNKED_RESPONSE], scenario)
             await _wait_until(lambda: _upstream_saw_abort(upstream), timeout=5.0)
 
         assert _upstream_saw_abort(upstream)

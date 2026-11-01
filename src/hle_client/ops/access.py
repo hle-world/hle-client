@@ -42,11 +42,7 @@ async def add_rule(api: ApiClient, name: str, email: str, provider: str = "any")
         row = await api.add_access_rule(subdomain, email, provider)
     except Exception as exc:
         fail(exc, subdomain)
-    created = AccessRule.from_api(row)
-    if not created.email:
-        # An older relay answering ``{"message": "ok"}``: report what was sent.
-        created = AccessRule(email=email, provider=provider, raw=row)
-    return created
+    return AccessRule.from_api(row)
 
 
 async def remove_rule(api: ApiClient, name: str, rule_id: int) -> None:

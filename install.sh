@@ -19,6 +19,11 @@ set -e
 
 PACKAGE="hle-client"
 VERSION=""
+# The oldest release this installer will install. Below it the client predates
+# the `hle <noun> <verb>` grammar and the flags the installer calls with, so
+# there is nothing sensible to configure. Matches MIN_REMOTE_VERSION in
+# src/hle_client/agent_update.py.
+MIN_VERSION="2609.9"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=11
 
@@ -124,6 +129,29 @@ info() { printf '\033[0;34m[hle]\033[0m %s\n' "$1"; }
 success() { printf '\033[0;32m[hle]\033[0m %s\n' "$1"; }
 error() { printf '\033[0;31m[hle]\033[0m %s\n' "$1" >&2; }
 warn() { printf '\033[0;33m[hle]\033[0m %s\n' "$1" >&2; }
+
+# True when version $1 is at least version $2. Both are dotted decimals, e.g.
+# 2610.19 and 2609.9. POSIX sh only: compare component by component, so a
+# missing component counts as zero and leading zeros are ignored.
+version_ge() {
+    va="$1"
+    vb="$2"
+    while [ -n "$va" ] || [ -n "$vb" ]; do
+        a="${va%%.*}"
+        b="${vb%%.*}"
+        if [ "$a" = "$va" ]; then va=""; else va="${va#*.}"; fi
+        if [ "$b" = "$vb" ]; then vb=""; else vb="${vb#*.}"; fi
+        a="${a:-0}"
+        b="${b:-0}"
+        a="$(printf '%s' "$a" | sed 's/^0*//')"
+        b="$(printf '%s' "$b" | sed 's/^0*//')"
+        [ -n "$a" ] || a=0
+        [ -n "$b" ] || b=0
+        if [ "$a" -gt "$b" ]; then return 0; fi
+        if [ "$a" -lt "$b" ]; then return 1; fi
+    done
+    return 0
+}
 
 # True when we can talk to a human. Under `curl ... | sh` stdin is the script
 # itself, so every prompt must read from /dev/tty instead.
@@ -502,11 +530,6 @@ upgrade_in_place() {
 }
 
 refresh_existing_services() {
-    # Older clients have no `daemon refresh`; there is nothing sensible to do
-    # for them here, and saying so is better than a confusing error.
-    if ! hle daemon refresh --help >/dev/null 2>&1; then
-        return 0
-    fi
     if [ -z "$(hle daemon list 2>/dev/null | grep -v '^No hle services')" ]; then
         return 0
     fi
@@ -516,42 +539,22 @@ refresh_existing_services() {
 
 # --- Agent setup ---
 
-# True when the `hle agent enroll` on PATH advertises the flag in $1.
-agent_enroll_supports() {
-    hle agent enroll --help 2>/dev/null | grep -q -- "$1"
-}
-
 # True when an agent token is already configured. `hle agent status` exits 0
 # whether or not one exists — "no token" is an answer, not a failure — so the
-# output is what tells the two apart. Older clients printed the same line and
-# exited 1, so matching the text keeps them working too.
+# output is what tells the two apart.
 agent_is_enrolled() {
     ! hle agent status 2>/dev/null | grep -q "No agent token"
 }
 
-# Enroll this machine as an agent. The token is piped to `hle agent enroll
-# --stdin`, which checks its shape and writes ~/.config/hle/agent.toml (0600),
-# so the token never lands in a command line that `ps` can read. It is never
-# written to disk by this script, nor echoed back.
+# Enroll this machine as an agent. The token is piped to `hle auth login
+# --agent-token`, whose prompt reads it from stdin, so the token never lands in
+# a command line that `ps` can read. It is never written to disk by this script
+# nor echoed back.
 agent_enroll() {
     if [ -n "$AGENT_TOKEN" ]; then
         # --force: an explicit token on a re-run replaces the saved one, as it
-        # always did; `hle agent enroll` now refuses to overwrite without it.
-        # --stdin: read the token from stdin instead of argv. Clients older than
-        # either flag (which `--version` can install) lack it, so only pass what
-        # the installed client advertises, and fall back to the argument form
-        # there.
-        ENROLL_ARGS=""
-        if agent_enroll_supports --force; then
-            ENROLL_ARGS="$ENROLL_ARGS --force"
-        fi
-        if agent_enroll_supports --stdin; then
-            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
-            printf '%s' "$AGENT_TOKEN" | hle agent enroll --stdin $ENROLL_ARGS || return 1
-        else
-            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
-            hle agent enroll $ENROLL_ARGS "$AGENT_TOKEN" || return 1
-        fi
+        # always did. The version floor guarantees the flag exists.
+        printf '%s' "$AGENT_TOKEN" | hle auth login --agent-token --force || return 1
         return 0
     fi
 
@@ -580,9 +583,9 @@ agent_enroll() {
 
     info "Create an agent at https://hle.world/dashboard and copy its token."
     info "The token is shown only once."
-    # `hle agent enroll` prompts (with echo off) and validates; bind its stdin
-    # to the terminal so it works under `curl ... | sh`.
-    hle agent enroll < /dev/tty || return 1
+    # `hle auth login --agent-token` prompts (with echo off) and validates; bind
+    # its stdin to the terminal so it works under `curl ... | sh`.
+    hle auth login --agent-token < /dev/tty || return 1
 }
 
 agent_install_service() {
@@ -593,10 +596,8 @@ agent_install_service() {
 
     # Scope is auto-detected by the CLI (root -> system, otherwise per-user)
     # unless the caller pinned it with --user / --system.
-    # The flag form, not `hle daemon install agent`: --version may install a
-    # client older than v2609.5, and the hidden alias works on every version.
     # shellcheck disable=SC2086  # SERVICE_SCOPE is intentionally unquoted (may be empty)
-    if hle service install --agent $SERVICE_SCOPE; then  # docs-guard: allow cli-pre-noun-verb
+    if hle daemon install agent $SERVICE_SCOPE; then
         return 0
     fi
 
@@ -609,13 +610,13 @@ agent_install_service() {
 setup_agent() {
     if ! command -v hle >/dev/null 2>&1; then
         error "hle is not on PATH yet — cannot set up the agent."
-        error "Restart your shell, then run: hle agent enroll && hle daemon install agent"
+        error "Restart your shell, then run: hle auth login --agent-token && hle daemon install agent"
         exit 1
     fi
 
     if ! agent_enroll; then
         error "Agent enrollment failed. The client is installed; you can retry with:"
-        error "  hle agent enroll"
+        error "  hle auth login --agent-token"
         error "  hle daemon install agent"
         exit 1
     fi
@@ -628,7 +629,7 @@ setup_agent() {
     if ! agent_is_enrolled; then
         error "Enrollment reported success but no agent token is readable."
         error "Not installing the service: it would restart forever without one."
-        error "Retry with:  hle agent enroll"
+        error "Retry with:  hle auth login --agent-token"
         exit 1
     fi
     success "Agent enrolled."
@@ -643,6 +644,11 @@ setup_agent() {
 # --- Main ---
 
 main() {
+    if [ -n "$VERSION" ] && ! version_ge "$VERSION" "$MIN_VERSION"; then
+        error "hle-client $VERSION is older than the minimum supported ${MIN_VERSION}."
+        error "Install ${MIN_VERSION} or a newer release."
+        exit 1
+    fi
     OS=$(detect_os)
     info "Detected OS: $OS"
 
@@ -705,7 +711,7 @@ main() {
         info "  export PATH=\"\$HOME/.local/bin:\$PATH\""
         if [ "$AGENT" -eq 1 ]; then
             warn "Then finish agent setup with:"
-            warn "  hle agent enroll && hle daemon install agent"
+            warn "  hle auth login --agent-token && hle daemon install agent"
         fi
         exit 0
     fi

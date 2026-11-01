@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
 
-from hle_client.aliases import AliasedGroup
+from hle_client.aliases import AliasedGroup, deprecated_option
 from hle_client.context import api, confirm, confirm_or_abort, out, prompt
 from hle_client.errors import AbortedError, ConflictError, HleError, UsageError
 from hle_client.ops import access as ops_access
@@ -308,12 +308,12 @@ def delete_cmd(ctx: click.Context, label: str, yes: bool, api_key: str | None) -
 )
 # `auth-mode LABEL --set X` resolves here (a hidden alias), so the flag it
 # was spelled with has to parse here too.
-@click.option(
+@deprecated_option(
     "--set",
     "legacy_mode",
     type=click.Choice(["sso", "none"]),
     default=None,
-    hidden=True,
+    replacement="--auth",
 )
 @_api_key_option
 @click.pass_context
@@ -652,7 +652,7 @@ def share_grp() -> None:
 @click.option("--name", "link_name", default=None, help="Optional name for the link")
 # The old spelling. `--label` names the tunnel everywhere else, and here it
 # named the link instead, right next to a LABEL argument that is the tunnel.
-@click.option("--label", "legacy_link_label", default=None, hidden=True)
+@deprecated_option("--label", "legacy_link_label", default=None, replacement="--name")
 @click.option("--max-uses", default=None, type=int, help="Maximum number of uses")
 @_api_key_option
 @click.pass_context

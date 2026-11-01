@@ -100,17 +100,15 @@ class ApiClient:
     async def discover_relay(self) -> RelayDiscoveryResponse | None:
         """Call the discovery endpoint to find the optimal relay server.
 
-        Returns ``None`` when the endpoint is unavailable (404, timeout,
-        network error), allowing the caller to fall back to the default relay.
+        Returns ``None`` when the endpoint is unavailable (a non-2xx status,
+        timeout, network error), allowing the caller to fall back to the
+        default relay.
 
         Failures are logged at ``warning`` rather than ``debug``, because the
         fallback is silent and correct-looking: the tunnel connects, everything
         appears fine, and discovery has simply stopped working. Agent-managed
         tunnels got a 401 here on every single reconnect for exactly this reason,
         and it went unnoticed until a server-side error report surfaced it.
-
-        A 404 stays at debug — that means the relay predates the endpoint, which
-        is expected rather than wrong.
         """
         try:
             async with self._client_ctx() as client:
@@ -123,9 +121,7 @@ class ApiClient:
                 return RelayDiscoveryResponse.model_validate(resp.json())
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
-            if status == 404:
-                logger.debug("Relay discovery not implemented by this relay (404)")
-            elif status in (401, 403):
+            if status in (401, 403):
                 logger.warning(
                     "Relay discovery rejected our credential (HTTP %d) — using the default "
                     "relay. The tunnel still works, but this relay cannot route us.",
@@ -444,9 +440,9 @@ class ApiClient:
 
         Both kinds are ``hle_`` keys now, so the shape cannot tell them apart:
         the relay answers ``kind`` (``api_key`` or ``agent``), and an agent
-        also carries its ``name`` and whether it is still ``active``. A 404
-        means the relay predates the endpoint; the caller falls back to the
-        credential's prefix.
+        also carries its ``name`` and whether it is still ``active``. An
+        unreachable relay or a 5xx leaves the kind unchecked; the caller then
+        falls back to the credential's prefix.
         """
         async with self._client_ctx() as client:
             resp = await client.get(

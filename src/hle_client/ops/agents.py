@@ -45,16 +45,16 @@ class Credential:
 async def classify_credential(api: ApiClient) -> Credential | None:
     """Ask the relay whether a credential is an account key or an agent token.
 
-    Returns ``None`` when the relay cannot say — it is unreachable, or too old
-    to know the endpoint — so the caller falls back to the credential's prefix.
-    A credential the relay refuses (401) raises instead: nothing was saved, and
-    the string the person pasted was not recognised.
+    Returns ``None`` when the relay cannot say — it is unreachable, or answers
+    a 5xx — so the caller falls back to the credential's prefix. A credential
+    the relay refuses (401) raises instead: nothing was saved, and the string
+    the person pasted was not recognised.
     """
     try:
         data = await api.get_credential()
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
-        if code in (404, 405) or code >= 500:
+        if code >= 500:
             return None
         if code == 401:
             raise AuthError(

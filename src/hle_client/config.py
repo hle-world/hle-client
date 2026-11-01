@@ -9,8 +9,7 @@ Two files, one place that knows about both:
 
 This used to live in ``tunnel.py`` (behind underscored names that four other
 modules imported anyway) and ``agent.py``. Neither module needs the file I/O
-to do its job; the CLI does. ``tunnel._load_api_key`` stays as an alias
-because hle-operator and hle-tui import it.
+to do its job; the CLI does.
 """
 
 from __future__ import annotations

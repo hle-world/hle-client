@@ -313,9 +313,6 @@ class AgentWelcome(WireModel):
     type: AgentMsgType = AgentMsgType.WELCOME
     agent_public_id: str
     base_domain: str
-    # Data-plane credential the agent uses to register its tunnels. Sent by the
-    # server so a single enrollment yields both control + data-plane auth.
-    api_key: str | None = None
     endpoints: list[EndpointSpec] = field(default_factory=list)
     # Firepuncher allowlist. None means "server said nothing" — the agent keeps
     # its safe default (its own networks, cloud metadata refused) rather than

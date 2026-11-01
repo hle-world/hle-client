@@ -18,7 +18,7 @@ import click
 
 from hle_client import __version__, config, notices, plugins, shutdown
 from hle_client.agent import AgentClient
-from hle_client.aliases import RootGroup
+from hle_client.aliases import AliasedGroup, RootGroup
 from hle_client.config_cmd import config as config_group
 from hle_client.context import api, out, prompt, resolve_api_key
 from hle_client.credentials import normalize_credential_env
@@ -53,15 +53,17 @@ err_console = Console(stderr=True)
 logger = logging.getLogger(__name__)
 
 
-# Every old spelling, pointing at what replaced it. These resolve and work;
-# they are simply not listed in --help, so what gets taught is one grammar.
+# Every old spelling, pointing at what replaced it. These resolve and work,
+# and warn once naming the replacement; they are not listed in --help, so what
+# gets taught is one grammar.
 LEGACY_ALIASES = {
     "config": "tunnel",
     "service": "daemon",
 }
 
-# Renamed back without a note: `forward` (#151's name) is exec'd by units on
-# every start, so it resolves silently and stays out of --help.
+# `forward` (#151's name) is exec'd by units on every start. It warns like any
+# other old spelling; the units set HLE_NO_DEPRECATION_WARNINGS so their logs
+# stay clean.
 HIDDEN_ALIASES = {
     "forward": "firepuncher",
 }
@@ -73,12 +75,22 @@ VISIBLE_ALIASES = {
     "fp": "firepuncher",
 }
 
+# Whole hidden commands, mapped to what replaced them. `expose` and `webhook`
+# take different options than `tunnel create`/`tunnel webhook`, so they cannot
+# resolve through the alias table; the warning still names the replacement.
+DEPRECATED_COMMANDS = {
+    "expose": "tunnel create",
+    "webhook": "tunnel webhook",
+    "preflight": "tunnel preflight",
+}
+
 
 @click.group(
     cls=RootGroup,
     aliases=LEGACY_ALIASES,
     hidden_aliases=HIDDEN_ALIASES,
     visible_aliases=VISIBLE_ALIASES,
+    deprecated_commands=DEPRECATED_COMMANDS,
 )
 @click.version_option(version=__version__, prog_name="hle")
 @click.option("--debug", is_flag=True, default=False, help="Enable debug logging")
@@ -475,8 +487,8 @@ def _login_with_credential(ctx: click.Context, token: str, *, force: bool = Fals
     """Save ``token`` where the relay says it belongs.
 
     Both kinds look identical, so the relay is asked what this one is. When it
-    cannot say — unreachable, or too old for the endpoint — the credential's
-    prefix decides, with a note saying the kind was not checked.
+    cannot say — unreachable, or a 5xx — the credential's prefix decides, with
+    a note saying the kind was not checked.
     """
     credential = asyncio.run(ops_agents.classify_credential(api(ctx, token)))
     if credential is None:
@@ -650,7 +662,8 @@ main.add_command(service_group, name="daemon")
 # clig.dev, in as many words: don't use abbreviation aliases. But `fp` is how
 # this command has always been typed, and it is advertised beside the full name
 # (`hle fp` in --help), not hidden behind it. `forward` is the hidden alias, so
-# units written against #151's name keep running without a note.
+# units written against #151's name keep running; they set
+# HLE_NO_DEPRECATION_WARNINGS, so the note stays out of their logs.
 main.add_command(fp_command, name="firepuncher")
 main.add_command(update_command, name="update")
 
@@ -740,7 +753,7 @@ def preflight_cmd(
     console.print("[yellow]Nothing fatal, but check the warnings above.[/yellow]")
 
 
-@main.group()
+@main.group(cls=AliasedGroup, deprecated_commands={"enroll": "auth login --agent-token"})
 def agent() -> None:
     """Run a multi-tunnel agent controlled from the dashboard."""
 

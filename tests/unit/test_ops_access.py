@@ -49,10 +49,6 @@ class TestGetAddRemove:
         assert (rule.id, rule.email, rule.provider) == (9, "c@x.com", "hle")
         assert ("add_access_rule", ("ha-x7k", "c@x.com", "hle")) in a.calls
 
-    async def test_add_on_an_old_relay_reports_what_was_sent(self):
-        rule = await access.add_rule(api(add_access_rule={"message": "ok"}), "ha", "c@x.com")
-        assert (rule.email, rule.provider) == ("c@x.com", "any")
-
     async def test_a_duplicate_is_a_conflict(self):
         a = api()
         a.errors["add_access_rule"] = _http_error(409)

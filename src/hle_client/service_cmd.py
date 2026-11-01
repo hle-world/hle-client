@@ -40,7 +40,7 @@ from xml.sax.saxutils import escape as _xml_escape  # nosemgrep
 import click
 
 from hle_client import __version__, config
-from hle_client.aliases import AliasedGroup, LegacyModeCommand, ModeGroup
+from hle_client.aliases import AliasedGroup, LegacyModeCommand, ModeGroup, deprecated_option
 from hle_client.errors import HleError, UsageError
 from hle_client.richcompat import Console, Table
 from hle_client.server import server_url
@@ -2276,14 +2276,16 @@ def _resolve_target(
 
 def _target_options(f: F) -> F:
     """NAME, plus the flag spellings it replaced (hidden, still honoured)."""
-    f = click.option("--name", default=None, hidden=True, help="Explicit unit/plist name")(f)
-    f = click.option("--label", default=None, hidden=True, help="Service label")(f)
-    f = click.option(
+    f = deprecated_option(
+        "--name", default=None, replacement="NAME", help="Explicit unit/plist name"
+    )(f)
+    f = deprecated_option("--label", default=None, replacement="NAME", help="Service label")(f)
+    f = deprecated_option(
         "--agent",
         "agent_mode",
         is_flag=True,
         default=False,
-        hidden=True,
+        replacement="agent",
         help="Target the agent service",
     )(f)
     return click.argument("target", metavar="NAME", required=False)(f)
@@ -2302,7 +2304,17 @@ def service() -> None:
     """
 
 
-@service.group("install", cls=ModeGroup, hidden_aliases={"forward": "firepuncher"})
+@service.group(
+    "install",
+    cls=ModeGroup,
+    hidden_aliases={"forward": "firepuncher"},
+    deprecated_modes={
+        "--agent": "agent",
+        "--fp": "firepuncher AGENT TARGET",
+        "--service": "tunnel LABEL URL",
+        "--label": "tunnel LABEL URL",
+    },
+)
 def install_group() -> None:
     """Install and start a background service.
 

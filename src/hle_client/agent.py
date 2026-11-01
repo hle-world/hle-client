@@ -327,7 +327,6 @@ class AgentClient:
         self._endpoints: dict[str, _Running] = {}
         # Endpoints the server asked for that could not be started: label -> why.
         self._failed: dict[str, str] = {}
-        self._api_key: str | None = None
         self._base_domain: str | None = None
         self._fp: FpAgentSide | None = None
         # Until the server tells us otherwise, the agent's own networks are
@@ -627,7 +626,6 @@ class AgentClient:
                 ws, FragmentingConnection
             ):
                 ws.enable_fragmentation()
-            self._api_key = welcome.api_key
             self._base_domain = welcome.base_domain
             if welcome.forward_rules:
                 self._forward_rules = list(welcome.forward_rules)
@@ -1693,10 +1691,9 @@ class AgentClient:
                 # present a Name the upstream's host allow-list rejects.
                 upstream_host = k8s_targets.authority_of(spec.service_url)
                 cfg_spec = replace(spec, service_url=decision.url)
-        # Data-plane credential: an explicit key from the welcome if the server
-        # sent one, otherwise the agent's own token (the server accepts hlea_
-        # tokens for tunnel registration). One enrollment, one secret.
-        data_key = self._api_key or self._token
+        # Data-plane credential: the agent's own token. One enrollment, one
+        # secret — the relay accepts it for tunnel registration.
+        data_key = self._token
         # The whole TunnelSpec (1.3), through the same mapping the CLI uses, so
         # a dashboard endpoint can set everything `hle tunnel create` can. The
         # agent is what manages these tunnels, whatever the spec says.

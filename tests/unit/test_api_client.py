@@ -364,9 +364,8 @@ class TestRelayDiscoveryFailureIsVisible:
             assert await client.discover_relay() is None
         assert "500" in caplog.text
 
-    async def test_a_404_stays_quiet(self, client: ApiClient, caplog) -> None:
-        """A relay older than the endpoint is expected, not broken — warning on
-        it would train everyone to ignore the warning that matters."""
+    async def test_a_404_warns_like_any_other_failure(self, client: ApiClient, caplog) -> None:
+        """The relay always has the endpoint, so a 404 is a real failure."""
         with (
             caplog.at_level(logging.WARNING, logger="hle_client.api"),
             patch(
@@ -374,7 +373,7 @@ class TestRelayDiscoveryFailureIsVisible:
             ),
         ):
             assert await client.discover_relay() is None
-        assert caplog.text == ""
+        assert "404" in caplog.text
 
     async def test_an_unreachable_relay_warns(self, client: ApiClient, caplog) -> None:
         with (
