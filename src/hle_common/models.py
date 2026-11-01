@@ -22,6 +22,17 @@ from hle_common.wire import WireModel
 
 # Capability tokens exchanged during tunnel handshake
 CAPABILITY_CHUNKED_RESPONSE = "chunked_response"
+# Protocol 1.7: the client can receive a request body as a stream of
+# HTTP_REQUEST_BODY_CHUNK frames with per-request credit flow control
+# (STREAM_WINDOW_UPDATE) — see ProxiedHttpRequest.body_streamed.
+CAPABILITY_REQUEST_STREAMING = "request_streaming"
+
+# Request body streaming flow-control constants, shared by both sides.
+# Decoded bytes the relay may send before it receives any window update.
+REQUEST_BODY_INITIAL_WINDOW = 4 * 1024 * 1024
+# Max decoded bytes per HTTP_REQUEST_BODY_CHUNK. Keeps head-of-line blocking
+# on the shared WebSocket small.
+REQUEST_BODY_MAX_CHUNK = 256 * 1024
 
 # Validation patterns
 _SERVICE_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
@@ -189,6 +200,10 @@ class ProxiedHttpRequest(WireModel):
     headers: dict[str, str]
     body: str | None = None  # base64 encoded
     query_string: str = ""
+    # Protocol 1.7. False keeps the old wire shape — `body` carries the whole
+    # request. True means `body` is None and the body follows as
+    # HTTP_REQUEST_BODY_CHUNK* then exactly one HTTP_REQUEST_BODY_END.
+    body_streamed: bool = False
 
 
 @dataclass(kw_only=True)
@@ -225,6 +240,51 @@ class HttpResponseEnd(WireModel):
 
     request_id: str
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Streamed HTTP request body (relay -> client, protocol 1.7)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(kw_only=True)
+class HttpRequestBodyChunk(WireModel):
+    """One body segment of a streamed HTTP request body."""
+
+    request_id: str
+    chunk_index: int  # 0-based, for ordering / debug
+    data: str  # base64-encoded bytes
+
+
+@dataclass(kw_only=True)
+class HttpRequestBodyEnd(WireModel):
+    """Terminal frame signalling a streamed HTTP request body is complete."""
+
+    request_id: str
+    total_bytes: int
+    aborted: bool = False
+
+
+@dataclass(kw_only=True)
+class StreamWindowUpdate(WireModel):
+    """Receiver -> sender: grant more credit for one streamed body.
+
+    Sent once the receiver has handed bytes to the upstream (not on arrival),
+    so a slow upstream exerts backpressure all the way to the relay. The
+    receiver may coalesce updates, but must send one at the latest when
+    unacknowledged consumed bytes reach ``REQUEST_BODY_INITIAL_WINDOW // 2``.
+
+    Flow-control rule: the sender keeps
+    ``credit = REQUEST_BODY_INITIAL_WINDOW + sum(updates) - sent_decoded_bytes``
+    and never sends a chunk larger than its current credit.
+    """
+
+    request_id: str
+    bytes: int  # must be > 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.bytes, bool) or not isinstance(self.bytes, int) or self.bytes <= 0:
+            raise ValueError("bytes must be a positive integer")
 
 
 # ---------------------------------------------------------------------------

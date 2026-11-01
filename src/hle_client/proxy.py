@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from hle_client.chunk_budget import ChunkBudget, LayeredBudget
 
@@ -225,6 +225,14 @@ def _upstream_error_headers(exc: BaseException) -> dict[str, str | list[str]]:
     return {"content-type": "text/plain", UPSTREAM_ERROR_HEADER: type(exc).__name__}
 
 
+def _is_streaming_body(body: bytes | AsyncIterator[bytes] | None) -> bool:
+    """Whether *body* is a one-shot async iterator rather than bytes.
+
+    A streamed body cannot be replayed, so the 502 Host retry must skip it.
+    """
+    return body is not None and hasattr(body, "__anext__")
+
+
 def _collect_response_headers(
     raw_headers: list[tuple[bytes, bytes]],
 ) -> dict[str, str | list[str]]:
@@ -400,7 +408,7 @@ class LocalProxy:
         method: str,
         path: str,
         headers: dict[str, str],
-        body: bytes | None = None,
+        body: bytes | AsyncIterator[bytes] | None = None,
         query_string: str = "",
     ) -> tuple[int, dict[str, str | list[str]], bytes]:
         """Forward an HTTP request to the local service.
@@ -414,7 +422,10 @@ class LocalProxy:
         headers:
             Request headers to forward.
         body:
-            Raw request body bytes, or *None*.
+            Raw request body bytes, an async iterator of body chunks, or *None*.
+            An iterator is streamed upstream (``Transfer-Encoding: chunked``
+            unless a ``Content-Length`` header is present) and cannot be
+            replayed.
         query_string:
             URL query string (without the leading ``?``).
 
@@ -478,6 +489,7 @@ class LocalProxy:
                 and self._detected_forward_host is None
                 and not self.config.forward_host
                 and "host" in {k.lower() for k in headers}
+                and not _is_streaming_body(body)
             ):
                 browser_host = next(v for k, v in headers.items() if k.lower() == "host")
                 logger.info(
@@ -556,7 +568,7 @@ class LocalProxy:
         method: str,
         path: str,
         headers: dict[str, str],
-        body: bytes | None = None,
+        body: bytes | AsyncIterator[bytes] | None = None,
         query_string: str = "",
         budget: ChunkBudget | LayeredBudget | None = None,
     ) -> AsyncGenerator[tuple[int | None, dict[str, str | list[str]] | None, bytes | None], None]:

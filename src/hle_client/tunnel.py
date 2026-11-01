@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse, urlunparse
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 
 import httpx
 import websockets
@@ -48,7 +48,11 @@ from hle_common.fragmentation import (
 )
 from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
+    CAPABILITY_REQUEST_STREAMING,
+    REQUEST_BODY_INITIAL_WINDOW,
     DiagnosticEvent,
+    HttpRequestBodyChunk,
+    HttpRequestBodyEnd,
     HttpResponseChunk,
     HttpResponseEnd,
     HttpResponseStart,
@@ -57,6 +61,7 @@ from hle_common.models import (
     ProxiedHttpResponse,
     SpeedTestData,
     SpeedTestResult,
+    StreamWindowUpdate,
     TunnelRegistration,
     TunnelRegistrationResponse,
     WsStreamAccept,
@@ -525,6 +530,29 @@ _WS_HOP_BY_HOP_HEADERS = frozenset(
 )
 
 
+class _RequestBodyAbortedError(Exception):
+    """A streamed request body was aborted — httpx must drop the upstream request."""
+
+
+@dataclass
+class _RequestBodyStream:
+    """Client-side receive state for one streamed HTTP request body.
+
+    ``queue`` carries decoded chunks, with ``None`` marking the end. The
+    counters implement flow control: ``received`` is decoded bytes the relay
+    sent, ``consumed`` is decoded bytes already yielded to httpx (handed to the
+    upstream), and ``acked`` is consumed bytes already reported back via
+    ``STREAM_WINDOW_UPDATE``.
+    """
+
+    request_id: str
+    queue: asyncio.Queue[bytes | None] = field(default_factory=asyncio.Queue)
+    received: int = 0
+    consumed: int = 0
+    acked: int = 0
+    aborted: bool = False
+
+
 @dataclass
 class Tunnel:
     """Manages a single tunnel connection to the relay server.
@@ -573,6 +601,12 @@ class Tunnel:
     _diagnostics_enabled: bool = field(default=False, init=False, repr=False)
     _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     _active_chunked: dict[str, asyncio.Task[None]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    # Streamed request bodies being received, keyed by request_id. Registered in
+    # the read loop before the request task starts, so chunks arriving right
+    # behind HTTP_REQUEST are never dropped.
+    _request_bodies: dict[str, _RequestBodyStream] = field(
         default_factory=dict, init=False, repr=False
     )
     # This endpoint's byte share of the process-wide chunk budget (created on
@@ -895,7 +929,11 @@ class Tunnel:
                 protocol_version=PROTOCOL_VERSION,
                 websocket_enabled=self.config.websocket_enabled,
                 auth_mode=self.config.auth_mode,
-                capabilities=[CAPABILITY_CHUNKED_RESPONSE, CAPABILITY_FRAGMENTATION],
+                capabilities=[
+                    CAPABILITY_CHUNKED_RESPONSE,
+                    CAPABILITY_FRAGMENTATION,
+                    CAPABILITY_REQUEST_STREAMING,
+                ],
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
                 zone=self.config.zone,
@@ -971,7 +1009,12 @@ class Tunnel:
 
             match msg.type:
                 case MessageType.HTTP_REQUEST:
+                    self._register_request_body(msg)
                     self._spawn(self._handle_http_request(ws, msg))
+                case MessageType.HTTP_REQUEST_BODY_CHUNK:
+                    self._handle_request_body_chunk(msg)
+                case MessageType.HTTP_REQUEST_BODY_END:
+                    self._handle_request_body_end(msg)
                 case MessageType.WS_OPEN:
                     self._spawn(self._handle_ws_open(ws, msg))
                 case MessageType.WS_FRAME:
@@ -989,6 +1032,7 @@ class Tunnel:
                 case MessageType.HTTP_REQUEST_CANCEL:
                     request_id = (msg.payload or {}).get("request_id")
                     if request_id:
+                        self._abort_request_body(request_id)
                         task = self._active_chunked.pop(request_id, None)
                         if task and not task.done():
                             task.cancel()
@@ -1152,6 +1196,133 @@ class Tunnel:
         )
 
     # ------------------------------------------------------------------
+    # Streamed request body receive (protocol 1.7)
+    # ------------------------------------------------------------------
+
+    def _register_request_body(self, msg: ProtocolMessage) -> None:
+        """Create receive state for a streamed body before its task starts.
+
+        Called from the read loop on HTTP_REQUEST, so chunks arriving right
+        behind the request find the state already present. Never awaits.
+        """
+        payload = msg.payload or {}
+        if not payload.get("body_streamed"):
+            return
+        request_id = msg.request_id or payload.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            return
+        self._request_bodies[request_id] = _RequestBodyStream(request_id=request_id)
+
+    def _abort_request_body(self, request_id: str) -> None:
+        """Mark a streamed request body aborted and wake its iterator."""
+        stream = self._request_bodies.get(request_id)
+        if stream is None:
+            return
+        stream.aborted = True
+        stream.queue.put_nowait(None)
+
+    def _handle_request_body_chunk(self, msg: ProtocolMessage) -> None:
+        """Queue one decoded request-body chunk. Never awaits (read loop)."""
+        try:
+            chunk = HttpRequestBodyChunk.model_validate(msg.payload or {})
+        except Exception:
+            logger.exception("Malformed HTTP_REQUEST_BODY_CHUNK payload: %s", msg.payload)
+            return
+        stream = self._request_bodies.get(chunk.request_id)
+        if stream is None:
+            # Late chunks after a cancel or an early upstream answer are normal.
+            logger.debug("Dropping body chunk for unknown request %s", chunk.request_id)
+            return
+        if stream.aborted:
+            return
+        try:
+            data = base64.b64decode(chunk.data, validate=True)
+        except Exception:
+            logger.warning("Dropping undecodable body chunk for %s", chunk.request_id)
+            stream.aborted = True
+            stream.queue.put_nowait(None)
+            return
+        queued = stream.received - stream.consumed
+        if queued + len(data) > REQUEST_BODY_INITIAL_WINDOW + REQUEST_BODY_MAX_CHUNK:
+            # The relay sent past its credit: a protocol violation. Stop
+            # accepting and let httpx abort the upstream request.
+            stream.aborted = True
+            logger.warning(
+                "Relay overran request body credit for %s (received=%d consumed=%d); aborting",
+                chunk.request_id,
+                stream.received,
+                stream.consumed,
+            )
+            stream.queue.put_nowait(None)
+            return
+        stream.received += len(data)
+        stream.queue.put_nowait(data)
+
+    def _handle_request_body_end(self, msg: ProtocolMessage) -> None:
+        """Queue the end-of-body sentinel. Never awaits (read loop)."""
+        try:
+            end = HttpRequestBodyEnd.model_validate(msg.payload or {})
+        except Exception:
+            logger.exception("Malformed HTTP_REQUEST_BODY_END payload: %s", msg.payload)
+            return
+        stream = self._request_bodies.get(end.request_id)
+        if stream is None:
+            logger.debug("Dropping body end for unknown request %s", end.request_id)
+            return
+        if end.aborted:
+            stream.aborted = True
+        stream.queue.put_nowait(None)
+
+    def _streamed_body(self, ws: _ClientConn, request_id: str) -> AsyncIterator[bytes] | None:
+        """The async iterator to hand httpx for a streamed request body."""
+        stream = self._request_bodies.get(request_id)
+        if stream is None:
+            logger.warning("Streamed request %s has no registered body state", request_id)
+            return None
+        return self._iter_body(ws, stream)
+
+    async def _iter_body(
+        self, ws: _ClientConn, stream: _RequestBodyStream
+    ) -> AsyncIterator[bytes]:
+        """Yield body chunks to httpx and ack them once handed upstream."""
+        try:
+            while True:
+                chunk = await stream.queue.get()
+                if chunk is None:
+                    if stream.aborted:
+                        raise _RequestBodyAbortedError(stream.request_id)
+                    return
+                if stream.aborted:
+                    raise _RequestBodyAbortedError(stream.request_id)
+                yield chunk
+                # The generator only resumes once httpx has taken the chunk and
+                # handed it to the upstream, so count it consumed here.
+                if self._request_bodies.get(stream.request_id) is not stream:
+                    return  # the request already finished — send nothing more
+                stream.consumed += len(chunk)
+                unacked = stream.consumed - stream.acked
+                if unacked >= REQUEST_BODY_INITIAL_WINDOW // 2:
+                    await self._send_window_update(ws, stream.request_id, unacked)
+                    stream.acked += unacked
+        finally:
+            if self._request_bodies.get(stream.request_id) is stream:
+                del self._request_bodies[stream.request_id]
+
+    async def _send_window_update(self, ws: _ClientConn, request_id: str, amount: int) -> None:
+        """Tell the relay we have handed *amount* more decoded bytes upstream."""
+        update = StreamWindowUpdate(request_id=request_id, bytes=amount)
+        msg = ProtocolMessage(
+            type=MessageType.STREAM_WINDOW_UPDATE,
+            tunnel_id=self._tunnel_id,
+            request_id=request_id,
+            payload=update.model_dump(),
+        )
+        try:
+            await ws.send(msg.model_dump_json())
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug("Connection closed while sending window update for %s", request_id)
+
+    # ------------------------------------------------------------------
     # HTTP request handling
     # ------------------------------------------------------------------
 
@@ -1184,6 +1355,7 @@ class Tunnel:
                 )
                 with contextlib.suppress(websockets.exceptions.ConnectionClosed):
                     await ws.send(resp_msg.model_dump_json())
+                self._request_bodies.pop(req.request_id, None)
                 return
             # Forward exactly the validated, normalised path.
             if msg.payload is not None:
@@ -1202,17 +1374,36 @@ class Tunnel:
         """Forward HTTP request using the original single-message response path."""
         req = ProxiedHttpRequest.model_validate(msg.payload)
 
-        body: bytes | None = None
-        if req.body is not None:
-            body = base64.b64decode(req.body)
+        body: bytes | AsyncIterator[bytes] | None
+        if req.body_streamed:
+            body = self._streamed_body(ws, req.request_id)
+        else:
+            body = base64.b64decode(req.body) if req.body is not None else None
 
-        status_code, resp_headers, resp_body = await self._proxy.forward_http(
-            method=req.method,
-            path=req.path,
-            headers=req.headers,
-            body=body,
-            query_string=req.query_string,
-        )
+        try:
+            status_code, resp_headers, resp_body = await self._proxy.forward_http(
+                method=req.method,
+                path=req.path,
+                headers=req.headers,
+                body=body,
+                query_string=req.query_string,
+            )
+        except _RequestBodyAbortedError:
+            # The relay cancelled or overran the upload: answer with a small
+            # error so it is not left waiting, and drop the receive state.
+            logger.debug("Request body aborted for %s", req.request_id)
+            self._request_bodies.pop(req.request_id, None)
+            await self._send_buffered_response(
+                ws,
+                req.request_id,
+                400,
+                {"content-type": "text/plain"},
+                b"Bad Request: request body aborted",
+            )
+            return
+        finally:
+            if req.body_streamed:
+                self._request_bodies.pop(req.request_id, None)
 
         # Strip + report the synthetic upstream-error marker before relaying.
         reason = self._pop_upstream_error(resp_headers)
@@ -1223,22 +1414,37 @@ class Tunnel:
         if resp_body is not None:
             encoded_body = base64.b64encode(resp_body).decode("ascii")
 
+        await self._send_buffered_response(
+            ws, req.request_id, status_code, resp_headers, encoded_body
+        )
+
+    async def _send_buffered_response(
+        self,
+        ws: _ClientConn,
+        request_id: str,
+        status_code: int,
+        headers: dict[str, str | list[str]],
+        encoded_body: str | bytes | None,
+    ) -> None:
+        """Send one whole-body HTTP_RESPONSE back over the tunnel."""
+        if isinstance(encoded_body, bytes):
+            encoded_body = base64.b64encode(encoded_body).decode("ascii")
         response = ProxiedHttpResponse(
-            request_id=req.request_id,
+            request_id=request_id,
             status_code=status_code,
-            headers=resp_headers,
+            headers=headers,
             body=encoded_body,
         )
         response_msg = ProtocolMessage(
             type=MessageType.HTTP_RESPONSE,
             tunnel_id=self._tunnel_id,
-            request_id=req.request_id,
+            request_id=request_id,
             payload=response.model_dump(),
         )
         try:
             await ws.send(response_msg.model_dump_json())
         except websockets.exceptions.ConnectionClosed:
-            logger.debug("Connection closed while sending HTTP response for %s", req.request_id)
+            logger.debug("Connection closed while sending HTTP response for %s", request_id)
 
     async def _handle_http_request_chunked(
         self,
@@ -1253,9 +1459,11 @@ class Tunnel:
         if current is not None:
             self._active_chunked[req.request_id] = current
 
-        body: bytes | None = None
-        if req.body is not None:
-            body = base64.b64decode(req.body)
+        body: bytes | AsyncIterator[bytes] | None
+        if req.body_streamed:
+            body = self._streamed_body(ws, req.request_id)
+        else:
+            body = base64.b64decode(req.body) if req.body is not None else None
 
         chunk_index = 0
         shared = get_chunk_budget()
@@ -1373,6 +1581,8 @@ class Tunnel:
                 await ws.send(end_msg.model_dump_json())
         finally:
             self._active_chunked.pop(req.request_id, None)
+            if req.body_streamed:
+                self._request_bodies.pop(req.request_id, None)
 
     # ------------------------------------------------------------------
     # WebSocket stream handling
@@ -1967,6 +2177,12 @@ class Tunnel:
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
+
+        # Wake any half-received request bodies so their iterators can exit.
+        for stream in self._request_bodies.values():
+            stream.aborted = True
+            stream.queue.put_nowait(None)
+        self._request_bodies.clear()
 
         self._ws = None
         await self._proxy.stop()
