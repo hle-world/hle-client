@@ -270,6 +270,13 @@ async def _upstream(record: dict[str, Any]):
                     body += piece
                     remaining -= len(piece)
                     await asyncio.sleep(0.01)
+            elif path.startswith("/hang"):
+                # Read nothing for long enough that the kernel's socket buffers
+                # fill and the client's queue must overrun its window. Linux
+                # loopback buffers absorb several MB, so a short stall is not
+                # enough there.
+                await asyncio.sleep(2.0)
+                body = await reader.readexactly(length) if length else b""
             elif path.startswith("/stall"):
                 # Do not read at all for a moment, so the client's queue fills.
                 await asyncio.sleep(0.3)
@@ -482,10 +489,12 @@ class TestRequestStreaming:
 
     async def test_overrun_aborts_request_and_read_loop_survives(self):
         upstream: dict[str, Any] = {}
-        body = os.urandom(8 * 1024 * 1024)
+        # Well past window + any loopback socket buffering, so the overrun
+        # happens on every platform.
+        body = os.urandom(32 * 1024 * 1024)
 
         async def scenario(relay: _FakeRelay, tunnel: Tunnel) -> None:
-            req = _stream_request("over", "/stall", len(body))
+            req = _stream_request("over", "/hang", len(body))
             await relay.send_request(req)
             # Ignore credit entirely: the client must abort once it has queued
             # more than its window allows.
