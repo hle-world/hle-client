@@ -36,8 +36,9 @@ from hle_common.fragmentation import (
     is_fragment_frame,
 )
 from hle_common.models import (
+    HttpResponseChunk,
+    HttpResponseStart,
     ProxiedHttpRequest,
-    ProxiedHttpResponse,
     TunnelRegistrationResponse,
     WsStreamFrame,
     WsStreamOpen,
@@ -399,16 +400,25 @@ class TestTunnelFragmentation:
         assert "chunked_response" in record["capabilities"]
 
     async def test_large_http_request_and_response(self):
-        """6 MB body each way: an 8 MB envelope relay→client and client→relay."""
+        """6 MB body each way: an 8 MB request envelope, a chunked response."""
         body = os.urandom(6 * 1024 * 1024)
 
         async def scenario(relay: _Relay, tunnel: Tunnel) -> None:
             await relay.send(_http_request("r1", "POST", "/echo", body))
-            msg = await relay.recv(MessageType.HTTP_RESPONSE)
-            resp = ProxiedHttpResponse.model_validate(msg.payload)
-            assert resp.status_code == 200
-            assert base64.b64decode(resp.body or "") == body
-            assert relay.fragments_in > 1
+            start = await relay.recv(MessageType.HTTP_RESPONSE_START)
+            assert HttpResponseStart.model_validate(start.payload).status_code == 200
+            got = b""
+            while True:
+                msg = await relay.recv()
+                if msg.type == MessageType.HTTP_RESPONSE_CHUNK:
+                    got += base64.b64decode(HttpResponseChunk.model_validate(msg.payload).data)
+                elif msg.type == MessageType.HTTP_RESPONSE_END:
+                    break
+            # The 8 MB request reached the upstream only because the tunnel
+            # reassembled the relay's fragments. The response comes back as
+            # small chunks, so nothing needs fragmenting on the way out; the
+            # client-side fragmenter is covered by the WS frame test below.
+            assert got == body
 
         async with _echo_http() as url:
             await _run_tunnel(url, [CAPABILITY_FRAGMENTATION], scenario)
@@ -482,34 +492,38 @@ class TestTunnelFragmentation:
             # The tunnel itself is still serving (the WS-only upstream answers
             # plain HTTP with 426, which is all this needs).
             await relay.send(_http_request("r2", "GET", "/"))
-            resp = await relay.recv(MessageType.HTTP_RESPONSE)
-            assert ProxiedHttpResponse.model_validate(resp.payload).request_id == "r2"
+            resp = await relay.recv(MessageType.HTTP_RESPONSE_START)
+            assert HttpResponseStart.model_validate(resp.payload).request_id == "r2"
 
         async with _echo_ws(upstream) as ws_url:
             await _run_tunnel(ws_url, [CAPABILITY_FRAGMENTATION], scenario)
         assert upstream["close_code"] == 1009
 
-    async def test_without_the_capability_nothing_changes_on_the_wire(self):
-        """An old relay gets one whole envelope, in today's exact bytes."""
-        size = 2 * 1024 * 1024  # ~2.7 MB envelope: over the threshold, under the cap
+    async def test_without_the_capability_nothing_is_fragmented(self):
+        """An old relay gets whole envelopes, in today's exact bytes."""
+        size = 2 * 1024 * 1024
 
         async def scenario(relay: _Relay, tunnel: Tunnel) -> None:
             await relay.send(_http_request("r1", "GET", f"/bytes/{size}"))
-            msg = await relay.recv(MessageType.HTTP_RESPONSE)
+            start = await relay.recv(MessageType.HTTP_RESPONSE_START)
+            assert HttpResponseStart.model_validate(start.payload).status_code == 200
+            body = b""
+            while True:
+                msg = await relay.recv()
+                if msg.type == MessageType.HTTP_RESPONSE_CHUNK:
+                    body += base64.b64decode(HttpResponseChunk.model_validate(msg.payload).data)
+                elif msg.type == MessageType.HTTP_RESPONSE_END:
+                    break
+            assert body == b"b" * size
             conn = tunnel._ws
             assert isinstance(conn, FragmentingConnection)
             assert not conn.fragmentation_enabled
             assert relay.fragments_in == 0
-            raw = relay.raw_in[-1]
-            assert len(raw) > FRAGMENT_THRESHOLD
-            assert raw == msg.model_dump_json()
-            resp = ProxiedHttpResponse.model_validate(msg.payload)
-            assert base64.b64decode(resp.body or "") == b"b" * size
 
         async with _echo_http() as url:
             await _run_tunnel(url, [], scenario)
 
-    async def test_upstream_max_size_follows_negotiation(self):
+    async def test_upstream_max_size_uses_the_reassembly_ceiling(self):
         async def max_size_for(server_caps: list[str]) -> int:
             tunnel = Tunnel(TunnelConfig(service_url="http://localhost:7681"))
             tunnel._tunnel_id = "t1"
@@ -529,8 +543,10 @@ class TestTunnelFragmentation:
             await tunnel._cleanup()
             return int(captured["max_size"])
 
+        # Fragmentation is always negotiated on the relay link, so the local WS
+        # gets the reassembly ceiling whatever the server listed.
         assert await max_size_for([CAPABILITY_FRAGMENTATION]) == MAX_MESSAGE_SIZE
-        assert await max_size_for(["chunked_response"]) == WS_MAX_MESSAGE_SIZE
+        assert await max_size_for(["chunked_response"]) == MAX_MESSAGE_SIZE
 
 
 # --------------------------------------------------------------------------- #

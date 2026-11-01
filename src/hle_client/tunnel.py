@@ -87,11 +87,9 @@ logger = logging.getLogger(__name__)
 
 _ClientConn = websockets.asyncio.client.ClientConnection
 
-# The credential file I/O lives in hle_client.config. These names stay
-# because hle-operator and hle-tui import them from here; nothing inside
-# hle_client uses them any more.
-_load_api_key = hle_config.load_api_key
-_save_api_key = hle_config.save_api_key
+# The credential file I/O lives in hle_client.config. These names stay because
+# hle-operator and hle-tui import them from here; nothing inside hle_client
+# uses them any more.
 _remove_api_key = hle_config.remove_api_key
 _CONFIG_DIR = hle_config.CONFIG_DIR
 _CONFIG_FILE = hle_config.CONFIG_FILE
@@ -973,7 +971,7 @@ class Tunnel:
             self._tunnel_id = ack_data.tunnel_id
             self._public_url = ack_data.public_url
             self._subdomain = ack_data.subdomain or None
-            self._server_caps = getattr(ack_data, "server_capabilities", []) or []
+            self._server_caps = ack_data.server_capabilities or []
             if CAPABILITY_FRAGMENTATION in self._server_caps and isinstance(
                 ws, FragmentingConnection
             ):
@@ -1341,85 +1339,24 @@ class Tunnel:
             req_path = _validated_webhook_path((msg.payload or {}).get("path", ""), prefix)
             if req_path is None:
                 req = ProxiedHttpRequest.model_validate(msg.payload)
-                response = ProxiedHttpResponse(
-                    request_id=req.request_id,
-                    status_code=404,
-                    headers={"content-type": "application/json"},
-                    body=base64.b64encode(
-                        b'{"error":"Not found","detail":"This webhook endpoint only accepts '
-                        b'requests on the registered path."}'
-                    ).decode("ascii"),
+                await self._send_buffered_response(
+                    ws,
+                    req.request_id,
+                    404,
+                    {"content-type": "application/json"},
+                    b'{"error":"Not found","detail":"This webhook endpoint only accepts '
+                    b'requests on the registered path."}',
                 )
-                resp_msg = ProtocolMessage(
-                    type=MessageType.HTTP_RESPONSE,
-                    tunnel_id=self._tunnel_id,
-                    request_id=req.request_id,
-                    payload=response.model_dump(),
-                )
-                with contextlib.suppress(websockets.exceptions.ConnectionClosed):
-                    await ws.send(resp_msg.model_dump_json())
                 self._request_bodies.pop(req.request_id, None)
                 return
             # Forward exactly the validated, normalised path.
             if msg.payload is not None:
                 msg.payload["path"] = req_path
 
-        if CAPABILITY_CHUNKED_RESPONSE in self._server_caps:
-            await self._handle_http_request_chunked(ws, msg)
-        else:
-            await self._handle_http_request_buffered(ws, msg)
-
-    async def _handle_http_request_buffered(
-        self,
-        ws: _ClientConn,
-        msg: ProtocolMessage,
-    ) -> None:
-        """Forward HTTP request using the original single-message response path."""
-        req = ProxiedHttpRequest.model_validate(msg.payload)
-
-        body: bytes | AsyncIterator[bytes] | None
-        if req.body_streamed:
-            body = self._streamed_body(ws, req.request_id)
-        else:
-            body = base64.b64decode(req.body) if req.body is not None else None
-
-        try:
-            status_code, resp_headers, resp_body = await self._proxy.forward_http(
-                method=req.method,
-                path=req.path,
-                headers=req.headers,
-                body=body,
-                query_string=req.query_string,
-            )
-        except _RequestBodyAbortedError:
-            # The relay cancelled or overran the upload: answer with a small
-            # error so it is not left waiting, and drop the receive state.
-            logger.debug("Request body aborted for %s", req.request_id)
-            self._request_bodies.pop(req.request_id, None)
-            await self._send_buffered_response(
-                ws,
-                req.request_id,
-                400,
-                {"content-type": "text/plain"},
-                b"Bad Request: request body aborted",
-            )
-            return
-        finally:
-            if req.body_streamed:
-                self._request_bodies.pop(req.request_id, None)
-
-        # Strip + report the synthetic upstream-error marker before relaying.
-        reason = self._pop_upstream_error(resp_headers)
-        if reason is not None:
-            self._emit_upstream_error(req, status_code, reason)
-
-        encoded_body: str | None = None
-        if resp_body is not None:
-            encoded_body = base64.b64encode(resp_body).decode("ascii")
-
-        await self._send_buffered_response(
-            ws, req.request_id, status_code, resp_headers, encoded_body
-        )
+        # The relay always echoes `chunked_response` when advertised, so the
+        # chunked path is the only response path. The whole-body HTTP_RESPONSE
+        # is kept for the webhook 404 above and for an aborted request body.
+        await self._handle_http_request_chunked(ws, msg)
 
     async def _send_buffered_response(
         self,
@@ -1759,20 +1696,14 @@ class Tunnel:
                 additional_headers=clean_headers,
                 subprotocols=requested_subprotocols or None,
                 ssl=ws_ssl,
-                # Match the control-plane limit. The library default is 1 MB,
+                # Match the control-plane ceiling. The library default is 1 MB,
                 # which breaks upstreams that send single frames bigger than
                 # that — e.g. Home Assistant's config/entity_registry/list
                 # response easily exceeds 1 MB on a populated install. The
-                # relay-side WS accepts up to WS_MAX_MESSAGE_SIZE; mirroring
-                # it here means an oversized frame fails predictably instead
-                # of silently 1006-closing the browser's WebSocket. With
-                # fragmentation negotiated the relay link has no per-message
-                # cap below the reassembly ceiling, so neither does this one.
-                max_size=(
-                    MAX_MESSAGE_SIZE
-                    if CAPABILITY_FRAGMENTATION in self._server_caps
-                    else WS_MAX_MESSAGE_SIZE
-                ),
+                # relay always negotiates fragmentation, so the relay link has
+                # no per-message cap below the reassembly ceiling, and neither
+                # does this one.
+                max_size=MAX_MESSAGE_SIZE,
                 **connect_kwargs,
             )
         except Exception as exc:

@@ -79,8 +79,9 @@ The CLI has one shape: `hle <noun> <verb>`. The nouns are `tunnel`, `agent`,
 apply: `list`, `get`, `create`, `set`, `delete`. `hle fp` is a short alias for
 `hle firepuncher`. Older spellings (`hle expose`, `hle config`, `hle service`, <!-- docs-guard: allow cli-pre-noun-verb -->
 `hle forward`, and verbs such as `access add`, `pin status`, `share revoke`, <!-- docs-guard: allow cli-pre-noun-verb -->
-`auth-mode --set`, `daemon uninstall --label`, `agent enroll`) still work but
-are not listed in `--help`.
+`auth-mode --set`, `daemon uninstall --label`, `agent enroll`) still work,
+but each prints one `Deprecated:` line to stderr naming the replacement and is
+not listed in `--help`; they are removed in a later release.
 
 Every command that reads a resource accepts `-o json`.
 
@@ -226,7 +227,7 @@ For scripts, an enrollment token can be read from stdin instead of an argument,
 so it never appears in the process list or shell history:
 
 ```bash
-printf %s "$HLE_AGENT_TOKEN" | hle agent enroll --stdin
+printf %s "$HLE_AGENT_TOKEN" | hle auth login --agent-token
 ```
 
 `hle agent status --ready` is meant for supervisors: it exits 0 only while the

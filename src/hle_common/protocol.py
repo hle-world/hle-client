@@ -29,12 +29,6 @@ class MessageType(StrEnum):
     """Types of messages exchanged between client and relay server."""
 
     # Handshake
-    AUTH_REQUEST = "auth_request"
-    AUTH_RESPONSE = "auth_response"
-
-    # Tunnel management
-    TUNNEL_OPEN = "tunnel_open"
-    TUNNEL_CLOSE = "tunnel_close"
     TUNNEL_ACK = "tunnel_ack"
     TUNNEL_REGISTER = "tunnel_register"
 
@@ -68,10 +62,6 @@ class MessageType(StrEnum):
     # echo it in the 101 response to the browser. Required for upstreams
     # that mandate Sec-WebSocket-Protocol negotiation (ttyd, mqtt, etc.).
     WS_ACCEPT = "ws_accept"
-
-    # Webhook
-    WEBHOOK_INCOMING = "webhook_incoming"
-    WEBHOOK_RESPONSE = "webhook_response"
 
     # Speed test
     SPEED_TEST_DATA = "speed_test_data"

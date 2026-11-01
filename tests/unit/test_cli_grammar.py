@@ -106,8 +106,10 @@ class TestDeprecationNotice:
         aliases._warned.clear()
         result = CliRunner().invoke(main, ["config", "--help"])
         assert result.exit_code == 0
-        assert "hle config" in result.stderr
-        assert "hle tunnel" in result.stderr
+        assert (
+            "Deprecated: 'hle config' will be removed in a future release; use 'hle tunnel'."
+            in result.stderr
+        )
 
     def test_the_notice_goes_to_stderr(self):
         """A script parsing stdout must not start seeing advice in its data."""
@@ -115,7 +117,52 @@ class TestDeprecationNotice:
 
         aliases._warned.clear()
         result = CliRunner().invoke(main, ["config", "--help"])
-        assert "note:" not in result.stdout
+        assert "Deprecated:" not in result.stdout
+
+    def test_a_hidden_verb_warns_too(self):
+        from hle_client import aliases
+
+        aliases._warned.clear()
+        result = CliRunner().invoke(main, ["tunnel", "access", "add", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "Deprecated: 'hle tunnel access add'" in result.stderr
+        assert "use 'hle tunnel access create'." in result.stderr
+
+    def test_a_hidden_command_warns_too(self):
+        from hle_client import aliases
+
+        aliases._warned.clear()
+        result = CliRunner().invoke(main, ["expose", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "Deprecated: 'hle expose'" in result.stderr
+        assert "use 'hle tunnel create'." in result.stderr
+
+    def test_a_legacy_flag_form_warns(self):
+        from hle_client import aliases
+
+        aliases._warned.clear()
+        result = CliRunner().invoke(main, ["daemon", "install", "--agent", "--help"])
+        assert "Deprecated: 'hle daemon install --agent'" in result.stderr
+        assert "use 'hle daemon install agent'." in result.stderr
+
+    def test_a_legacy_option_warns(self):
+        from hle_client import aliases
+
+        aliases._warned.clear()
+        with patch("hle_client.config_cmd.set_cmd.callback"):
+            result = CliRunner().invoke(main, ["tunnel", "set", "ha", "--set", "sso"])
+        assert "Deprecated: 'hle tunnel set --set'" in result.stderr
+        assert "use 'hle tunnel set --auth'." in result.stderr
+
+    def test_the_env_var_suppresses_the_warning(self):
+        from hle_client import aliases
+
+        aliases._warned.clear()
+        result = CliRunner().invoke(
+            main, ["config", "--help"], env={"HLE_NO_DEPRECATION_WARNINGS": "1"}
+        )
+        assert result.exit_code == 0, result.output
+        assert "Deprecated:" not in result.stderr
 
 
 class TestTunnelIsANoun:

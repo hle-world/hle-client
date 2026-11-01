@@ -367,6 +367,41 @@ class TestAgentNameArg:
         assert result.stdout == "AGENT=1 NAME= SET=0 TOKEN=hle_arg\n"
 
 
+def _run_version_ge(a: str, b: str) -> int:
+    source = INSTALL_SH.read_text()
+    func = _extract_function(source, "version_ge")
+    result = subprocess.run(  # noqa: S603 — fixed argv, local script
+        ["sh", "-c", f'{func}\nversion_ge "$1" "$2"', "install.sh", a, b],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode
+
+
+class TestVersionFloor:
+    """install.sh refuses a version older than MIN_VERSION (2609.9)."""
+
+    @pytest.mark.parametrize(
+        ("a", "b", "expected"),
+        [
+            ("2609.9", "2609.9", 0),
+            ("2610.19", "2609.9", 0),
+            ("2609.10", "2609.9", 0),
+            ("2610.0", "2609.9", 0),
+            ("2609.8", "2609.9", 1),
+            ("2609.0", "2609.9", 1),
+            ("2608.99", "2609.9", 1),
+        ],
+    )
+    def test_version_ge(self, a, b, expected):
+        assert _run_version_ge(a, b) == expected
+
+    def test_the_floor_is_the_agent_minimum(self):
+        source = INSTALL_SH.read_text()
+        assert 'MIN_VERSION="2609.9"' in source
+
+
 def _run_agent_enroll(
     tmp_path: Path, *, name: str = "laptop", enrolled: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -445,9 +480,9 @@ class TestAgentEnrollToken:
         assert "hle_tok" not in logged
         assert piped == "hle_tok"
 
-    def test_an_older_pinned_client_without_force_still_enrolls(self, tmp_path):
-        # `--version` can install a client that predates --force; passing it
-        # there would fail the whole install with "no such option".
+    def test_a_floor_client_without_force_still_enrolls(self, tmp_path):
+        # The 2609.9 floor predates --force; passing it there would fail the
+        # whole install with "no such option".
         code, err, logged, piped = _run_token_enroll(
             tmp_path, client_has_force=False, client_has_stdin=True
         )
@@ -456,7 +491,7 @@ class TestAgentEnrollToken:
         assert piped == "hle_tok"
 
     def test_a_client_without_stdin_falls_back_to_the_argument(self, tmp_path):
-        # Clients older than --stdin take the token as an argument, as before.
+        # The 2609.9 floor predates --stdin and takes the token as an argument.
         code, err, logged, piped = _run_token_enroll(
             tmp_path, client_has_force=True, client_has_stdin=False
         )

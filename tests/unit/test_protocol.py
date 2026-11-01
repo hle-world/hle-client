@@ -21,19 +21,15 @@ class TestProtocolVersion:
 
 class TestMessageType:
     def test_message_types_are_strings(self):
-        assert MessageType.AUTH_REQUEST == "auth_request"
+        assert MessageType.TUNNEL_REGISTER == "tunnel_register"
         assert MessageType.WS_FRAME == "ws_frame"
-        assert MessageType.WEBHOOK_INCOMING == "webhook_incoming"
+        assert MessageType.HTTP_RESPONSE == "http_response"
 
     def test_tunnel_register_type(self):
         assert MessageType.TUNNEL_REGISTER == "tunnel_register"
 
     def test_all_message_types_exist(self):
         expected = {
-            "auth_request",
-            "auth_response",
-            "tunnel_open",
-            "tunnel_close",
             "tunnel_ack",
             "tunnel_register",
             "http_request",
@@ -49,8 +45,6 @@ class TestMessageType:
             "ws_close",
             "ws_frame",
             "ws_accept",
-            "webhook_incoming",
-            "webhook_response",
             "speed_test_data",
             "speed_test_result",
             "ping",

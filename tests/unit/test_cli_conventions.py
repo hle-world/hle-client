@@ -205,12 +205,15 @@ _OLD_SPELLINGS: dict[str, tuple[list[str], str | None]] = {
 
 @pytest.mark.parametrize("path", sorted(_OLD_SPELLINGS), ids=sorted(_OLD_SPELLINGS))
 def test_root_api_key_reaches_old_spellings(path: str, recorder: type[_RecordingApiClient]) -> None:
+    from hle_client import aliases
+
+    aliases._warned.clear()
     argv, stdin = _OLD_SPELLINGS[path]
     result = CliRunner().invoke(main, ["--api-key", _ROOT_KEY, *argv], input=stdin)
     assert recorder.captured, f"{path} never constructed an ApiClient ({result.output})"
     assert recorder.captured[0] == _ROOT_KEY
-    # Hidden aliases are quiet: only the four renamed top-level names print a note.
-    assert "note:" not in result.stderr
+    # Every old spelling warns once, naming its replacement.
+    assert "Deprecated:" in result.stderr
 
 
 _TUNNEL_BASED: dict[str, list[str]] = {

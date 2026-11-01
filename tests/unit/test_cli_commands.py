@@ -519,7 +519,7 @@ class TestAuthLoginDetectsTheKind:
         assert token in cfg.read_text()
         assert "Could not check" in result.output
 
-    def test_a_404_falls_back_to_agent_by_prefix(self, tmp_path: Path) -> None:
+    def test_a_404_is_reported_and_saves_nothing(self, tmp_path: Path) -> None:
         import httpx
 
         request = httpx.Request("GET", "https://hle.world/api/auth/credential")
@@ -527,9 +527,9 @@ class TestAuthLoginDetectsTheKind:
         error = httpx.HTTPStatusError("404", request=request, response=response)
         token = "hlea_" + "8" * 40
         result, cfg, agent = self._login(["auth", "login", token], error=error, tmp_path=tmp_path)
-        assert result.exit_code == 0, result.output
-        assert token in agent.read_text()
+        assert result.exit_code == 4
         assert not cfg.exists()
+        assert not agent.exists()
 
     def test_server_unreachable_legacy_prefix_still_enrols(self, tmp_path: Path) -> None:
         import httpx

@@ -61,10 +61,12 @@ class TestClassifyCredential:
         assert cred is not None
         assert (cred.kind, cred.name, cred.active) == ("agent", "laptop", True)
 
-    async def test_a_404_means_the_relay_is_too_old(self):
+    async def test_a_404_is_an_error_not_a_fallback(self):
+        """The relay always has the endpoint; a 404 is a real failure."""
         a = api()
         a.errors["get_credential"] = _http_error(404)
-        assert await agents.classify_credential(a) is None
+        with pytest.raises(HleError):
+            await agents.classify_credential(a)
 
     async def test_an_unreachable_relay_is_none(self):
         a = api()

@@ -263,7 +263,6 @@ SAMPLES: dict[str, object] = {
     "AgentWelcome": AgentWelcome(
         agent_public_id="pub-1",
         base_domain="hle.world",
-        api_key="hle_" + "a" * 32,
         endpoints=[EndpointSpec(id=1, label="ha", service_url="http://localhost:8123")],
         forward_rules=[_RULE],
     ),

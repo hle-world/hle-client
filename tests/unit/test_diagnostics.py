@@ -113,18 +113,21 @@ class TestTunnelUpstreamErrorDiagnostic:
         assert tunnel._pop_upstream_error(headers) is None
         assert headers == {"content-type": "text/plain"}
 
-    async def test_buffered_emits_and_strips(self):
+    async def test_chunked_emits_and_strips(self):
         tunnel = _tunnel()
         tunnel._tunnel_id = "t-err"
         tunnel._diagnostics_enabled = True
         await tunnel._proxy.start()
-        tunnel._proxy.forward_http = AsyncMock(
-            return_value=(
+
+        async def fake_stream(**_kw):
+            yield (
                 502,
                 {"content-type": "text/plain", UPSTREAM_ERROR_HEADER: "ConnectError"},
-                b"Bad Gateway: local service connection refused",
+                None,
             )
-        )
+            yield (None, None, b"Bad Gateway: local service connection refused")
+
+        tunnel._proxy.stream_http = fake_stream
         emitted: list[tuple[str, dict]] = []
         tunnel._emit_diagnostic = lambda event, **data: emitted.append((event, data))
 
@@ -141,10 +144,11 @@ class TestTunnelUpstreamErrorDiagnostic:
             request_id="req-e",
             payload=req.model_dump(),
         )
-        await tunnel._handle_http_request_buffered(mock_ws, msg)
+        await tunnel._handle_http_request(mock_ws, msg)
 
-        resp_msg = ProtocolMessage.model_validate_json(sent[0])
-        assert UPSTREAM_ERROR_HEADER not in resp_msg.payload["headers"]
+        start_msg = ProtocolMessage.model_validate_json(sent[0])
+        assert start_msg.type == MessageType.HTTP_RESPONSE_START
+        assert UPSTREAM_ERROR_HEADER not in start_msg.payload["headers"]
         assert emitted == [
             (
                 "http.upstream_error",

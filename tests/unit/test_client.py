@@ -928,17 +928,21 @@ class TestTunnelRegistrationHandshake:
 
 
 class TestTunnelHandleHttpRequest:
-    """Test _handle_http_request: forwards to proxy, sends response back."""
+    """Test _handle_http_request: forwards to proxy, streams the response back."""
 
-    async def test_forwards_request_and_sends_response(self):
+    async def test_forwards_request_and_streams_response(self):
         tunnel = _tunnel()
         tunnel._tunnel_id = "t-42"
         await tunnel._proxy.start()
 
-        # Stub the proxy's forward_http.
-        tunnel._proxy.forward_http = AsyncMock(
-            return_value=(200, {"content-type": "text/plain"}, b"hello world")
-        )
+        calls: dict[str, object] = {}
+
+        async def fake_stream(**kwargs):
+            calls.update(kwargs)
+            yield (200, {"content-type": "text/plain"}, None)
+            yield (None, None, b"hello world")
+
+        tunnel._proxy.stream_http = fake_stream
 
         mock_ws = AsyncMock()
         sent: list[str] = []
@@ -961,25 +965,25 @@ class TestTunnelHandleHttpRequest:
 
         await tunnel._handle_http_request(mock_ws, msg)
 
-        # Verify forward_http was called correctly.
-        tunnel._proxy.forward_http.assert_awaited_once_with(
-            method="GET",
-            path="/api/hello",
-            headers={"accept": "text/plain"},
-            body=None,
-            query_string="",
-        )
+        assert calls["method"] == "GET"
+        assert calls["path"] == "/api/hello"
+        assert calls["headers"] == {"accept": "text/plain"}
+        assert calls["body"] is None
+        assert calls["query_string"] == ""
 
-        # Verify the response was sent back over the WS.
-        assert len(sent) == 1
-        resp_msg = ProtocolMessage.model_validate_json(sent[0])
-        assert resp_msg.type == MessageType.HTTP_RESPONSE
-        assert resp_msg.tunnel_id == "t-42"
-        assert resp_msg.request_id == "req-1"
-        assert resp_msg.payload["status_code"] == 200
-        assert resp_msg.payload["headers"]["content-type"] == "text/plain"
-        # Body should be base64-encoded.
-        assert base64.b64decode(resp_msg.payload["body"]) == b"hello world"
+        start = ProtocolMessage.model_validate_json(sent[0])
+        assert start.type == MessageType.HTTP_RESPONSE_START
+        assert start.tunnel_id == "t-42"
+        assert start.request_id == "req-1"
+        assert start.payload["status_code"] == 200
+        assert start.payload["headers"]["content-type"] == "text/plain"
+
+        chunk = ProtocolMessage.model_validate_json(sent[1])
+        assert chunk.type == MessageType.HTTP_RESPONSE_CHUNK
+        assert base64.b64decode(chunk.payload["data"]) == b"hello world"
+
+        end = ProtocolMessage.model_validate_json(sent[2])
+        assert end.type == MessageType.HTTP_RESPONSE_END
         await tunnel._proxy.stop()
 
     async def test_forwards_post_with_body(self):
@@ -987,7 +991,13 @@ class TestTunnelHandleHttpRequest:
         tunnel._tunnel_id = "t-42"
         await tunnel._proxy.start()
 
-        tunnel._proxy.forward_http = AsyncMock(return_value=(201, {}, b""))
+        calls: dict[str, object] = {}
+
+        async def fake_stream(**kwargs):
+            calls.update(kwargs)
+            yield (201, {}, None)
+
+        tunnel._proxy.stream_http = fake_stream
 
         mock_ws = AsyncMock()
         mock_ws.send = AsyncMock()
@@ -1011,18 +1021,19 @@ class TestTunnelHandleHttpRequest:
 
         await tunnel._handle_http_request(mock_ws, msg)
 
-        call_kwargs = tunnel._proxy.forward_http.call_args.kwargs
-        assert call_kwargs["body"] == raw_body
-        assert call_kwargs["method"] == "POST"
+        assert calls["body"] == raw_body
+        assert calls["method"] == "POST"
         await tunnel._proxy.stop()
 
-    async def test_empty_body_response_encoded_as_empty_base64(self):
+    async def test_response_without_a_body_ends_after_start(self):
         tunnel = _tunnel()
         tunnel._tunnel_id = "t-42"
         await tunnel._proxy.start()
 
-        # Empty body (b"") should be encoded as empty base64, not None.
-        tunnel._proxy.forward_http = AsyncMock(return_value=(204, {}, b""))
+        async def fake_stream(**_kwargs):
+            yield (204, {}, None)
+
+        tunnel._proxy.stream_http = fake_stream
 
         mock_ws = AsyncMock()
         sent: list[str] = []
@@ -1043,39 +1054,9 @@ class TestTunnelHandleHttpRequest:
 
         await tunnel._handle_http_request(mock_ws, msg)
 
-        resp_msg = ProtocolMessage.model_validate_json(sent[0])
-        assert resp_msg.payload["body"] == ""
-        await tunnel._proxy.stop()
-
-    async def test_none_body_response_encoded_as_none(self):
-        tunnel = _tunnel()
-        tunnel._tunnel_id = "t-42"
-        await tunnel._proxy.start()
-
-        # None body should remain None.
-        tunnel._proxy.forward_http = AsyncMock(return_value=(204, {}, None))
-
-        mock_ws = AsyncMock()
-        sent: list[str] = []
-        mock_ws.send = AsyncMock(side_effect=lambda m: sent.append(m))
-
-        request_payload = ProxiedHttpRequest(
-            request_id="req-nobody",
-            method="DELETE",
-            path="/items/1",
-            headers={},
-        )
-        msg = ProtocolMessage(
-            type=MessageType.HTTP_REQUEST,
-            tunnel_id="t-42",
-            request_id="req-nobody",
-            payload=request_payload.model_dump(),
-        )
-
-        await tunnel._handle_http_request(mock_ws, msg)
-
-        resp_msg = ProtocolMessage.model_validate_json(sent[0])
-        assert resp_msg.payload["body"] is None
+        types = [ProtocolMessage.model_validate_json(m).type for m in sent]
+        assert types == [MessageType.HTTP_RESPONSE_START, MessageType.HTTP_RESPONSE_END]
+        assert ProtocolMessage.model_validate_json(sent[0]).payload["status_code"] == 204
         await tunnel._proxy.stop()
 
 
@@ -1159,7 +1140,15 @@ class TestWebhookPathRestriction:
         tunnel = _tunnel(webhook_path="/hook/stripe")
         tunnel._tunnel_id = "t-hook"
         await tunnel._proxy.start()
-        tunnel._proxy.forward_http = AsyncMock(return_value=(200, {}, b"ok"))
+
+        calls: dict[str, object] = {}
+
+        async def fake_stream(**kwargs):
+            calls.update(kwargs)
+            yield (200, {}, None)
+            yield (None, None, b"ok")
+
+        tunnel._proxy.stream_http = fake_stream
 
         mock_ws = AsyncMock()
         sent: list[str] = []
@@ -1180,14 +1169,14 @@ class TestWebhookPathRestriction:
 
         await tunnel._handle_http_request(mock_ws, msg)
 
-        tunnel._proxy.forward_http.assert_awaited_once_with(
-            method="POST",
-            path="/hook/stripe/evt",
-            headers={"content-type": "application/json"},
-            body=None,
-            query_string="",
-        )
-        assert ProtocolMessage.model_validate_json(sent[0]).payload["status_code"] == 200
+        assert calls["method"] == "POST"
+        assert calls["path"] == "/hook/stripe/evt"
+        assert calls["headers"] == {"content-type": "application/json"}
+        assert calls["body"] is None
+        assert calls["query_string"] == ""
+        start = ProtocolMessage.model_validate_json(sent[0])
+        assert start.type == MessageType.HTTP_RESPONSE_START
+        assert start.payload["status_code"] == 200
         await tunnel._proxy.stop()
 
 
@@ -1935,7 +1924,11 @@ class TestTunnelReceiveLoopDispatch:
         tunnel._tunnel_id = "t-dispatch"
         await tunnel._proxy.start()
 
-        tunnel._proxy.forward_http = AsyncMock(return_value=(200, {}, b"ok"))
+        async def fake_stream(**_kwargs):
+            yield (200, {}, None)
+            yield (None, None, b"ok")
+
+        tunnel._proxy.stream_http = fake_stream
 
         http_req = ProxiedHttpRequest(
             request_id="req-d1",
@@ -1958,8 +1951,8 @@ class TestTunnelReceiveLoopDispatch:
         sent = mock_ws._sent
         assert len(sent) >= 1
         resp_msg = ProtocolMessage.model_validate_json(sent[0])
-        assert resp_msg.type == MessageType.HTTP_RESPONSE
-        assert resp_msg.payload["request_id"] == "req-d1"
+        assert resp_msg.type == MessageType.HTTP_RESPONSE_START
+        assert resp_msg.request_id == "req-d1"
         await tunnel._proxy.stop()
 
     async def test_dispatches_ws_close(self):

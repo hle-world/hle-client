@@ -4,7 +4,8 @@ Removal used six verbs, reading three, setting two shapes (a verb, and an
 option named `--set`). Each canonical spelling is added here and every old one
 kept as a hidden alias, because units, scripts and support answers carry them.
 These tests pin both: the new spelling is what help shows and what runs, and
-the old spelling still reaches the very same command, silently.
+the old spelling still reaches the very same command, with one deprecation line
+on stderr naming the replacement.
 """
 
 from __future__ import annotations
@@ -65,24 +66,33 @@ class TestEveryOldVerbResolves:
         assert f"  {old} " not in result.output
 
     @pytest.mark.parametrize(("path", "old", "new"), _VERB_PAIRS, ids=_ids(_VERB_PAIRS))
-    def test_the_old_verb_says_nothing(self, path, old, new):
-        """Quiet: the stderr note is for the renamed top-level nouns only."""
+    def test_the_old_verb_warns_with_its_replacement(self, path, old, new):
+        """The stderr warning names the command and its replacement."""
         from hle_client import aliases
 
         aliases._warned.clear()
         result = CliRunner().invoke(main, [*path, old, "--help"])
         assert result.exit_code == 0, result.output
-        assert "note:" not in result.stderr
+        assert f"Deprecated: 'hle {' '.join((*path, old))}'" in result.stderr
+        assert f"use 'hle {' '.join((*path, new))}'." in result.stderr
 
-    def test_the_firepuncher_aliases_say_nothing(self):
-        """`fp` is advertised and `forward` hidden; neither nags on use."""
+    def test_the_visible_firepuncher_alias_says_nothing(self):
+        """`fp` is advertised, not deprecated, so it does not nag on use."""
         from hle_client import aliases
 
-        for spelling in ("fp", "forward"):
-            aliases._warned.clear()
-            result = CliRunner().invoke(main, [spelling, "--help"])
-            assert result.exit_code == 0, result.output
-            assert "note:" not in result.stderr
+        aliases._warned.clear()
+        result = CliRunner().invoke(main, ["fp", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "Deprecated:" not in result.stderr
+
+    def test_the_hidden_firepuncher_alias_warns(self):
+        from hle_client import aliases
+
+        aliases._warned.clear()
+        result = CliRunner().invoke(main, ["forward", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "Deprecated: 'hle forward'" in result.stderr
+        assert "use 'hle firepuncher'." in result.stderr
 
     def test_agent_enroll_is_hidden_but_still_there(self):
         agent = _group(("agent",))

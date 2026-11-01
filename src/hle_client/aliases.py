@@ -1,39 +1,112 @@
-"""Keep every old spelling working, quietly, forever.
+"""Old spellings keep working, with a deprecation warning, to be removed later.
 
 The command names changed to one grammar — ``hle <noun> <verb>``. Scripts,
 systemd units, blog posts and support answers written against the old names
 did not change with them, and a CLI that breaks those has not improved for the
 person it broke.
 
-So the old names still resolve. They are hidden from ``--help``, so the shape
-being taught is the new one, and they print a single line to stderr naming the
-replacement — stderr because a script parsing stdout must not start seeing
-advice mixed into its data. A short spelling worth keeping is not a legacy one,
-though, so a group can also advertise a visible alias beside its command.
+So the old names still resolve, but every one of them prints a single line to
+stderr naming the exact replacement::
+
+    Deprecated: 'hle <old>' will be removed in a future release; use 'hle <new>'.
+
+They are hidden from ``--help``, so the shape being taught is the new one. It
+goes to stderr because a script parsing stdout must not start seeing advice
+mixed into its data. ``HLE_NO_DEPRECATION_WARNINGS`` suppresses it — every
+generated service unit sets it, so an old unit's log does not fill with
+warnings on every start. A short spelling worth keeping is not a legacy one,
+though, so a group can also advertise a visible alias beside its command;
+those never warn.
+
+The old spellings are removed in a later release, once the installer's version
+floor and the service-unit refresh have moved everyone off them.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import click
 
 from hle_client.errors import HleError
 from hle_client.output import from_ctx
 
+F = TypeVar("F", bound=Callable[..., Any])
+
 # Printed once per process. A loop calling `hle config list` in a script would
 # otherwise emit the same nag on every iteration.
 _warned: set[str] = set()
 
+_FALSEY = frozenset({"", "0", "false", "no", "off"})
 
-def warn_once(old: str, new: str) -> None:
-    """Tell the user what to type instead, once."""
-    if old in _warned or os.environ.get("HLE_NO_DEPRECATION_WARNINGS"):
+
+def _deprecation_silenced() -> bool:
+    """Whether deprecation warnings are off for this process.
+
+    ``HLE_NO_DEPRECATION_WARNINGS=1`` is set by every generated service unit,
+    plist and rc script (``service_cmd._QUIET_ENV``), so a unit running an old
+    spelling does not put a warning in its log on every start.
+    """
+    value = os.environ.get("HLE_NO_DEPRECATION_WARNINGS")
+    if value is None:
+        return False
+    return value.strip().lower() not in _FALSEY
+
+
+def _relative_command_path(ctx: click.Context, *parts: str) -> str:
+    """A command path without the leading program name, for a warning.
+
+    ``ctx.command_path`` starts with the program name (``hle`` on the command
+    line, but the command object's own name under ``CliRunner``), which the
+    warning spells itself; only the command path below it matters.
+    """
+    tokens = ctx.command_path.split(" ")
+    path = " ".join(tokens[1:])
+    return " ".join(piece for piece in (path, *parts) if piece)
+
+
+def warn_deprecated(old: str, new: str) -> None:
+    """Tell the user the exact replacement for an old spelling, once.
+
+    ``old`` and ``new`` are command spellings without the leading ``hle``.
+    """
+    if old in _warned or _deprecation_silenced():
         return
     _warned.add(old)
-    print(f"note: `hle {old}` is now `hle {new}`. The old name still works.", file=sys.stderr)
+    print(
+        f"Deprecated: 'hle {old}' will be removed in a future release; use 'hle {new}'.",
+        file=sys.stderr,
+    )
+
+
+def deprecated_option(*param_decls: str, replacement: str, **attrs: Any) -> Callable[[F], F]:
+    """A hidden option kept for an old spelling, warning when it is used.
+
+    ``replacement`` is the current option (e.g. ``--auth``) or the usage that
+    replaced it. The warning names the command and the exact replacement, and
+    is emitted only when the option was actually given on the command line.
+    """
+    from click.core import ParameterSource
+
+    attrs["hidden"] = True
+
+    def _warn_callback(ctx: click.Context, param: click.Parameter, value: Any) -> Any:
+        if not ctx.resilient_parsing and (
+            ctx.get_parameter_source(param.name) == ParameterSource.COMMANDLINE
+        ):
+            warn_deprecated(
+                _relative_command_path(ctx, param.opts[0]),
+                _relative_command_path(ctx, replacement),
+            )
+        return value
+
+    def _decorate(f: F) -> F:
+        return click.option(*param_decls, callback=_warn_callback, **attrs)(f)
+
+    return _decorate
 
 
 # Options declared on the root group, which Click will only parse *before* the
@@ -86,17 +159,14 @@ class AliasedGroup(click.Group):
     command twice, so the alias cannot drift from the command it points at and
     ``--help`` lists each command exactly once.
 
-    Two kinds of alias share one table. ``aliases`` are the renamed top-level
-    nouns and print the one-line note on use. ``hidden_aliases`` are old verbs
-    inside a noun (``access add`` for ``access create``): they resolve just as
-    well and print nothing, because there are far more of them, they sit in
-    units and scripts nobody reads the stderr of, and a nag per verb would be
-    noise rather than guidance. ``visible_aliases`` are short spellings that
-    stay advertised: silent like a hidden alias, but listed next to their
-    command in ``--help``, because a name being taught needs no apology. All
-    are in ``self.aliases`` so every walker of the tree sees every spelling;
-    ``self.silent`` says which ones stay quiet and ``self.visible_aliases``
-    which ones are still shown.
+    Every old spelling warns once, naming the replacement: the renamed nouns
+    (``aliases``), the old verbs inside a noun (``hidden_aliases``) and the
+    hidden commands kept whole (``deprecated_commands``, e.g. ``hle expose``).
+    ``visible_aliases`` are short spellings that stay advertised (``fp``) and
+    are not deprecations, so they never warn. All are in ``self.aliases`` so
+    every walker of the tree sees every spelling; the warning itself is raised
+    in ``resolve_command``, which only runs when a user actually typed one, not
+    when ``--help`` formats the table.
     """
 
     def __init__(
@@ -105,6 +175,7 @@ class AliasedGroup(click.Group):
         aliases: dict[str, str] | None = None,
         hidden_aliases: dict[str, str] | None = None,
         visible_aliases: dict[str, str] | None = None,
+        deprecated_commands: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -115,7 +186,10 @@ class AliasedGroup(click.Group):
         }
         self.visible_aliases: frozenset[str] = frozenset(visible_aliases or ())
         self.hidden_alias_names: frozenset[str] = frozenset(hidden_aliases or ())
-        self.silent: frozenset[str] = self.visible_aliases | self.hidden_alias_names
+        # Hidden commands kept whole (``expose``) cannot go in the alias table,
+        # because their options differ from the new command. They are mapped to
+        # their replacement here so the warning still names it.
+        self.deprecated_commands: dict[str, str] = dict(deprecated_commands or {})
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         command = super().get_command(ctx, cmd_name)
@@ -133,9 +207,19 @@ class AliasedGroup(click.Group):
             if resolved is None or not isinstance(resolved, click.Group):
                 return None
             resolved = resolved.get_command(ctx, part)
-        if resolved is not None and cmd_name not in self.silent:
-            warn_once(cmd_name, target)
         return resolved
+
+    def _warn_if_deprecated(self, ctx: click.Context, name: str) -> None:
+        """Warn when *name* is an old spelling the user actually typed."""
+        if ctx.resilient_parsing or name in self.visible_aliases:
+            return
+        replacement = self.aliases.get(name) or self.deprecated_commands.get(name)
+        if replacement is None:
+            return
+        warn_deprecated(
+            _relative_command_path(ctx, name),
+            _relative_command_path(ctx, replacement),
+        )
 
     def resolve_command(
         self, ctx: click.Context, args: list[str]
@@ -143,6 +227,8 @@ class AliasedGroup(click.Group):
         name, command, rest = super().resolve_command(ctx, args)
         # Report the name the user typed, so usage lines and errors echo their
         # own command back rather than a name they have never seen.
+        if name is not None:
+            self._warn_if_deprecated(ctx, name)
         return name, command, rest
 
     def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
@@ -194,14 +280,39 @@ class ModeGroup(AliasedGroup):
     #: Name of the hidden command that accepts the old flag form.
     LEGACY = "_flags"
 
+    def __init__(
+        self,
+        *args: Any,
+        deprecated_modes: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        # flag -> the subcommand (with its own usage) that replaced it, so the
+        # warning can name the exact replacement.
+        self.deprecated_modes: dict[str, str] = dict(deprecated_modes or {})
+
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         first = args[0] if args else ""
         # `--help` belongs to the group: it is where the modes are listed.
         # An unknown bare word is reported against the group too, for the same
         # reason. Anything else that starts with a dash is the old flag form.
         if first.startswith("-") and first not in ("-h", "--help"):
+            self._warn_legacy_mode(ctx, args)
             args = [self.LEGACY, *args]
         return super().parse_args(ctx, args)
+
+    def _warn_legacy_mode(self, ctx: click.Context, args: list[str]) -> None:
+        """Warn once about the flag form, naming the mode it selected."""
+        if ctx.resilient_parsing:
+            return
+        flag = next((a for a in args if a in self.deprecated_modes), "")
+        replacement = self.deprecated_modes.get(flag, "")
+        if not replacement:
+            return
+        warn_deprecated(
+            _relative_command_path(ctx, flag),
+            _relative_command_path(ctx, replacement),
+        )
 
 
 class LegacyModeCommand(click.Command):
