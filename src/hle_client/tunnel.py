@@ -50,6 +50,7 @@ from hle_common.models import (
     CAPABILITY_CHUNKED_RESPONSE,
     CAPABILITY_REQUEST_STREAMING,
     REQUEST_BODY_INITIAL_WINDOW,
+    REQUEST_BODY_MAX_CHUNK,
     DiagnosticEvent,
     HttpRequestBodyChunk,
     HttpRequestBodyEnd,
@@ -1281,9 +1282,7 @@ class Tunnel:
             return None
         return self._iter_body(ws, stream)
 
-    async def _iter_body(
-        self, ws: _ClientConn, stream: _RequestBodyStream
-    ) -> AsyncIterator[bytes]:
+    async def _iter_body(self, ws: _ClientConn, stream: _RequestBodyStream) -> AsyncIterator[bytes]:
         """Yield body chunks to httpx and ack them once handed upstream."""
         try:
             while True:

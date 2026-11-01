@@ -172,9 +172,7 @@ SAMPLES: dict[str, object] = {
     "HttpResponseEnd.ok": HttpResponseEnd(request_id="req-1"),
     "HttpResponseEnd.err": HttpResponseEnd(request_id="req-1", error="upstream died"),
     # 1.7 request body streaming (relay -> client) and credit updates (client -> relay).
-    "HttpRequestBodyChunk": HttpRequestBodyChunk(
-        request_id="req-1", chunk_index=3, data="Ymxh"
-    ),
+    "HttpRequestBodyChunk": HttpRequestBodyChunk(request_id="req-1", chunk_index=3, data="Ymxh"),
     "HttpRequestBodyEnd.ok": HttpRequestBodyEnd(request_id="req-1", total_bytes=1000),
     "HttpRequestBodyEnd.aborted": HttpRequestBodyEnd(
         request_id="req-1", total_bytes=1000, aborted=True

@@ -277,10 +277,7 @@ async def _upstream(record: dict[str, Any]):
             else:
                 body = await reader.readexactly(length) if length else b""
 
-            if path.startswith("/maybe413"):
-                status = 413
-            else:
-                status = 200
+            status = 413 if path.startswith("/maybe413") else 200
             record.setdefault("requests", []).append(
                 {"method": method, "path": path, "headers": headers, "body": body}
             )
@@ -531,7 +528,7 @@ class TestRequestStreaming:
         async def scenario(relay: _FakeRelay, tunnel: Tunnel) -> None:
             req = _stream_request("cancel", "/slow", len(body))
             await relay.send_request(req)
-            await relay.send_chunk("cancel", 0, body[: REQUEST_BODY_MAX_CHUNK])
+            await relay.send_chunk("cancel", 0, body[:REQUEST_BODY_MAX_CHUNK])
             await relay.send_cancel("cancel")
             status, _, _ = await relay.wait_for_response("cancel")
             assert status in (400, 502)
@@ -581,7 +578,7 @@ class TestRequestStreaming:
         async def scenario(relay: _FakeRelay, tunnel: Tunnel) -> None:
             req = _stream_request("aborted", "/slow", len(body))
             await relay.send_request(req)
-            await relay.send_chunk("aborted", 0, body[: REQUEST_BODY_MAX_CHUNK])
+            await relay.send_chunk("aborted", 0, body[:REQUEST_BODY_MAX_CHUNK])
             await relay.send_end("aborted", len(body), aborted=True)
             status, _, _ = await relay.wait_for_response("aborted")
             assert status in (400, 502)
