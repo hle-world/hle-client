@@ -414,8 +414,11 @@ class TestTunnelFragmentation:
                     got += base64.b64decode(HttpResponseChunk.model_validate(msg.payload).data)
                 elif msg.type == MessageType.HTTP_RESPONSE_END:
                     break
+            # The 8 MB request reached the upstream only because the tunnel
+            # reassembled the relay's fragments. The response comes back as
+            # small chunks, so nothing needs fragmenting on the way out; the
+            # client-side fragmenter is covered by the WS frame test below.
             assert got == body
-            assert relay.fragments_in > 1
 
         async with _echo_http() as url:
             await _run_tunnel(url, [CAPABILITY_FRAGMENTATION], scenario)

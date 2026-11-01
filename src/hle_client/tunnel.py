@@ -1030,8 +1030,12 @@ class Tunnel:
                     self._spawn(self._handle_speed_test_data(ws, msg))
                 case MessageType.HTTP_REQUEST_CANCEL:
                     request_id = (msg.payload or {}).get("request_id")
-                    if request_id:
+                    if request_id in self._request_bodies:
+                        # Mid-upload: aborting the body raises inside httpx's
+                        # send, which drops the upstream connection. Cancelling
+                        # the task there instead leaves the upstream waiting.
                         self._abort_request_body(request_id)
+                    elif request_id:
                         task = self._active_chunked.pop(request_id, None)
                         if task and not task.done():
                             task.cancel()
@@ -1483,17 +1487,6 @@ class Tunnel:
             await ws.send(end_msg.model_dump_json())
         except asyncio.CancelledError:
             logger.debug("Chunked stream cancelled by server for %s", req.request_id)
-            if req.body_streamed:
-                # A cancelled streamed upload is the same as an aborted body:
-                # answer with the small error so the relay is not left waiting.
-                await self._send_buffered_response(
-                    ws,
-                    req.request_id,
-                    400,
-                    {"content-type": "text/plain"},
-                    b"Bad Request: request body aborted",
-                )
-                return
             with contextlib.suppress(Exception):
                 end = HttpResponseEnd(
                     request_id=req.request_id,

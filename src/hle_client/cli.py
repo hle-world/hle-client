@@ -753,7 +753,10 @@ def preflight_cmd(
     console.print("[yellow]Nothing fatal, but check the warnings above.[/yellow]")
 
 
-@main.group(cls=AliasedGroup, deprecated_commands={"enroll": "auth login --agent-token"})
+# `agent enroll` is not deprecated with the other old spellings: `--name`
+# (enrol from the logged-in account key) has no new-grammar home yet, and the
+# installer still calls it on every client version down to its floor.
+@main.group(cls=AliasedGroup)
 def agent() -> None:
     """Run a multi-tunnel agent controlled from the dashboard."""
 

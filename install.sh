@@ -539,6 +539,11 @@ refresh_existing_services() {
 
 # --- Agent setup ---
 
+# True when the `hle agent enroll` on PATH advertises the flag in $1.
+agent_enroll_supports() {
+    hle agent enroll --help 2>/dev/null | grep -q -- "$1"
+}
+
 # True when an agent token is already configured. `hle agent status` exits 0
 # whether or not one exists — "no token" is an answer, not a failure — so the
 # output is what tells the two apart.
@@ -546,15 +551,32 @@ agent_is_enrolled() {
     ! hle agent status 2>/dev/null | grep -q "No agent token"
 }
 
-# Enroll this machine as an agent. The token is piped to `hle auth login
-# --agent-token`, whose prompt reads it from stdin, so the token never lands in
-# a command line that `ps` can read. It is never written to disk by this script
-# nor echoed back.
+# Enroll this machine as an agent. The token is piped to `hle agent enroll
+# --stdin`, which checks its shape and writes ~/.config/hle/agent.toml (0600),
+# so the token never lands in a command line that `ps` can read. It is never
+# written to disk by this script, nor echoed back.
+#
+# `hle agent enroll`, not `hle auth login --agent-token`: clients down to the
+# version floor (2609.9) have neither --stdin nor a bare --agent-token there.
 agent_enroll() {
     if [ -n "$AGENT_TOKEN" ]; then
         # --force: an explicit token on a re-run replaces the saved one, as it
-        # always did. The version floor guarantees the flag exists.
-        printf '%s' "$AGENT_TOKEN" | hle auth login --agent-token --force || return 1
+        # always did; `hle agent enroll` now refuses to overwrite without it.
+        # --stdin: read the token from stdin instead of argv. Clients at the
+        # floor (which `--version` can install) lack both, so only pass what
+        # the installed client advertises, and fall back to the argument form
+        # there.
+        ENROLL_ARGS=""
+        if agent_enroll_supports --force; then
+            ENROLL_ARGS="$ENROLL_ARGS --force"
+        fi
+        if agent_enroll_supports --stdin; then
+            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
+            printf '%s' "$AGENT_TOKEN" | hle agent enroll --stdin $ENROLL_ARGS || return 1
+        else
+            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
+            hle agent enroll $ENROLL_ARGS "$AGENT_TOKEN" || return 1
+        fi
         return 0
     fi
 
@@ -583,9 +605,9 @@ agent_enroll() {
 
     info "Create an agent at https://hle.world/dashboard and copy its token."
     info "The token is shown only once."
-    # `hle auth login --agent-token` prompts (with echo off) and validates; bind
-    # its stdin to the terminal so it works under `curl ... | sh`.
-    hle auth login --agent-token < /dev/tty || return 1
+    # `hle agent enroll` prompts (with echo off) and validates; bind its stdin
+    # to the terminal so it works under `curl ... | sh`.
+    hle agent enroll < /dev/tty || return 1
 }
 
 agent_install_service() {
@@ -610,13 +632,13 @@ agent_install_service() {
 setup_agent() {
     if ! command -v hle >/dev/null 2>&1; then
         error "hle is not on PATH yet — cannot set up the agent."
-        error "Restart your shell, then run: hle auth login --agent-token && hle daemon install agent"
+        error "Restart your shell, then run: hle agent enroll && hle daemon install agent"
         exit 1
     fi
 
     if ! agent_enroll; then
         error "Agent enrollment failed. The client is installed; you can retry with:"
-        error "  hle auth login --agent-token"
+        error "  hle agent enroll"
         error "  hle daemon install agent"
         exit 1
     fi
@@ -629,7 +651,7 @@ setup_agent() {
     if ! agent_is_enrolled; then
         error "Enrollment reported success but no agent token is readable."
         error "Not installing the service: it would restart forever without one."
-        error "Retry with:  hle auth login --agent-token"
+        error "Retry with:  hle agent enroll"
         exit 1
     fi
     success "Agent enrolled."
@@ -711,7 +733,7 @@ main() {
         info "  export PATH=\"\$HOME/.local/bin:\$PATH\""
         if [ "$AGENT" -eq 1 ]; then
             warn "Then finish agent setup with:"
-            warn "  hle auth login --agent-token && hle daemon install agent"
+            warn "  hle agent enroll && hle daemon install agent"
         fi
         exit 0
     fi
