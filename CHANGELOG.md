@@ -1,5 +1,33 @@
 # Changelog
 
+## v2611.1 — 2026-11-02
+
+### Added
+
+- Protocol 1.7: large HTTP request bodies (uploads) are streamed from the relay
+  to the local service with credit-based flow control, instead of being
+  buffered whole first. A cancelled upload now drops the upstream connection
+  (hle-client#269).
+- `HLE_SERVER_URL` (or `server_url` in `config.toml`) points the client at an
+  HLE server other than `https://hle.world`. `--relay-host` / `--relay-port`
+  still win (hle-client#267).
+
+### Changed
+
+- Old CLI spellings (hidden aliases, pre-v2609.5 commands and flag forms) now
+  print a one-line deprecation notice naming the replacement. Set
+  `HLE_NO_DEPRECATION_WARNINGS=1` to silence it; generated service units set
+  it already (hle-client#271).
+- Installer: `--version` older than 2610.13 is refused, and the agent token is
+  always passed to `hle agent enroll --stdin`, never on the command line
+  (hle-client#271, hle-client#272).
+
+### Removed
+
+- Code that only served relays the hosted relay no longer runs: the buffered
+  HTTP response path, unused protocol message types, `AgentWelcome.api_key`,
+  and old-relay fallbacks (hle-client#271).
+
 ## v2610.19 — 2026-10-25
 
 ### Changed
