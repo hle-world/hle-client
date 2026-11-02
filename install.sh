@@ -20,10 +20,11 @@ set -e
 PACKAGE="hle-client"
 VERSION=""
 # The oldest release this installer will install. Below it the client predates
-# the `hle <noun> <verb>` grammar and the flags the installer calls with, so
-# there is nothing sensible to configure. Matches MIN_REMOTE_VERSION in
-# src/hle_client/agent_update.py.
-MIN_VERSION="2609.9"
+# the flags the installer calls with: 2610.13 is the first whose
+# `hle agent enroll` takes --stdin, so the token never reaches a command line
+# that `ps` can read. Deliberately higher than MIN_REMOTE_VERSION in
+# src/hle_client/agent_update.py, which only bounds remote rollbacks.
+MIN_VERSION="2610.13"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=11
 
@@ -539,11 +540,6 @@ refresh_existing_services() {
 
 # --- Agent setup ---
 
-# True when the `hle agent enroll` on PATH advertises the flag in $1.
-agent_enroll_supports() {
-    hle agent enroll --help 2>/dev/null | grep -q -- "$1"
-}
-
 # True when an agent token is already configured. `hle agent status` exits 0
 # whether or not one exists — "no token" is an answer, not a failure — so the
 # output is what tells the two apart.
@@ -556,27 +552,13 @@ agent_is_enrolled() {
 # so the token never lands in a command line that `ps` can read. It is never
 # written to disk by this script, nor echoed back.
 #
-# `hle agent enroll`, not `hle auth login --agent-token`: clients down to the
-# version floor (2609.9) have neither --stdin nor a bare --agent-token there.
+# Every client at or above MIN_VERSION (2610.13) has both flags used here.
 agent_enroll() {
     if [ -n "$AGENT_TOKEN" ]; then
         # --force: an explicit token on a re-run replaces the saved one, as it
-        # always did; `hle agent enroll` now refuses to overwrite without it.
-        # --stdin: read the token from stdin instead of argv. Clients at the
-        # floor (which `--version` can install) lack both, so only pass what
-        # the installed client advertises, and fall back to the argument form
-        # there.
-        ENROLL_ARGS=""
-        if agent_enroll_supports --force; then
-            ENROLL_ARGS="$ENROLL_ARGS --force"
-        fi
-        if agent_enroll_supports --stdin; then
-            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
-            printf '%s' "$AGENT_TOKEN" | hle agent enroll --stdin $ENROLL_ARGS || return 1
-        else
-            # shellcheck disable=SC2086  # ENROLL_ARGS is a flag list
-            hle agent enroll $ENROLL_ARGS "$AGENT_TOKEN" || return 1
-        fi
+        # always did; `hle agent enroll` refuses to overwrite without it.
+        # --stdin: read the token from stdin instead of argv.
+        printf '%s' "$AGENT_TOKEN" | hle agent enroll --stdin --force || return 1
         return 0
     fi
 
