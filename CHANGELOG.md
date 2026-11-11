@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A response that starts streaming no longer produces a second
+  `HTTP_RESPONSE_START` when the upstream then fails: the stream ends with an
+  error `HTTP_RESPONSE_END` (`upstream_timeout`/`upstream_error`), and the
+  generic failure path ends with `client_error` instead of leaving the relay to
+  time out. A `text/event-stream` response is no longer cut by the read timeout
+  between events (hle-client#275).
+
 ## v2611.1 — 2026-11-02
 
 ### Added

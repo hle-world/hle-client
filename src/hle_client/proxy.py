@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import logging
 import os
 import ssl
@@ -223,6 +225,32 @@ def safe_proxied_path(path: str, target_url: str) -> str | None:
 def _upstream_error_headers(exc: BaseException) -> dict[str, str | list[str]]:
     """Build the header dict for a synthetic upstream-error response."""
     return {"content-type": "text/plain", UPSTREAM_ERROR_HEADER: type(exc).__name__}
+
+
+class UpstreamStreamError(Exception):
+    """An upstream failed after its response status was already sent.
+
+    Once :meth:`LocalProxy.stream_http` has yielded the status (and headers),
+    the relay has seen an ``HTTP_RESPONSE_START``. A synthetic 502/504 at that
+    point would be a second START — a protocol error the relay has to abort.
+    Raise this instead, so the tunnel ends the stream with an error
+    ``HTTP_RESPONSE_END``. ``reason`` is ``"upstream_timeout"`` or
+    ``"upstream_error"``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _is_event_stream(headers: httpx.Headers) -> bool:
+    """Whether *headers* mark a Server-Sent Events response.
+
+    The ``Content-Type`` is matched case-insensitively with any parameters
+    (``text/event-stream; charset=utf-8``) ignored.
+    """
+    content_type = headers.get("content-type", "")
+    return content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
 
 
 def _is_streaming_body(body: bytes | AsyncIterator[bytes] | None) -> bool:
@@ -616,35 +644,73 @@ class LocalProxy:
 
         chunk_size = upstream_chunk_size()
         held = 0
+        # Once the status has been yielded the relay holds an
+        # HTTP_RESPONSE_START, so an upstream failure from then on must not
+        # produce a second one — it becomes an UpstreamStreamError.
+        status_sent = False
+        stack = contextlib.AsyncExitStack()
 
         try:
-            async with self._http_client.stream(
-                method=method,
-                url=url,
-                headers=forwarded_headers,
-                content=body,
-                **extra,
-            ) as response:
-                resp_headers = _collect_response_headers(response.headers.raw)
-                yield (response.status_code, resp_headers, None)
+            # The read timeout is disabled for the stream itself: an SSE
+            # connection is silent between events by design. The wait for the
+            # response headers stays bounded by config.timeout below.
+            try:
+                async with asyncio.timeout(self.config.timeout):
+                    response = await stack.enter_async_context(
+                        self._http_client.stream(
+                            method=method,
+                            url=url,
+                            headers=forwarded_headers,
+                            content=body,
+                            timeout=httpx.Timeout(self.config.timeout, read=None),
+                            **extra,
+                        ),
+                    )
+            except TimeoutError as exc:
+                # Reached the headers only after config.timeout. Hand it to the
+                # existing 504 branch as if httpx had raised it.
+                raise httpx.ReadTimeout("timed out waiting for upstream response headers") from exc
 
-                async for chunk in response.aiter_bytes(chunk_size):
-                    # Reserve what was actually read, after the read: an idle
-                    # stream (SSE, long-poll) then holds no budget, and a stream
-                    # waiting here reads nothing more upstream (backpressure).
-                    # The read itself is outside the budget by design; it is
-                    # bounded per connection (one chunk plus the socket layer's
-                    # read buffer, a few hundred KiB).
-                    if budget is not None:
-                        held = await budget.acquire(len(chunk))
-                    yield (None, None, chunk)
-                    # Drop this frame's raw copy before the consumer asks for
-                    # the next one, so it is not held alongside the new chunk.
-                    del chunk
-                    if budget is not None and held:
-                        budget.release(held)
-                        held = 0
+            resp_headers = _collect_response_headers(response.headers.raw)
+            status_sent = True
+            yield (response.status_code, resp_headers, None)
+
+            is_sse = _is_event_stream(response.headers)
+            body_iter = response.aiter_bytes(chunk_size)
+            while True:
+                try:
+                    if is_sse:
+                        # No read timeout on an established SSE stream: the
+                        # upstream may be quiet between events for as long as
+                        # it likes.
+                        chunk = await anext(body_iter)
+                    else:
+                        # Non-SSE bodies keep today's behaviour: at most
+                        # config.timeout between body reads.
+                        async with asyncio.timeout(self.config.timeout):
+                            chunk = await anext(body_iter)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as exc:
+                    raise UpstreamStreamError("upstream_timeout") from exc
+                # Reserve what was actually read, after the read: an idle
+                # stream (SSE, long-poll) then holds no budget, and a stream
+                # waiting here reads nothing more upstream (backpressure).
+                # The read itself is outside the budget by design; it is
+                # bounded per connection (one chunk plus the socket layer's
+                # read buffer, a few hundred KiB).
+                if budget is not None:
+                    held = await budget.acquire(len(chunk))
+                yield (None, None, chunk)
+                # Drop this frame's raw copy before the consumer asks for
+                # the next one, so it is not held alongside the new chunk.
+                del chunk
+                if budget is not None and held:
+                    budget.release(held)
+                    held = 0
         except httpx.ConnectError as exc:
+            if status_sent:
+                raise UpstreamStreamError("upstream_error") from exc
             exc_str = str(exc).lower()
             if "ssl" in exc_str or "certificate" in exc_str or "tls" in exc_str:
                 logger.error(
@@ -665,13 +731,19 @@ class LocalProxy:
             yield (502, _upstream_error_headers(exc), None)
             yield (None, None, b"Bad Gateway: local service connection refused")
         except httpx.TimeoutException as exc:
+            if status_sent:
+                raise UpstreamStreamError("upstream_timeout") from exc
             logger.error("Timeout forwarding %s %s to local service", method, url)
             yield (504, _upstream_error_headers(exc), None)
             yield (None, None, b"Gateway Timeout: local service did not respond")
         except httpx.HTTPError as exc:
+            if status_sent:
+                raise UpstreamStreamError("upstream_error") from exc
             logger.error("HTTP error forwarding %s %s: %s", method, url, exc)
             yield (502, _upstream_error_headers(exc), None)
             yield (None, None, b"Bad Gateway: unexpected error")
         finally:
+            with contextlib.suppress(Exception):
+                await stack.aclose()
             if budget is not None and held:
                 budget.release(held)
