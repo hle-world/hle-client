@@ -1,15 +1,17 @@
 # Changelog
 
-## Unreleased
+## v2611.2 — 2026-11-11
 
 ### Fixed
 
-- A response that starts streaming no longer produces a second
-  `HTTP_RESPONSE_START` when the upstream then fails: the stream ends with an
-  error `HTTP_RESPONSE_END` (`upstream_timeout`/`upstream_error`), and the
-  generic failure path ends with `client_error` instead of leaving the relay to
-  time out. A `text/event-stream` response is no longer cut by the read timeout
-  between events (hle-client#275).
+- Server-Sent Events (live-update) streams through a tunnel are no longer cut
+  after 30 seconds of silence: a `text/event-stream` response has no read
+  timeout between events. Other responses keep the timeout between reads, and
+  response headers must still arrive within it (hle-client#275).
+- When the local service fails after its response has started, the stream now
+  ends with an error instead of a second `HTTP_RESPONSE_START`, which the relay
+  had to abort as a protocol error. An unexpected client failure mid-stream also
+  ends the stream instead of leaving the relay to time out (hle-client#275).
 
 ## v2611.1 — 2026-11-02
 
