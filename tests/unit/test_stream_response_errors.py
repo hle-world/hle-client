@@ -208,6 +208,45 @@ class TestReadTimeout:
         assert yields[0][0] == 504
         assert yields[1] == (None, None, b"Gateway Timeout: local service did not respond")
 
+    async def test_slow_streamed_upload_is_bounded_per_chunk_not_in_total(self):
+        # Five 0.03 s gaps = 0.15 s in total, three times the 0.05 s timeout,
+        # but every gap is under it: the upload must not be cut.
+        response = _FakeResponse(200, {"content-type": "text/plain"}, [b"ok"])
+
+        class _UploadingClient:
+            def stream(self, **kwargs: object) -> _UploadingStream:
+                return _UploadingStream(kwargs["content"])
+
+        class _UploadingStream:
+            def __init__(self, content: object) -> None:
+                self._content = content
+
+            async def __aenter__(self) -> _FakeResponse:
+                async for _ in self._content:  # type: ignore[attr-defined]
+                    pass
+                return response
+
+            async def __aexit__(self, *exc: object) -> bool:
+                return False
+
+        async def upload():
+            for _ in range(5):
+                await asyncio.sleep(0.03)
+                yield b"part"
+
+        proxy = _proxy(timeout=0.05)
+        proxy._http_client = _UploadingClient()
+
+        yields = [
+            item
+            async for item in proxy.stream_http(
+                method="POST", path="/upload", headers={}, body=upload()
+            )
+        ]
+
+        assert yields[0][0] == 200
+        assert yields[1] == (None, None, b"ok")
+
 
 # ---------------------------------------------------------------------------
 # Tunnel: an error END is sent, and only one START

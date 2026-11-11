@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from hle_client.chunk_budget import ChunkBudget, LayeredBudget
 
@@ -249,7 +249,7 @@ def _is_event_stream(headers: httpx.Headers) -> bool:
     The ``Content-Type`` is matched case-insensitively with any parameters
     (``text/event-stream; charset=utf-8``) ignored.
     """
-    content_type = headers.get("content-type", "")
+    content_type = str(headers.get("content-type", ""))
     return content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
 
 
@@ -259,6 +259,16 @@ def _is_streaming_body(body: bytes | AsyncIterator[bytes] | None) -> bool:
     A streamed body cannot be replayed, so the 502 Host retry must skip it.
     """
     return body is not None and hasattr(body, "__anext__")
+
+
+async def _restart_on_each_chunk(
+    body: AsyncIterator[bytes], restart: Callable[[], None]
+) -> AsyncIterator[bytes]:
+    """Pass *body* through, calling *restart* before each chunk and at the end."""
+    async for chunk in body:
+        restart()
+        yield chunk
+    restart()
 
 
 def _collect_response_headers(
@@ -655,13 +665,28 @@ class LocalProxy:
             # connection is silent between events by design. The wait for the
             # response headers stays bounded by config.timeout below.
             try:
-                async with asyncio.timeout(self.config.timeout):
+                async with asyncio.timeout(None) as deadline:
+                    loop = asyncio.get_running_loop()
+
+                    def _restart_deadline() -> None:
+                        deadline.reschedule(loop.time() + self.config.timeout)
+
+                    _restart_deadline()
+                    # A streamed request body restarts the deadline on every
+                    # chunk, so a large upload is bounded per chunk (like
+                    # httpx's per-write timeout) rather than in total; the
+                    # last chunk starts the config.timeout wait for headers.
+                    content = (
+                        _restart_on_each_chunk(body, _restart_deadline)  # type: ignore[arg-type]
+                        if _is_streaming_body(body)
+                        else body
+                    )
                     response = await stack.enter_async_context(
                         self._http_client.stream(
                             method=method,
                             url=url,
                             headers=forwarded_headers,
-                            content=body,
+                            content=content,
                             timeout=httpx.Timeout(self.config.timeout, read=None),
                             **extra,
                         ),
