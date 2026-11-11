@@ -33,6 +33,7 @@ from hle_client.proxy import (
     UPSTREAM_ERROR_HEADER,
     LocalProxy,
     ProxyConfig,
+    UpstreamStreamError,
     decode_path_fully,
     has_parent_segment,
     safe_proxied_path,
@@ -1516,13 +1517,34 @@ class Tunnel:
                 "Connection closed while sending chunked response for %s",
                 req.request_id,
             )
+        except UpstreamStreamError as exc:
+            # The status (and possibly some body) is already on the wire, so
+            # there is no way back to a 502/504: end the stream with the
+            # upstream's failure reason instead.
+            logger.info(
+                "Upstream stream error for %s: %s",
+                req.request_id,
+                exc.reason,
+            )
+            with contextlib.suppress(Exception):
+                end = HttpResponseEnd(
+                    request_id=req.request_id,
+                    error=exc.reason,
+                )
+                end_msg = ProtocolMessage(
+                    type=MessageType.HTTP_RESPONSE_END,
+                    tunnel_id=self._tunnel_id,
+                    request_id=req.request_id,
+                    payload=end.model_dump(),
+                )
+                await ws.send(end_msg.model_dump_json())
         except Exception:
             logger.exception("Error in chunked response for %s", req.request_id)
             # Try to send error END so server doesn't hang
             with contextlib.suppress(Exception):
                 end = HttpResponseEnd(
                     request_id=req.request_id,
-                    error="Client error during chunked response",
+                    error="client_error",
                 )
                 end_msg = ProtocolMessage(
                     type=MessageType.HTTP_RESPONSE_END,
