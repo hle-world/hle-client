@@ -1191,4 +1191,3 @@ class TestSystemUnitAgentConfig:
         assert "User=alice" in text
         assert "Environment=HLE_AGENT_CONFIG=/home/alice/.config/hle/agent.toml" in text
         assert "/root/.config/hle/agent.toml" not in text
-

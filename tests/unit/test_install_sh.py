@@ -567,7 +567,7 @@ def _run_agent_install_service(
 
     (bindir / "hle").write_text(f'#!/bin/sh\necho "hle $*" >> "{log}"\nexit 0\n')
     (bindir / "hle").chmod(0o755)
-    (bindir / "id").write_text(f'#!/bin/sh\necho {uid}\n')
+    (bindir / "id").write_text(f"#!/bin/sh\necho {uid}\n")
     (bindir / "id").chmod(0o755)
     if sudo_installed:
         (bindir / "sudo").write_text(f'#!/bin/sh\necho "sudo $*" >> "{log}"\nexit {sudo_exit}\n')
@@ -648,4 +648,3 @@ class TestAgentServiceEscalates:
         hle = tmp_path / "bin" / "hle"
         assert f"sudo {hle} daemon install agent --system" in result.stderr
         assert "sudo hle " not in result.stderr
-
