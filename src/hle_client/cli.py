@@ -598,7 +598,7 @@ def auth_status(ctx: click.Context) -> None:
         console.print("API key: [cyan]HLE_API_KEY environment variable[/cyan]")
         console.print(f"         [dim]{_mask(creds.api_key or '')}[/dim]")
     elif creds.api_key:
-        console.print("API key: [cyan]~/.config/hle/config.toml[/cyan]")
+        console.print(f"API key: [cyan]{config.display_path(config.CONFIG_FILE)}[/cyan]")
         console.print(f"         [dim]{_mask(creds.api_key)}[/dim]")
     else:
         console.print("API key: [dim]none[/dim] — run [cyan]hle auth login[/cyan]")
@@ -607,7 +607,7 @@ def auth_status(ctx: click.Context) -> None:
         console.print("Agent:   [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
         console.print(f"         [dim]{_mask(creds.agent_token or '')}[/dim]")
     elif creds.agent_token:
-        console.print("Agent:   [cyan]~/.config/hle/agent.toml[/cyan]")
+        console.print(f"Agent:   [cyan]{config.display_path(config.agent_config_path())}[/cyan]")
         console.print(f"         [dim]{_mask(creds.agent_token)}[/dim]")
 
 
@@ -615,7 +615,9 @@ def auth_status(ctx: click.Context) -> None:
 def logout() -> None:
     """Remove the saved API key from ~/.config/hle/config.toml."""
     if config.remove_api_key():
-        console.print("[green]API key removed[/green] from ~/.config/hle/config.toml")
+        console.print(
+            f"[green]API key removed[/green] from {config.display_path(config.CONFIG_FILE)}"
+        )
     else:
         console.print("[dim]No API key saved in config file.[/dim]")
 
@@ -908,7 +910,8 @@ def agent_status(ctx: click.Context, ready: bool) -> None:
     token = creds.agent_token
     if token:
         masked = f"{token[:9]}...{token[-4:]}" if len(token) > 13 else token
-        console.print("Agent token source: [cyan]~/.config/hle/agent.toml[/cyan]")
+        where = config.display_path(config.agent_config_path())
+        console.print(f"Agent token source: [cyan]{where}[/cyan]")
         console.print(f"Token: [dim]{masked}[/dim]")
     else:
         console.print("[dim]No agent token configured. Run 'hle auth login --agent-token'.[/dim]")
@@ -1067,7 +1070,8 @@ def agent_services(provider: str | None, as_json: bool) -> None:
 def agent_logout() -> None:
     """Remove the saved agent token."""
     if config.remove_agent_token():
-        console.print("[green]Agent token removed[/green] from ~/.config/hle/agent.toml")
+        where = config.display_path(config.agent_config_path())
+        console.print(f"[green]Agent token removed[/green] from {where}")
     else:
         console.print("[dim]No agent token saved.[/dim]")
 

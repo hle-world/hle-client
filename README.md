@@ -398,6 +398,22 @@ API key resolution order:
 2. `HLE_API_KEY` environment variable
 3. `~/.config/hle/config.toml`
 
+### Config directory
+
+HLE keeps `config.toml` (API key) and `agent.toml` (agent token) in one
+directory, chosen in this order:
+
+1. `HLE_CONFIG_DIR` environment variable
+2. `$XDG_CONFIG_HOME/hle` (when `XDG_CONFIG_HOME` is set to an absolute path),
+   unless that directory does not exist and `~/.config/hle` does; existing
+   installs keep using `~/.config/hle`, and nothing is moved
+3. `~/.config/hle`
+
+`HLE_AGENT_CONFIG` still overrides the agent token file on its own. If the
+directory cannot be written (a read-only filesystem, or a sandboxed `$HOME`
+such as iOS a-Shell), `hle auth login` fails with an error naming the path
+instead of reporting success; set `HLE_CONFIG_DIR` to a writable directory.
+
 ### Agent self-update policy
 
 An agent can also be told to update itself from the dashboard (the

@@ -1,6 +1,8 @@
 """Where this machine keeps its credentials, and how to read and write them.
 
-Two files, one place that knows about both:
+Two files, one place that knows about both. Their directory is ``~/.config/hle``
+unless ``HLE_CONFIG_DIR`` (or an absolute ``XDG_CONFIG_HOME``, giving
+``$XDG_CONFIG_HOME/hle``) says otherwise:
 
 * ``~/.config/hle/config.toml`` holds the API key (``hle_`` + 32 hex).
 * ``~/.config/hle/agent.toml`` holds the agent credential (``hle_...``, or a legacy ``hlea_...``),
@@ -23,11 +25,46 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from hle_client.errors import HleError
 from hle_common import credentials
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = Path.home() / ".config" / "hle"
+# Moves the whole config directory (config.toml and agent.toml). For sandboxes
+# where ``~/.config`` cannot be written, e.g. iOS a-Shell.
+CONFIG_DIR_ENV = "HLE_CONFIG_DIR"
+
+
+def resolve_config_dir() -> Path:
+    """Where HLE keeps its files.
+
+    ``HLE_CONFIG_DIR`` wins, then ``$XDG_CONFIG_HOME/hle`` (only when absolute,
+    as the XDG spec requires), then ``~/.config/hle``. An existing
+    ``~/.config/hle`` is kept when ``$XDG_CONFIG_HOME/hle`` does not exist yet,
+    so setting ``XDG_CONFIG_HOME`` never hides credentials already saved there.
+    """
+    explicit = os.environ.get(CONFIG_DIR_ENV)
+    if explicit:
+        return Path(explicit).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    legacy = Path.home() / ".config" / "hle"
+    if xdg and Path(xdg).is_absolute():
+        candidate = Path(xdg) / "hle"
+        # Existing installs keep their credentials: only switch to the XDG
+        # location when it already exists or there is nothing at the legacy one.
+        if candidate.exists() or not legacy.exists():
+            return candidate
+    return legacy
+
+
+def display_path(path: Path) -> str:
+    """``path`` for people to read, with the home directory shown as ``~``."""
+    text = str(path)
+    home = str(Path.home())
+    return "~" + text[len(home) :] if text == home or text.startswith(home + os.sep) else text
+
+
+CONFIG_DIR = resolve_config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
 # Separate from the API-key file so the two cannot clash.
@@ -102,6 +139,27 @@ def _ensure_private_dir(directory: Path) -> None:
 
 
 def _write_private_file(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` (see :func:`_write_private_file_unchecked`).
+
+    Any failure, including a write the platform silently dropped, becomes an
+    ``HleError`` naming the path and pointing at ``HLE_CONFIG_DIR``.
+    """
+    try:
+        _write_private_file_unchecked(path, content)
+        # Some sandboxes accept the write and discard it; read it back.
+        if path.read_text(encoding="utf-8") != content:
+            raise OSError("file contents did not persist after writing")
+    except OSError as exc:
+        raise HleError(
+            f"Could not save credentials to {path}: {exc}",
+            hint=(
+                f"Set {CONFIG_DIR_ENV} to a writable directory "
+                f"(for example: export {CONFIG_DIR_ENV}=$HOME/hle-config)."
+            ),
+        ) from exc
+
+
+def _write_private_file_unchecked(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` at 0600 without ever exposing it wider.
 
     A sibling temporary file, opened ``O_CREAT|O_EXCL|O_NOFOLLOW`` and forced
@@ -174,12 +232,14 @@ def load_api_key() -> str | None:
 def save_api_key(api_key: str) -> None:
     """Persist the API key to the config file with restrictive permissions.
 
+    Raises ``HleError`` when the file cannot be written.
+
     Rewrites only the ``api_key`` line, so anything else someone put in the
     file survives.
     """
+    existing_lines: list[str] = []
+    found = False
     try:
-        existing_lines: list[str] = []
-        found = False
         if CONFIG_FILE.exists():
             with open(CONFIG_FILE) as f:
                 for line in f:
@@ -188,20 +248,22 @@ def save_api_key(api_key: str) -> None:
                         found = True
                     else:
                         existing_lines.append(line)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HleError(
+            f"Could not read {CONFIG_FILE}: {exc}",
+            hint=f"Set {CONFIG_DIR_ENV} to a writable directory.",
+        ) from exc
 
-        if not found:
-            existing_lines.append(f'api_key = "{api_key}"\n')
+    if not found:
+        existing_lines.append(f'api_key = "{api_key}"\n')
 
-        # 0600 (owner-only read/write) to protect the API key; the temp file is
-        # created at that mode and renamed into place, so an existing 0644 file
-        # cannot leak the key.
-        _write_private_file(CONFIG_FILE, "".join(existing_lines))
+    # 0600 (owner-only read/write) to protect the API key; the temp file is
+    # created at that mode and renamed into place, so an existing 0644 file
+    # cannot leak the key. Raises HleError if the file cannot be written.
+    _write_private_file(CONFIG_FILE, "".join(existing_lines))
 
-        # nosemgrep: python-logger-credential-disclosure
-        logger.info("API key saved to %s", CONFIG_FILE)
-    except Exception:
-        # nosemgrep: python-logger-credential-disclosure
-        logger.warning("Failed to save API key to %s", CONFIG_FILE, exc_info=True)
+    # nosemgrep: python-logger-credential-disclosure
+    logger.info("API key saved to %s", CONFIG_FILE)
 
 
 def remove_api_key() -> bool:

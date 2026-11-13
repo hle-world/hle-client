@@ -126,7 +126,8 @@ def render_status(ctx: click.Context) -> None:
     else:
         o.print("  API key      [yellow]none[/yellow] [dim]— run: hle auth login[/dim]")
     if creds["agent_token"]:
-        o.print("  Agent token  [green]set[/green] [dim](~/.config/hle/agent.toml)[/dim]")
+        where = config.display_path(config.agent_config_path())
+        o.print(f"  Agent token  [green]set[/green] [dim]({where})[/dim]")
     o.print()
 
     daemons: list[Daemon] = state["daemons"]
