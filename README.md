@@ -404,7 +404,9 @@ HLE keeps `config.toml` (API key) and `agent.toml` (agent token) in one
 directory, chosen in this order:
 
 1. `HLE_CONFIG_DIR` environment variable
-2. `$XDG_CONFIG_HOME/hle` (when `XDG_CONFIG_HOME` is set to an absolute path)
+2. `$XDG_CONFIG_HOME/hle` (when `XDG_CONFIG_HOME` is set to an absolute path),
+   unless that directory does not exist and `~/.config/hle` does; existing
+   installs keep using `~/.config/hle`, and nothing is moved
 3. `~/.config/hle`
 
 `HLE_AGENT_CONFIG` still overrides the agent token file on its own. If the

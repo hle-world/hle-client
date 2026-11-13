@@ -39,15 +39,29 @@ def resolve_config_dir() -> Path:
     """Where HLE keeps its files.
 
     ``HLE_CONFIG_DIR`` wins, then ``$XDG_CONFIG_HOME/hle`` (only when absolute,
-    as the XDG spec requires), then ``~/.config/hle``.
+    as the XDG spec requires), then ``~/.config/hle``. An existing
+    ``~/.config/hle`` is kept when ``$XDG_CONFIG_HOME/hle`` does not exist yet,
+    so setting ``XDG_CONFIG_HOME`` never hides credentials already saved there.
     """
     explicit = os.environ.get(CONFIG_DIR_ENV)
     if explicit:
         return Path(explicit).expanduser()
     xdg = os.environ.get("XDG_CONFIG_HOME")
+    legacy = Path.home() / ".config" / "hle"
     if xdg and Path(xdg).is_absolute():
-        return Path(xdg) / "hle"
-    return Path.home() / ".config" / "hle"
+        candidate = Path(xdg) / "hle"
+        # Existing installs keep their credentials: only switch to the XDG
+        # location when it already exists or there is nothing at the legacy one.
+        if candidate.exists() or not legacy.exists():
+            return candidate
+    return legacy
+
+
+def display_path(path: Path) -> str:
+    """``path`` for people to read, with the home directory shown as ``~``."""
+    text = str(path)
+    home = str(Path.home())
+    return "~" + text[len(home) :] if text == home or text.startswith(home + os.sep) else text
 
 
 CONFIG_DIR = resolve_config_dir()

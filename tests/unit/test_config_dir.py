@@ -27,6 +27,31 @@ class TestResolveConfigDir:
         assert config.resolve_config_dir() == tmp_path / ".config" / "hle"
 
     def test_xdg_config_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        assert config.resolve_config_dir() == tmp_path / "xdg" / "hle"
+
+    def test_xdg_set_only_legacy_dir_exists_keeps_legacy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        (tmp_path / ".config" / "hle").mkdir(parents=True)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        assert config.resolve_config_dir() == tmp_path / ".config" / "hle"
+
+    def test_xdg_set_and_xdg_dir_exists_uses_xdg(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        (tmp_path / ".config" / "hle").mkdir(parents=True)
+        (tmp_path / "xdg" / "hle").mkdir(parents=True)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        assert config.resolve_config_dir() == tmp_path / "xdg" / "hle"
+
+    def test_xdg_set_and_neither_exists_uses_xdg(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
         assert config.resolve_config_dir() == tmp_path / "xdg" / "hle"
 
