@@ -547,3 +547,104 @@ class TestAgentEnrollDetectsAMissingToken:
         )
         assert result.returncode != 0
         assert "already enrolled" not in result.stdout + result.stderr
+
+
+def _run_agent_install_service(
+    tmp_path: Path,
+    *,
+    scope: str,
+    uid: str,
+    sudo_installed: bool,
+    sudo_exit: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run agent_install_service with fake hle/id/sudo on a scratch PATH.
+
+    Returns (result, log) where log records each `hle`/`sudo` invocation.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "calls.log"
+
+    (bindir / "hle").write_text(f'#!/bin/sh\necho "hle $*" >> "{log}"\nexit 0\n')
+    (bindir / "hle").chmod(0o755)
+    (bindir / "id").write_text(f"#!/bin/sh\necho {uid}\n")
+    (bindir / "id").chmod(0o755)
+    if sudo_installed:
+        (bindir / "sudo").write_text(f'#!/bin/sh\necho "sudo $*" >> "{log}"\nexit {sudo_exit}\n')
+        (bindir / "sudo").chmod(0o755)
+
+    func = _extract_function(INSTALL_SH.read_text(), "agent_install_service")
+    body = (
+        "info() { :; }\n"
+        'warn() { printf "WARN %s\\n" "$1" >&2; }\n'
+        "INSTALL_SERVICE=1\n"
+        f'SERVICE_SCOPE="{scope}"\n'
+        "agent_install_service\n"
+    )
+    result = subprocess.run(  # noqa: S603 — fixed argv, local script + scratch dir
+        ["/bin/sh", "-c", f"{func}\n{body}", "install.sh"],
+        capture_output=True,
+        text=True,
+        check=False,
+        # Only the scratch bin: no real sudo can leak in and change the branch.
+        env={**os.environ, "PATH": str(bindir)},
+    )
+    logged = log.read_text() if log.exists() else ""
+    return result, logged
+
+
+class TestAgentServiceEscalates:
+    """`--agent --system` as a normal user escalates by itself.
+
+    It used to fail with "Permission denied writing /etc/systemd/system/…" and
+    tell the user to run `sudo hle …`, which sudo cannot find: its secure_path
+    drops ~/.local/bin. The installer now resolves hle first and runs it through
+    sudo by absolute path.
+    """
+
+    def test_system_scope_as_a_normal_user_escalates(self, tmp_path):
+        result, logged = _run_agent_install_service(
+            tmp_path, scope="--system", uid="1000", sudo_installed=True
+        )
+        assert result.returncode == 0, result.stderr
+        hle = tmp_path / "bin" / "hle"
+        assert logged.strip() == f"sudo {hle} daemon install agent --system"
+
+    def test_root_does_not_escalate(self, tmp_path):
+        result, logged = _run_agent_install_service(
+            tmp_path, scope="--system", uid="0", sudo_installed=True
+        )
+        assert result.returncode == 0, result.stderr
+        assert logged.strip() == "hle daemon install agent --system"
+
+    def test_user_scope_is_not_escalated(self, tmp_path):
+        result, logged = _run_agent_install_service(
+            tmp_path, scope="--user", uid="1000", sudo_installed=True
+        )
+        assert result.returncode == 0, result.stderr
+        assert logged.strip() == "hle daemon install agent --user"
+
+    def test_auto_scope_is_not_escalated(self, tmp_path):
+        result, logged = _run_agent_install_service(
+            tmp_path, scope="", uid="1000", sudo_installed=True
+        )
+        assert result.returncode == 0, result.stderr
+        assert logged.strip() == "hle daemon install agent"
+
+    def test_no_sudo_falls_through_to_the_manual_hint(self, tmp_path):
+        result, logged = _run_agent_install_service(
+            tmp_path, scope="--system", uid="1000", sudo_installed=False
+        )
+        assert result.returncode == 1
+        assert logged == ""
+        hle = tmp_path / "bin" / "hle"
+        assert f"sudo {hle} daemon install agent --system" in result.stderr
+
+    def test_the_hint_names_the_absolute_path(self, tmp_path):
+        result, _ = _run_agent_install_service(
+            tmp_path, scope="--system", uid="1000", sudo_installed=True, sudo_exit=1
+        )
+        assert result.returncode == 1
+        hle = tmp_path / "bin" / "hle"
+        assert f"sudo {hle} daemon install agent --system" in result.stderr
+        assert "sudo hle " not in result.stderr
