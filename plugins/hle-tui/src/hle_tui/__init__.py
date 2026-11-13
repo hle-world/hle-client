@@ -1,3 +1,3 @@
 """Interactive terminal dashboard for HLE, shipped as an hle-client plugin."""
 
-__version__ = "2611.2"
+__version__ = "2611.3"
