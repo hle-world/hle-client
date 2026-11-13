@@ -262,6 +262,62 @@ def _system_run_as(run_as: str | None, user_mode: bool, *, harden: bool) -> str 
     return (_invoking_user() if harden else None) or getpass.getuser()
 
 
+def _effective_user() -> str | None:
+    """The account this process runs as, or ``None`` when it cannot be told.
+
+    ``getpass.getuser()`` reads ``LOGNAME``/``USER``, which ``sudo`` rewrites to
+    ``root``; the effective uid is the account that actually runs here. POSIX
+    only — Windows has no ``pwd`` to ask.
+    """
+    if not hasattr(os, "geteuid"):
+        return None
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - Windows
+        return None
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError):
+        return None
+
+
+def _user_home(user: str) -> str | None:
+    """*user*'s home directory from the account database, or ``None``.
+
+    ``pwd`` is POSIX-only and the account need not exist here (an explicit
+    ``--run-as`` can name someone the account database does not know); both
+    cases fall back rather than fail.
+    """
+    try:
+        import pwd
+    except ImportError:  # pragma: no cover - Windows
+        return None
+    try:
+        return pwd.getpwnam(user).pw_dir or None
+    except (KeyError, OSError):
+        return None
+
+
+def _agent_config_for(run_as: str | None, user_mode: bool) -> str:
+    """The token file the installed service will read at start.
+
+    ``User=`` and this path must name the same account. A system unit installed
+    under ``sudo`` runs as the invoking user (``User=ian``), but the installer's
+    own ``Path.home()`` is root's (Debian's sudo resets ``HOME``), so deriving
+    the path here would hand the unit root's ``agent.toml`` — a file ``ian``
+    cannot read, and the agent restarts forever next to it.
+    """
+    if os.environ.get(config.AGENT_CONFIG_ENV):
+        # An explicit override is the operator's answer; keep it verbatim.
+        return str(config.agent_config_path())
+    resolved = run_as or _invoking_user()
+    if not user_mode and resolved and resolved != _effective_user():
+        home = _user_home(resolved)
+        if home:
+            return str(Path(home) / ".config" / "hle" / "agent.toml")
+    return str(config.agent_config_path())
+
+
 def _path_owned_by_nonroot(path: Path) -> bool:
     """Whether *path*, or any parent directory, is owned or writable by a non-root user.
 
@@ -2464,9 +2520,10 @@ def install(
     # Resolve the token file here, while still running as the user who enrolled,
     # and hand the service an absolute path. Deriving it later from whatever
     # environment the service manager supplies is what left agents restarting
-    # forever next to a token file they could not see.
-
-    agent_config = str(config.agent_config_path()) if agent_mode else None
+    # forever next to a token file they could not see. It must name the same
+    # account as the unit's User=, which under sudo is not the installer's HOME.
+    run_as_user = _system_run_as(run_as, user_mode, harden=True)
+    agent_config = _agent_config_for(run_as_user, user_mode) if agent_mode else None
     if agent_mode and not Path(str(agent_config)).exists():
         console.print(
             f"[yellow]No agent token at {agent_config}.[/yellow] "

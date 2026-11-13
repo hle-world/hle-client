@@ -1103,3 +1103,92 @@ class TestSystemServiceOwnership:
         monkeypatch.setattr(service_cmd, "_install_from_spec", lambda spec, **kw: seen.update(kw))
         assert service_cmd.refresh_service("hle-agent.service", False) == "refreshed"
         assert not seen.get("harden")
+
+
+class TestAgentConfigFor:
+    """The token path must name the same account as the unit's ``User=``.
+
+    ``sudo hle daemon install agent --system`` wrote ``User=ian`` from
+    ``SUDO_USER`` but ``HLE_AGENT_CONFIG=/root/...`` from root's ``HOME`` (which
+    Debian's sudo resets), so the agent could not read its own token and
+    restarted forever.
+    """
+
+    def _sudo_root(self, monkeypatch, *, user="alice", home="/home/alice"):
+        pwd = pytest.importorskip("pwd")
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: 0)
+        monkeypatch.setenv("SUDO_USER", user)
+        monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_dir=home))
+
+    def test_system_unit_under_sudo_uses_the_callers_home(self, monkeypatch):
+        self._sudo_root(monkeypatch)
+        assert service_cmd._agent_config_for(None, False) == "/home/alice/.config/hle/agent.toml"
+
+    def test_an_explicit_run_as_uses_that_users_home(self, monkeypatch):
+        self._sudo_root(monkeypatch, user="bob", home="/home/bob")
+        assert service_cmd._agent_config_for("bob", False) == "/home/bob/.config/hle/agent.toml"
+
+    def test_hle_agent_config_override_wins(self, monkeypatch):
+        self._sudo_root(monkeypatch)
+        monkeypatch.setenv("HLE_AGENT_CONFIG", "/etc/hle/agent.toml")
+        assert service_cmd._agent_config_for("alice", False) == "/etc/hle/agent.toml"
+
+    def test_per_user_unit_keeps_the_installers_path(self, monkeypatch):
+        self._sudo_root(monkeypatch)
+        assert service_cmd._agent_config_for(None, True) == str(
+            service_cmd.config.agent_config_path()
+        )
+
+    def test_run_as_the_current_user_keeps_the_installers_path(self, monkeypatch):
+        pwd = pytest.importorskip("pwd")
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: 0)
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_name="root"))
+        assert service_cmd._agent_config_for("root", False) == str(
+            service_cmd.config.agent_config_path()
+        )
+
+    def test_an_unknown_user_falls_back(self, monkeypatch):
+        pwd = pytest.importorskip("pwd")
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: 0)
+
+        def missing(name):
+            raise KeyError(name)
+
+        monkeypatch.setattr(pwd, "getpwnam", missing)
+        assert service_cmd._agent_config_for("ghost", False) == str(
+            service_cmd.config.agent_config_path()
+        )
+
+
+class TestSystemUnitAgentConfig:
+    """The generated unit's ``HLE_AGENT_CONFIG`` follows its ``User=``.
+
+    Installing a system agent under simulated sudo must point the unit at the
+    invoking user's token file, not root's — the path the service will actually
+    read, which is also what the "No agent token at …" warning checks.
+    """
+
+    def _install(self, tmp_path, monkeypatch):
+        system_dir = tmp_path / "system"
+        system_dir.mkdir()
+        monkeypatch.setattr(service_cmd, "_SYSTEM_UNIT_DIR", system_dir)
+        monkeypatch.setattr(service_cmd, "_unit_path_in_other_scope", lambda *a: None)
+        monkeypatch.setattr(service_cmd, "find_hle_path", lambda: "/usr/bin/hle")
+        monkeypatch.setattr(
+            service_cmd, "_systemctl", lambda *a, **k: SimpleNamespace(returncode=0)
+        )
+        monkeypatch.setattr(service_cmd, "_require_supported", lambda: "linux")
+        monkeypatch.setattr(service_cmd.os, "geteuid", lambda: 0)
+        result = CliRunner().invoke(main, ["daemon", "install", "agent", "--system", "--no-start"])
+        assert result.exit_code == 0, result.output
+        return (system_dir / unit_name(AGENT_LABEL, None)).read_text()
+
+    def test_a_system_unit_under_sudo_uses_the_callers_home(self, tmp_path, monkeypatch):
+        pwd = pytest.importorskip("pwd")
+        monkeypatch.setenv("SUDO_USER", "alice")
+        monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_dir="/home/alice"))
+        text = self._install(tmp_path, monkeypatch)
+        assert "User=alice" in text
+        assert "Environment=HLE_AGENT_CONFIG=/home/alice/.config/hle/agent.toml" in text
+        assert "/root/.config/hle/agent.toml" not in text
+

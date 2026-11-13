@@ -598,15 +598,30 @@ agent_install_service() {
         return 0
     fi
 
-    # Scope is auto-detected by the CLI (root -> system, otherwise per-user)
-    # unless the caller pinned it with --user / --system.
-    # shellcheck disable=SC2086  # SERVICE_SCOPE is intentionally unquoted (may be empty)
-    if hle daemon install agent $SERVICE_SCOPE; then
-        return 0
+    # `sudo hle` fails: sudo's secure_path does not include ~/.local/bin, so
+    # resolve the binary first and name it by absolute path when escalating.
+    HLE_BIN=$(command -v hle)
+
+    if [ "$SERVICE_SCOPE" = "--system" ] && [ "$(id -u)" -ne 0 ]; then
+        # --system as a normal user has to write /etc/systemd/system, which
+        # needs root. Escalate here rather than fail and tell the user to run a
+        # command sudo cannot find; with no sudo, fall through to the hint.
+        if command -v sudo >/dev/null 2>&1; then
+            if sudo "$HLE_BIN" daemon install agent --system; then
+                return 0
+            fi
+        fi
+    else
+        # Scope is auto-detected by the CLI (root -> system, otherwise per-user)
+        # unless the caller pinned it with --user / --system.
+        # shellcheck disable=SC2086  # SERVICE_SCOPE is intentionally unquoted (may be empty)
+        if hle daemon install agent $SERVICE_SCOPE; then
+            return 0
+        fi
     fi
 
     warn "Could not install the service automatically."
-    warn "Install it manually with: sudo hle daemon install agent --system"
+    warn "Install it manually with: sudo $HLE_BIN daemon install agent --system"
     warn "Or just run the agent in the foreground: hle agent run"
     return 1
 }
