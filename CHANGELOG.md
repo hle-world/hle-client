@@ -1,5 +1,9 @@
 # Changelog
 
+## v2611.3 — 2026-11-13
+
+<!-- TODO: Fill in release notes before merging -->
+
 ## v2611.2 — 2026-11-11
 
 ### Fixed
