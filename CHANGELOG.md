@@ -2,7 +2,23 @@
 
 ## v2611.3 — 2026-11-13
 
-<!-- TODO: Fill in release notes before merging -->
+### Fixed
+
+- `sudo hle daemon install agent --system` no longer writes a service that
+  crash-loops: the service runs as the user who ran sudo, and now also reads
+  that user's agent token instead of root's (#280).
+- The installer's `--agent --system` now runs `sudo` itself as a normal user,
+  instead of failing and suggesting a `sudo hle …` command sudo cannot find.
+- `hle auth login` and agent enrollment fail with a clear error naming the path
+  when the config directory is not writable, instead of reporting success
+  (#278).
+- `hle-tui` plugin versions are bumped and published with each release.
+
+### Added
+
+- `HLE_CONFIG_DIR` sets where HLE keeps its config and credentials;
+  `XDG_CONFIG_HOME` is honoured too. An existing `~/.config/hle` keeps being
+  used, so nobody is logged out by upgrading.
 
 ## v2611.2 — 2026-11-11
 
