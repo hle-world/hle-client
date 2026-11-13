@@ -8,7 +8,8 @@
 #
 # What it does:
 #   1. Validates the version format
-#   2. Updates version in pyproject.toml, __init__.py, README.md, install.sh
+#   2. Updates version in pyproject.toml, __init__.py, README.md, install.sh,
+#      and in each plugins/* package changed since the last release
 #   3. Adds a CHANGELOG.md entry (you fill in the details)
 #   4. Creates a chore/release-X.Y.Z branch, commits, pushes, opens a PR
 #   5. When the PR is merged, auto-release.yml creates the GitHub release
@@ -131,7 +132,30 @@ else
   FILES_CHANGED+=(install.sh)
 fi
 
-# 5. CHANGELOG.md — add new entry at top (after the # Changelog header)
+# 5. plugins/* — a plugin whose files changed since the last release takes the
+#    new version, so publish.yml uploads it. An unchanged plugin keeps its
+#    version and publish.yml's skip-existing passes over it.
+for plugin in plugins/*/; do
+  [[ -f "${plugin}pyproject.toml" ]] || continue
+  if git rev-parse -q --verify "refs/tags/v$CURRENT_VERSION" >/dev/null \
+     && git diff --quiet "v$CURRENT_VERSION" HEAD -- "$plugin"; then
+    echo "Skipping ${plugin} (unchanged since v$CURRENT_VERSION)"
+    continue
+  fi
+  echo "Updating ${plugin}..."
+  PLUGIN_FILES=("${plugin}pyproject.toml")
+  while IFS= read -r f; do PLUGIN_FILES+=("$f"); done \
+    < <(grep -rl '^__version__ = "' "${plugin}src" 2>/dev/null || true)
+  if $DRY_RUN; then
+    grep -H -e '^version = "' -e '^__version__ = "' "${PLUGIN_FILES[@]}" || true
+  else
+    sed -i '' -e "s/^version = \"[0-9.]*\"/version = \"$VERSION\"/" \
+      -e "s/^__version__ = \"[0-9.]*\"/__version__ = \"$VERSION\"/" "${PLUGIN_FILES[@]}"
+    FILES_CHANGED+=("${PLUGIN_FILES[@]}")
+  fi
+done
+
+# 6. CHANGELOG.md — add new entry at top (after the # Changelog header)
 echo "Updating CHANGELOG.md..."
 DATE=$(date +%Y-%m-%d)
 CHANGELOG_ENTRY="## v$VERSION — $DATE
