@@ -20,6 +20,7 @@ from hle_common.agent_protocol import (
     AgentStateSync,
     AgentStatus,
     AgentWelcome,
+    AllowedIp,
     AllowedUser,
     DeclaredAccess,
     DeclaredAck,
@@ -371,6 +372,11 @@ SAMPLES: dict[str, object] = {
             ],
             pin="4821",
             basic_auth="visitor:s3cret",
+            allowed_ips=[
+                AllowedIp(cidr="203.0.113.0/24", label="office"),
+                AllowedIp(cidr="198.51.100.7"),
+            ],
+            allow_origin_ip=True,
         ),
     ),
     "DeclaredEndpoints": DeclaredEndpoints(

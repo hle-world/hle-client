@@ -49,7 +49,9 @@ from hle_common.wire import WireModel
 # `fragmentation` hello capability, `AgentWelcome.capabilities` to echo it, and
 # `fragment` frames carrying slices of any oversized control message (the
 # welcome included). See hle_common.fragmentation.
-AGENT_PROTOCOL_VERSION = "1.5"
+#
+# 1.6 adds allowed visitor IP ranges (`allowed_ips`, `allow_origin_ip`).
+AGENT_PROTOCOL_VERSION = "1.6"
 
 # Install methods whose venv the agent owns outright and can stage a new version
 # into. `docker` is here because an image that runs the agent from a versioned
@@ -432,6 +434,29 @@ class AllowedUser(WireModel):
             raise ValueError("allowed user provider must not be empty")
 
 
+@dataclass(kw_only=True)
+class AllowedIp(WireModel):
+    """One visitor address range allowed through an endpoint's SSO gate.
+
+    ``cidr`` is an address or CIDR range (``203.0.113.7`` or
+    ``203.0.113.0/24``). Only its length and non-emptiness are checked here:
+    validity is the receiver's job, since it is the one that evaluates a range
+    against a connecting address. ``label`` is a human note (``office``);
+    ``None`` for an unlabelled entry.
+    """
+
+    cidr: str
+    label: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.cidr:
+            raise ValueError("allowed IP cidr must not be empty")
+        if len(self.cidr) > 64:
+            raise ValueError(f"allowed IP cidr must be at most 64 characters, got {self.cidr!r}")
+        if self.label is not None and len(self.label) > 60:
+            raise ValueError(f"allowed IP label must be at most 60 characters, got {self.label!r}")
+
+
 @dataclass(kw_only=True, repr=False)
 class DeclaredAccess(WireModel):
     """Visitor access policy a declaration carries for its endpoint.
@@ -447,6 +472,11 @@ class DeclaredAccess(WireModel):
     allowed_users: list[AllowedUser] = field(default_factory=list)
     pin: str | None = None
     basic_auth: str | None = None
+    # 1.6: visitor addresses that skip sign-in, and whether the public address
+    # the endpoint's own connection comes from is one of them. Empty / False
+    # is a 1.5 frame, which a 1.6 peer reads as "no IP rules declared".
+    allowed_ips: list[AllowedIp] = field(default_factory=list)
+    allow_origin_ip: bool = False
 
     def __post_init__(self) -> None:
         if self.pin is not None and not self.pin:
