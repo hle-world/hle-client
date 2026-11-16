@@ -47,7 +47,7 @@ class _FakeResponse:
         self.headers = httpx.Headers({"content-type": "application/octet-stream"})
         self._chunks = chunks
 
-    async def aiter_bytes(self, chunk_size: int):
+    async def aiter_bytes(self, chunk_size: int | None = None):
         for chunk in self._chunks:
             yield chunk
 
@@ -304,7 +304,7 @@ class TestChunkedResponseBudget:
         release = asyncio.Event()
 
         class _IdleResponse(_FakeResponse):
-            async def aiter_bytes(self, chunk_size: int):
+            async def aiter_bytes(self, chunk_size: int | None = None):
                 await release.wait()
                 yield b"late"
 

@@ -529,7 +529,7 @@ class _MockStreamResponse:
         self.status_code = status_code
         self.headers = httpx.Headers(raw)
 
-    async def aiter_bytes(self, chunk_size: int):
+    async def aiter_bytes(self, chunk_size: int | None = None):
         yield b"body"
 
     async def __aenter__(self) -> _MockStreamResponse:

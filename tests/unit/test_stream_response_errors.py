@@ -46,7 +46,7 @@ class _FakeResponse:
         self._delays = delays or [0.0] * len(chunks)
         self._error = error
 
-    async def aiter_bytes(self, chunk_size: int):
+    async def aiter_bytes(self, chunk_size: int | None = None):
         for chunk, delay in zip(self._chunks, self._delays, strict=True):
             if delay:
                 await asyncio.sleep(delay)
