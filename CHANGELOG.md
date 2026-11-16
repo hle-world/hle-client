@@ -7,6 +7,10 @@
 - Streamed responses that arrive slowly (Server-Sent Events, long polls) are
   forwarded as data arrives instead of waiting for 256 KiB.
 
+### Added
+
+- Agent protocol 1.6: declared endpoints can carry allowed visitor IP ranges.
+
 ## v2611.3 — 2026-11-13
 
 ### Fixed

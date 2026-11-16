@@ -64,8 +64,9 @@ _ENDPOINT_1_3_FIELDS = {
 
 
 class TestVersions:
-    def test_agent_protocol_is_1_5(self):
-        assert AGENT_PROTOCOL_VERSION == "1.5"
+    def test_is_at_least_1_4(self):
+        # Pinned exactly by the newest protocol's own tests (1.6 at present).
+        assert tuple(int(p) for p in AGENT_PROTOCOL_VERSION.split(".")) >= (1, 4)
 
     def test_discovery_is_1_1(self):
         assert DISCOVERY_PROTOCOL_VERSION == "1.1"
