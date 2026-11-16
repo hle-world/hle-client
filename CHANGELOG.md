@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Streamed responses that arrive slowly (Server-Sent Events, long polls) are
+  forwarded as data arrives instead of waiting for 256 KiB.
+
 ## v2611.3 — 2026-11-13
 
 ### Fixed

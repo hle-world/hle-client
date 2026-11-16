@@ -43,6 +43,31 @@ def upstream_chunk_size() -> int:
     return size if size > 0 else DEFAULT_HTTP_CHUNK_SIZE
 
 
+# How long to wait for more upstream body bytes before forwarding what is
+# buffered. Reading with no ``chunk_size`` yields whatever each socket read
+# returned, so a body that trickles in (SSE, long-poll) is forwarded after this
+# idle delay instead of waiting for 256 KiB to accumulate.
+_FLUSH_IDLE_SECONDS = 0.005
+_FLUSH_IDLE_MAX_SECONDS = 0.05
+HTTP_FLUSH_MS_ENV = "HLE_HTTP_FLUSH_MS"
+
+
+def upstream_flush_seconds() -> float:
+    """The idle delay before forwarding buffered upstream bytes, in seconds.
+
+    From ``HLE_HTTP_FLUSH_MS`` (default :data:`_FLUSH_IDLE_SECONDS`), clamped to
+    0–50 ms. ``0`` forwards every upstream read immediately.
+    """
+    raw = os.environ.get(HTTP_FLUSH_MS_ENV)
+    if raw is None:
+        return _FLUSH_IDLE_SECONDS
+    try:
+        seconds = int(raw) / 1000.0
+    except ValueError:
+        return _FLUSH_IDLE_SECONDS
+    return min(max(seconds, 0.0), _FLUSH_IDLE_MAX_SECONDS)
+
+
 # Headers to strip from responses before sending back through the tunnel. An
 # upstream-supplied ``x-hle-content-length`` is stripped too, so only our own
 # (see ``CONTENT_LENGTH_HEADER``) ever reaches the relay.
@@ -269,6 +294,86 @@ async def _restart_on_each_chunk(
         restart()
         yield chunk
     restart()
+
+
+async def _coalesce(
+    source: AsyncIterator[bytes], target: int, flush_s: float
+) -> AsyncGenerator[bytes, None]:
+    """Forward *source* body reads as chunks of at most *target* bytes.
+
+    httpx's ``aiter_bytes(chunk_size)`` returns nothing until ``chunk_size``
+    bytes have accumulated, so a body that trickles in (Server-Sent Events,
+    long polls, progress streams) is held until the buffer fills or the upstream
+    closes. Reading with no ``chunk_size`` yields whatever each socket read
+    returned; this coalescer forwards as soon as either *target* bytes are
+    buffered or no new data has arrived for *flush_s* seconds. A *flush_s* of
+    ``0`` forwards every read immediately.
+
+    The next read runs in its own task so the idle flush can fire while a read
+    is pending; the task is cancelled cleanly when the consumer stops early or
+    the request is cancelled.
+    """
+    if flush_s <= 0:
+        # A decoded read can exceed target (gzip): still never yield more.
+        async for chunk in source:
+            for start in range(0, len(chunk), target):
+                yield chunk[start : start + target]
+        return
+
+    iterator = source.__aiter__()
+    buffer = bytearray()
+    pending: asyncio.Task[bytes] | None = None
+    terminal = False
+    error: BaseException | None = None
+
+    async def _read() -> bytes:
+        return await anext(iterator)
+
+    try:
+        while True:
+            if terminal:
+                # Drain what is left, then end the stream or re-raise.
+                if buffer:
+                    yield bytes(buffer[:target])
+                    del buffer[:target]
+                    continue
+                if error is not None:
+                    raise error
+                return
+            if pending is None:
+                pending = asyncio.ensure_future(_read())
+            # Wait for the next read, but only for flush_s when something is
+            # buffered: with nothing buffered there is nothing to flush, so an
+            # idle stream wakes only when data arrives. asyncio.wait never
+            # cancels the read, so it survives an idle flush.
+            done, _ = await asyncio.wait({pending}, timeout=flush_s if buffer else None)
+            if not done:
+                # No new data for flush_s: forward what is buffered.
+                yield bytes(buffer[:target])
+                del buffer[:target]
+                continue
+            try:
+                chunk = pending.result()
+            except StopAsyncIteration:
+                terminal = True
+                pending = None
+                continue
+            except Exception as exc:
+                # The source's own failure: forward what is buffered first.
+                terminal = True
+                error = exc
+                pending = None
+                continue
+            pending = None
+            buffer += chunk
+            while len(buffer) >= target:
+                yield bytes(buffer[:target])
+                del buffer[:target]
+    finally:
+        if pending is not None:
+            pending.cancel()
+            with contextlib.suppress(BaseException):
+                await pending
 
 
 def _collect_response_headers(
@@ -659,6 +764,7 @@ class LocalProxy:
         # produce a second one — it becomes an UpstreamStreamError.
         status_sent = False
         stack = contextlib.AsyncExitStack()
+        body_iter: AsyncGenerator[bytes, None] | None = None
 
         try:
             # The read timeout is disabled for the stream itself: an SSE
@@ -701,7 +807,10 @@ class LocalProxy:
             yield (response.status_code, resp_headers, None)
 
             is_sse = _is_event_stream(response.headers)
-            body_iter = response.aiter_bytes(chunk_size)
+            # Read with no chunk_size so each socket read is yielded at once,
+            # then coalesce here: a slow body (SSE, long poll) is forwarded
+            # after the idle flush instead of waiting for 256 KiB.
+            body_iter = _coalesce(response.aiter_bytes(), chunk_size, upstream_flush_seconds())
             while True:
                 try:
                     if is_sse:
@@ -768,6 +877,11 @@ class LocalProxy:
             yield (502, _upstream_error_headers(exc), None)
             yield (None, None, b"Bad Gateway: unexpected error")
         finally:
+            # Close the coalescer first: it cancels any in-flight upstream read
+            # task, so nothing is left pending when the response is closed.
+            if body_iter is not None:
+                with contextlib.suppress(Exception):
+                    await body_iter.aclose()
             with contextlib.suppress(Exception):
                 await stack.aclose()
             if budget is not None and held:
