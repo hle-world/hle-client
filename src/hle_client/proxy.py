@@ -314,8 +314,10 @@ async def _coalesce(
     the request is cancelled.
     """
     if flush_s <= 0:
+        # A decoded read can exceed target (gzip): still never yield more.
         async for chunk in source:
-            yield chunk
+            for start in range(0, len(chunk), target):
+                yield chunk[start : start + target]
         return
 
     iterator = source.__aiter__()
