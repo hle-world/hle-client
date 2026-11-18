@@ -1,9 +1,9 @@
 """Agent protocol 1.7: dashboard override on a declared ack.
 
-Additive only: ``DeclaredAckEntry`` gains ``overridden`` and the agent advertises
-the ``declared-override`` capability, so the relay can tell an agent that a
-declared endpoint is currently controlled from the HLE dashboard and the
-Kubernetes operator can surface the override on the resource. Everything here is
+Additive only: ``DeclaredAckEntry`` gains ``overridden`` and a
+``declared-override`` capability constant exists for peers that understand it
+(the Kubernetes operator advertises it; the plain agent does not), so an ack can
+say a declared endpoint is currently controlled from the HLE dashboard. Everything here is
 proved round-trippable and ignorable by a peer that predates it.
 """
 
