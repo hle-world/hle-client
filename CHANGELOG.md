@@ -10,6 +10,8 @@
 ### Added
 
 - Agent protocol 1.6: declared endpoints can carry allowed visitor IP ranges.
+- Agent protocol 1.7: a declared endpoint's ack can flag that the dashboard
+  currently controls it.
 
 ## v2611.3 — 2026-11-13
 

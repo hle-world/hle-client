@@ -37,8 +37,9 @@ def _endpoint(**kw) -> DeclaredEndpoint:
 
 
 class TestVersion:
-    def test_agent_protocol_is_1_6(self):
-        assert AGENT_PROTOCOL_VERSION == "1.6"
+    def test_is_at_least_1_6(self):
+        # Pinned exactly by the newest protocol's own tests (1.7 at present).
+        assert tuple(int(p) for p in AGENT_PROTOCOL_VERSION.split(".")) >= (1, 6)
 
 
 class TestAllowedIp:
