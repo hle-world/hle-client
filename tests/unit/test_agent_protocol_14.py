@@ -65,7 +65,7 @@ _ENDPOINT_1_3_FIELDS = {
 
 class TestVersions:
     def test_is_at_least_1_4(self):
-        # Pinned exactly by the newest protocol's own tests (1.6 at present).
+        # Pinned exactly by the newest protocol's own tests (1.7 at present).
         assert tuple(int(p) for p in AGENT_PROTOCOL_VERSION.split(".")) >= (1, 4)
 
     def test_discovery_is_1_1(self):

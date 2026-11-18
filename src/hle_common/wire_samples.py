@@ -394,7 +394,10 @@ SAMPLES: dict[str, object] = {
         endpoints=[
             DeclaredAckEntry(label="jellyfin", status="accepted"),
             DeclaredAckEntry(
-                label="taken", status="conflict", message="label is managed in the dashboard"
+                label="taken",
+                status="conflict",
+                message="label is managed in the dashboard",
+                overridden=True,
             ),
         ],
     ),

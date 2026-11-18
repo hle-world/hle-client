@@ -51,7 +51,13 @@ from hle_common.wire import WireModel
 # welcome included). See hle_common.fragmentation.
 #
 # 1.6 adds allowed visitor IP ranges (`allowed_ips`, `allow_origin_ip`).
-AGENT_PROTOCOL_VERSION = "1.6"
+#
+# 1.7 adds dashboard override: the `declared-override` hello capability and
+# `DeclaredAckEntry.overridden`. The relay sets the field on a `declared_ack`
+# when a declared endpoint is currently controlled from the dashboard, so the
+# Kubernetes operator can surface the override on the resource. Additive: an
+# agent that predates the capability simply ignores the field.
+AGENT_PROTOCOL_VERSION = "1.7"
 
 # Install methods whose venv the agent owns outright and can stage a new version
 # into. `docker` is here because an image that runs the agent from a versioned
@@ -77,6 +83,9 @@ EXIT_RESTART_FOR_UPDATE = 75
 K8S_SERVICES_CAPABILITY = "k8s:services"
 K8S_DECLARED_CAPABILITY = "k8s:declared"
 LOGS_CAPABILITY = "logs"
+# 1.7: this build understands `DeclaredAckEntry.overridden` (a declared endpoint
+# the dashboard currently controls). Older agents never see the field set.
+DECLARED_OVERRIDE_CAPABILITY = "declared-override"
 
 # Upper bound on `logs_request.lines`. The agent clamps to this anyway; naming
 # it here lets the server ask for as much as it is allowed to receive.
@@ -586,6 +595,10 @@ class DeclaredAckEntry(WireModel):
     # dashboard-owned endpoint already holds it, so nothing was changed.
     status: Literal["accepted", "conflict"] = "accepted"
     message: str | None = None
+    # 1.7: the endpoint is currently controlled from the dashboard, so the
+    # operator should surface the override rather than treat the declaration as
+    # authoritative. False on every pre-1.7 frame.
+    overridden: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in ("accepted", "conflict"):
