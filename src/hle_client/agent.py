@@ -56,7 +56,7 @@ from hle_common.agent_protocol import (
     update_capability,
 )
 from hle_common.discovery import DiscoveryReport
-from hle_common.fp_protocol import ForwardRule, FpMsgType, default_rules
+from hle_common.fp_protocol import ForwardRule, FpMsgType
 from hle_common.fragmentation import CAPABILITY_FRAGMENTATION
 from hle_common.preflight import PreflightReport, PreflightRequest
 
@@ -239,6 +239,7 @@ class AgentClient:
         remote_update: bool | None = None,
         allow_downgrade: bool | None = None,
         target_guard: k8s_targets.KubernetesTargetGuard | None = None,
+        policy: config.AgentPolicy | None = None,
         successor_of: str | None = None,
         successor_nonce: str | None = None,
         successor_spawner: Callable[..., Any] | None = None,
@@ -337,21 +338,38 @@ class AgentClient:
         self._failed: dict[str, str] = {}
         self._base_domain: str | None = None
         self._fp: FpAgentSide | None = None
-        # Until the server tells us otherwise, the agent's own networks are
-        # forwardable (cloud metadata is still refused by address).
-        self._forward_rules: list[ForwardRule] = default_rules()
+        # The operator's local policy (env / agent.toml). The relay proposes;
+        # this is the ceiling it cannot broaden. Injected by tests.
+        self._policy = policy if policy is not None else config.load_agent_policy()
+        # Whether this agent offers firepuncher at all. On outside a cluster
+        # unless the operator turned it off; inside one it keeps the existing
+        # HLE_FIREPUNCHER_ENABLED opt-in.
+        self._firepuncher_enabled = k8s_targets.firepuncher_policy_enabled(self._policy.firepuncher)
+        self._preflight_enabled = self._policy.preflight
+        # Until the server tells us otherwise, only targets the local policy
+        # already allows are forwardable (cloud metadata is still refused by
+        # address on top of that).
+        self._forward_rules: list[ForwardRule] = list(self._policy.allowed_targets)
         # In-flight preflight probes, held so they aren't garbage-collected.
         self._preflight_tasks: set[asyncio.Task[None]] = set()
         # In-flight firepuncher opens, keyed by stream id, so data/close for a
         # stream can be ordered behind its own open and a slow open cannot block
         # the control channel.
         self._fp_open_tasks: dict[str, asyncio.Task[None]] = {}
-        # In a cluster, an endpoint target has to pass the guard before its
-        # tunnel starts. Injected by tests; built from the environment when
-        # KUBERNETES_SERVICE_HOST (or HLE_INSTALL_METHOD=kubernetes) says so.
+        # In a cluster, an endpoint target has to pass the Kubernetes guard
+        # before its tunnel starts. Injected by tests; built from the environment
+        # when KUBERNETES_SERVICE_HOST (or HLE_INSTALL_METHOD=kubernetes) says
+        # so. Outside a cluster the local policy guard takes its place, so an
+        # endpoint, preflight or forward cannot escape the operator's ceiling.
         self._target_guard = target_guard
         if self._target_guard is None and k8s_targets.in_kubernetes():
             self._target_guard = k8s_targets.KubernetesTargetGuard.from_env()
+        self._policy_guard: k8s_targets.LocalTargetGuard | None = None
+        if self._target_guard is None:
+            self._policy_guard = k8s_targets.LocalTargetGuard(
+                allowed=self._policy.allowed_targets,
+                allow_metadata=metadata_allowed(),
+            )
         # True while the on-disk readiness state says this process is connected,
         # so run() writes only on transitions and never per heartbeat.
         self._state_connected = False
@@ -573,12 +591,12 @@ class AgentClient:
         ) as ws:
             emit_event("connected", source="agent", message=f"Connected to {self.control_uri}")
             # Advertise what this agent can do so the dashboard only offers
-            # features the agent actually supports. Firepuncher is available
-            # outside a cluster; inside one it is off unless explicitly enabled,
-            # because its forward rules would otherwise permit the API server
-            # and the metadata service. Discovery depends on what's detectable.
+            # features the agent actually supports. Firepuncher is on by
+            # default outside a cluster (the operator can turn it off) and, inside one,
+            # keeps its explicit HLE_FIREPUNCHER_ENABLED opt-in. Discovery
+            # depends on what's detectable.
             capabilities: list[str] = []
-            if k8s_targets.firepuncher_enabled():
+            if self._firepuncher_enabled:
                 capabilities.append("firepuncher")
             capabilities += [f"discovery:{p.name}" for p in active_providers()]
             # The agent answers logs_request from its own ring buffer on every
@@ -641,14 +659,18 @@ class AgentClient:
                 ws.enable_fragmentation()
             self._base_domain = welcome.base_domain
             if welcome.forward_rules:
-                self._forward_rules = list(welcome.forward_rules)
+                # Intersect what the relay sent with the local ceiling: the
+                # relay proposes an allowlist, it does not set one.
+                self._forward_rules = k8s_targets.intersect_rules(
+                    list(welcome.forward_rules), self._policy.allowed_targets
+                )
             # Firepuncher frames arrive on this same control connection, so the
             # handler is rebuilt per session and torn down with it.
             self._fp = FpAgentSide(
                 send=ws.send,
                 rules=self._forward_rules,
-                enabled=k8s_targets.firepuncher_enabled(),
-                target_guard=self._target_guard,
+                enabled=self._firepuncher_enabled,
+                target_guard=self._target_guard or self._policy_guard,
                 allow_metadata=metadata_allowed(),
             )
             # Marks the session as having worked, so the reconnect backoff in
@@ -721,7 +743,12 @@ class AgentClient:
         if mtype == "state_sync":
             sync = AgentStateSync.model_validate(msg)
             if sync.forward_rules is not None:
-                self._forward_rules = list(sync.forward_rules)
+                # Never replace the local allowlist with the relay's: intersect
+                # it, so a rule that reaches beyond the operator's policy (a
+                # relay pushing ``0.0.0.0/0``, say) drops out instead.
+                self._forward_rules = k8s_targets.intersect_rules(
+                    list(sync.forward_rules), self._policy.allowed_targets
+                )
                 if self._fp is not None:
                     # Rules are swapped live: revoking access shouldn't require
                     # the operator to restart the agent.
@@ -1519,14 +1546,27 @@ class AgentClient:
             logger.warning("Bad preflight request: %s", exc)
             return  # no request_id to answer with
 
-        # In a cluster the guard runs first and a refusal returns before any
-        # network I/O: otherwise a preflight is a port scanner and a metadata
-        # reader that reports status, Location, auth headers and a body excerpt.
+        # The operator can refuse preflight on this host. A preflight is a
+        # bounded port scanner otherwise: status, Location, auth headers and a
+        # body excerpt come back.
+        guard = self._target_guard or self._policy_guard
+        if not self._preflight_enabled:
+            report = PreflightReport(
+                request_id=req.request_id,
+                service_url=req.service_url,
+                error="preflight is disabled by the local policy",
+            )
+            with contextlib.suppress(Exception):
+                await ws.send(report.model_dump_json())
+            return
+
+        # The guard runs first and a refusal returns before any network I/O:
+        # otherwise a preflight is a port scanner and a metadata reader.
         probe_url = req.service_url
         sni_hostname: str | None = None
         host_header: str | None = None
-        if self._target_guard is not None:
-            decision = await self._target_guard.check(req.service_url)
+        if guard is not None:
+            decision = await guard.check(req.service_url)
             if not decision.allowed:
                 logger.warning("Preflight refused for %s: %s", req.service_url, decision.reason)
                 report = PreflightReport(
@@ -1682,15 +1722,18 @@ class AgentClient:
                 logger.warning("Endpoint %s failed to start: %s", spec.label, result)
 
     async def _start_endpoint(self, spec: EndpointSpec) -> None:
-        # In a cluster, the relay does not get to name any target it likes: a
-        # compromised dashboard could otherwise publish the API server, metadata
-        # or a node. The check resolves names too, so it awaits. The tunnel is
-        # given the canonical in-cluster name the guard checked, while the
-        # original spec is what the reconciler compares against.
+        # The relay does not get to name any target it likes: a compromised
+        # dashboard could otherwise publish the API server, the metadata service
+        # or a node. In a cluster the Kubernetes guard decides; off a cluster
+        # the local policy guard does, refusing the metadata endpoints and
+        # public addresses. Both resolve names, so this awaits. The tunnel is
+        # given the canonical name the guard checked, while the original spec is
+        # what the reconciler compares against.
+        guard = self._target_guard or self._policy_guard
         cfg_spec = spec
         upstream_host: str | None = None
-        if self._target_guard is not None:
-            decision = await self._target_guard.check(spec.service_url)
+        if guard is not None:
+            decision = await guard.check(spec.service_url)
             if not decision.allowed:
                 reason = f"refused: {decision.reason}"
                 if self._failed.get(spec.label) != reason:

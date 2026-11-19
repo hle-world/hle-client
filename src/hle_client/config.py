@@ -27,6 +27,7 @@ from pathlib import Path
 
 from hle_client.errors import HleError
 from hle_common import credentials
+from hle_common.fp_protocol import ForwardRule, default_rules, parse_rule  # noqa: TC001
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,14 @@ AGENT_TOKEN_ENV = "HLE_AGENT_TOKEN"
 REMOTE_UPDATE_ENV = "HLE_REMOTE_UPDATE"
 ALLOW_DOWNGRADE_ENV = "HLE_ALLOW_DOWNGRADE"
 UPDATE_MANIFEST_ENV = "HLE_UPDATE_MANIFEST"
+
+# Agent local policy. The relay decides what to publish, probe and forward; the
+# operator decides on the host itself how far the agent will follow. These are
+# read from the environment first, then agent.toml, so a compromised relay or a
+# server-side authorization bug cannot broaden them.
+ALLOWED_TARGETS_ENV = "HLE_ALLOWED_TARGETS"
+FIREPUNCHER_ENV = "HLE_FIREPUNCHER"
+PREFLIGHT_ENV = "HLE_PREFLIGHT"
 
 _FALSEY = frozenset({"0", "false", "no", "off"})
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -423,6 +432,91 @@ def load_update_manifest() -> dict[str, str] | None:
     if not isinstance(data, dict):
         raise ValueError(f"update manifest {path} is not a JSON object")
     return {str(k): str(v) for k, v in data.items()}
+
+
+# ---------------------------------------------------------------------------
+# Agent local policy
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AgentPolicy:
+    """What this agent host allows, whatever the relay asks for.
+
+    The agent used to live entirely at the relay's direction: the relay chose
+    which upstreams became endpoints, which URLs a preflight probed, and the
+    whole raw-TCP forward allowlist (replaced wholesale and live). A server-side
+    authorization bug, or a compromised relay, then had the agent's entire LAN
+    plus the internet behind it.
+
+    ``allowed_targets`` is the local ceiling that the relay's endpoints,
+    preflight requests and ``forward_rules`` are checked against and intersected
+    with. ``firepuncher`` and ``preflight`` are local on/off switches;
+    ``firepuncher`` of ``None`` means "unset", which is on outside a cluster
+    (bounded by ``allowed_targets``) and the existing ``HLE_FIREPUNCHER_ENABLED``
+    opt-in inside one. Remote updates keep their own switch (:func:`load_remote_update`).
+    """
+
+    allowed_targets: list[ForwardRule]
+    firepuncher: bool | None
+    preflight: bool
+    remote_update: bool
+
+
+def _parse_targets(values: list[str]) -> list[ForwardRule]:
+    """Parse ``allowed_targets`` entries, dropping the unreadable ones.
+
+    A malformed entry is dropped rather than refused wholesale: the remaining
+    entries still bound the agent, and an operator who mistyped one line keeps
+    the rest of their policy.
+    """
+    rules: list[ForwardRule] = []
+    for value in values:
+        rule = parse_rule(value)
+        if rule is not None:
+            rules.append(rule)
+    return rules
+
+
+def _allowed_targets() -> list[ForwardRule]:
+    """The operator's allowed targets, or the safe default when unset.
+
+    Env first, then agent.toml. A missing setting means the protocol default
+    (``@local``, loopback and the private ranges); an explicitly empty one means
+    nothing is allowed.
+    """
+    raw = os.environ.get(ALLOWED_TARGETS_ENV)
+    if raw is not None:
+        return _parse_targets([part.strip() for part in raw.split(",") if part.strip()])
+    value = load_agent_settings().get("allowed_targets")
+    if isinstance(value, str):
+        return _parse_targets([part.strip() for part in value.split(",") if part.strip()])
+    if isinstance(value, (list, tuple)):
+        return _parse_targets([str(part) for part in value])
+    return default_rules()
+
+
+def _policy_flag(env_name: str, key: str, default: bool | None) -> bool | None:
+    env = _env_flag(os.environ.get(env_name))
+    if env is not None:
+        return env
+    value = load_agent_settings().get(key)
+    if isinstance(value, bool):
+        return value
+    return default
+
+
+def load_agent_policy() -> AgentPolicy:
+    """The local policy for this agent host: env first, then agent.toml.
+
+    Everything here is operator-owned. The relay can ask; this decides.
+    """
+    return AgentPolicy(
+        allowed_targets=_allowed_targets(),
+        firepuncher=_policy_flag(FIREPUNCHER_ENV, "firepuncher", None),
+        preflight=bool(_policy_flag(PREFLIGHT_ENV, "preflight", True)),
+        remote_update=load_remote_update(),
+    )
 
 
 # ---------------------------------------------------------------------------

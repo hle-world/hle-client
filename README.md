@@ -251,12 +251,16 @@ hle firepuncher rpi 22 -- ssh -p '{port}' me@127.0.0.1   # Run a command, tear d
 ```
 
 The first argument is the agent name (see `hle agent list`); each target is a
-port or `host:port` as the agent sees it. The agent must allow each target;
-adjust per agent in the dashboard. By default the agent's own networks are
-allowed, but the cloud metadata service (`169.254.169.254`, `169.254.170.2`,
-`fd00:ec2::254`) is always refused, even when a rule covers it, so a forward
-cannot hand over the instance's IAM credentials. An operator on the agent host
-can opt back in with `HLE_FIREPUNCHER_ALLOW_METADATA=true`.
+port or `host:port` as the agent sees it. The agent must allow each target,
+and its own local policy must allow it too (see
+[Agent local policy](#agent-local-policy)) — the dashboard can only narrow that
+policy, never widen it. By default the agent's own networks are allowed, but the
+cloud metadata service (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) is
+always refused, even when a rule covers it, so a forward cannot hand over the
+instance's IAM credentials. An operator on the agent host can opt back in with
+`HLE_FIREPUNCHER_ALLOW_METADATA=true`. Outside a cluster firepuncher stays on unless the operator sets
+`HLE_FIREPUNCHER=off`; inside a cluster it is off unless
+`HLE_FIREPUNCHER_ENABLED=true`.
 
 On iPad/iOS (a-Shell) the shell cannot start a second Python process, so a
 trailing Python command is refused with exit 126: run the forward in one window
@@ -432,6 +436,41 @@ the same way; without one, updates work as before. To pin releases, point
 `update_manifest` in `agent.toml`) at a JSON object mapping each version to the
 sha256 of its wheel; the wheel is downloaded, hashed and only then installed, so
 a wheel swapped on a mirror or index is not activated.
+
+### Agent local policy
+
+Outside Kubernetes the agent used to follow the dashboard for everything: which
+upstreams became endpoints, which URLs a preflight probed, and the whole
+raw-TCP forward allowlist. A server-side authorization bug, or a compromised
+relay, then had the agent's LAN and the internet behind it. The agent now keeps
+an operator-owned policy on the host, in the environment or in
+`~/.config/hle/agent.toml`, and the relay can only narrow it, never widen it.
+`hle agent status` prints the effective policy for this machine.
+
+- `allowed_targets` (`HLE_ALLOWED_TARGETS`, comma-separated) — the ceiling for
+  endpoints, preflight probes and forward rules. Defaults to the agent's own
+  networks (`@local`), loopback and the private ranges (RFC 1918 and RFC 4193).
+  The cloud metadata endpoints (`169.254.169.254`, `169.254.170.2`,
+  `fd00:ec2::254`) and the metadata hostnames are always refused, even when a
+  rule covers them, unless `HLE_FIREPUNCHER_ALLOW_METADATA=true`. Public
+  addresses are refused unless the operator lists them. The relay's
+  `forward_rules` are intersected with this list rather than replacing it, so a
+  relay pushing `0.0.0.0/0` changes nothing.
+- `firepuncher` (`HLE_FIREPUNCHER=on|off`) — whether this agent offers raw TCP
+  forwards at all. On by default outside a cluster (as before), always
+  bounded by `allowed_targets`; set it `off` and an `fp_open` is refused with
+  `not_allowed`. Inside a cluster the existing
+  `HLE_FIREPUNCHER_ENABLED=true` opt-in still applies.
+- `preflight` (`HLE_PREFLIGHT=on|off`) — whether the dashboard may ask this
+  host to probe URLs. On by default, but every probe is still checked against
+  `allowed_targets` before any network I/O, so it cannot be used as a scanner
+  for arbitrary addresses.
+- `remote_update` (`HLE_REMOTE_UPDATE=on|off`) — the self-update switch above.
+
+A name is resolved once and every answer is checked before the target is used,
+and firepuncher then dials the exact address that was checked, so a name cannot
+resolve differently between the check and the dial. A host the operator names
+outright is allowed as written (only the metadata refusal still applies).
 
 ### Kubernetes agents
 

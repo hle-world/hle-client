@@ -54,7 +54,10 @@ that can promise (DNS may answer differently later, and an in-cluster name is
 only as trustworthy as the cluster's DNS).
 
 Outside Kubernetes none of this runs: a homelab agent legitimately targets LAN
-IPs, and its behaviour is unchanged.
+IPs. It is not unguarded, though — :class:`LocalTargetGuard` applies the
+operator's local policy (see ``hle_client.config.load_agent_policy``) on the
+same resolve-then-dial pattern, refusing the cloud metadata endpoints and public
+addresses while allowing the agent's own networks.
 
 Settings (all environment variables, all with safe defaults):
 
@@ -93,11 +96,13 @@ import ipaddress
 import logging
 import os
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
 from hle_client.discovery_exclusions import excluded_namespaces as _excluded_namespaces
+from hle_client.netinfo import is_local, local_networks
+from hle_common.fp_protocol import LOCAL_NETWORKS, ForwardRule, is_metadata_target  # noqa: TC001
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +157,7 @@ _VALID_HOSTNAME = re.compile(r"[a-z0-9.-]+\Z")
 
 # The first half of every refusal, so the dashboard and the log read the same.
 NOT_ALLOWED = "target not allowed on kubernetes agents"
+NOT_ALLOWED_LOCAL = "target not allowed by the local policy"
 
 # The address the AWS/GCP metadata service answers on. 169.254.169.254 is inside
 # the link-local range below; the IPv6 ULA form is not, so it is named here.
@@ -220,12 +226,14 @@ def in_kubernetes(env: Mapping[str, str] | None = None) -> bool:
 
 
 def firepuncher_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Whether firepuncher should run and be advertised on this agent.
+    """The cluster gate on firepuncher: allowed outside, opt-in inside.
 
-    Outside Kubernetes it is always available. Inside Kubernetes it is off
-    unless ``HLE_FIREPUNCHER_ENABLED`` is truthy: the relay's forward rules
-    allow loopback and the private networks the pod sits on, which include the
-    API server, and a relay must not be able to open raw TCP to it through that
+    The agent then ANDs this with its local policy (see
+    :func:`firepuncher_policy_enabled`), so outside a cluster firepuncher is on
+    unless the operator turned it off. Inside Kubernetes it is off unless
+    ``HLE_FIREPUNCHER_ENABLED`` is truthy: the relay's forward rules allow
+    loopback and the private networks the pod sits on, which include the API
+    server, and a relay must not be able to open raw TCP to it through that
     door.
     """
     if env is None:
@@ -233,6 +241,24 @@ def firepuncher_enabled(env: Mapping[str, str] | None = None) -> bool:
     if not in_kubernetes(env):
         return True
     return _env_true(env.get(FIREPUNCHER_ENABLED_ENV))
+
+
+def firepuncher_policy_enabled(
+    policy_value: bool | None, env: Mapping[str, str] | None = None
+) -> bool:
+    """Whether the local policy permits firepuncher on this host.
+
+    ``None`` means the operator did not set it: on outside a cluster (the
+    behaviour agents already shipped with, so an upgrade does not silently cut
+    existing forwards; every forward is still bounded by ``allowed_targets`` and
+    the metadata refusal), the existing ``HLE_FIREPUNCHER_ENABLED`` opt-in inside
+    one. A bool is the operator's explicit answer, but even then the cluster
+    opt-in still gates it, so a stray ``HLE_FIREPUNCHER=on`` cannot re-open
+    firepuncher inside a cluster whose operator left it off.
+    """
+    if not in_kubernetes(env):
+        return policy_value is not False
+    return firepuncher_enabled(env) if policy_value is not False else False
 
 
 async def _default_resolver(host: str) -> list[str]:
@@ -800,3 +826,248 @@ def _is_kube_api_name(name: str, cluster_domain: str) -> bool:
 
 def _is_metadata_name(name: str) -> bool:
     return name in _METADATA_NAMES or name.endswith(".metadata.google.internal")
+
+
+# ---------------------------------------------------------------------------
+# The local policy (non-Kubernetes agents)
+# ---------------------------------------------------------------------------
+
+
+class LocalTargetGuard:
+    """The operator's local policy for an agent that is not in a cluster.
+
+    The Kubernetes guard refuses the cluster's own dangerous addresses and
+    allows a service-name allowlist. Off a cluster the question is inverted: the
+    agent's LAN *is* its purpose, so the policy allows the networks the agent is
+    attached to (plus whatever the operator added) and refuses public addresses.
+    It reuses the same resolve-then-dial pattern — a name is resolved once, every
+    answer is checked, and firepuncher dials the exact address that was checked,
+    so a name cannot resolve differently between the check and the dial.
+    """
+
+    def __init__(
+        self,
+        *,
+        allowed: Sequence[ForwardRule],
+        allow_metadata: bool = False,
+        resolver: Resolver | None = None,
+    ) -> None:
+        self._allowed = list(allowed)
+        self._allow_metadata = allow_metadata
+        self._resolver: Resolver = resolver or _default_resolver
+
+    async def check(self, service_url: str) -> TargetDecision:
+        """Whether *service_url* may be tunnelled or probed."""
+        host = _host_of(service_url)
+        if not host:
+            return _refuse_local("unparseable service URL")
+        evaluation = await self._evaluate(host, None)
+        if not evaluation.allowed:
+            return _refuse_local(evaluation.reason or "refused")
+        return TargetDecision(
+            allowed=True,
+            url=service_url,
+            address=str(evaluation.addresses[0]) if evaluation.addresses else None,
+        )
+
+    async def check_host(self, host: str, port: int) -> TargetDecision:
+        """Whether a firepuncher target may be dialled, resolving it exactly once.
+
+        Returns the checked address in ``address`` so the caller connects to the
+        IP that was validated instead of resolving the name a second time and
+        potentially reaching a different host.
+        """
+        evaluation = await self._evaluate(host, port)
+        if not evaluation.allowed:
+            return _refuse_local(evaluation.reason or "refused")
+        address = _preferred_address(evaluation.addresses)
+        if address is None:
+            return _refuse_local(f"cannot resolve {host}")
+        return TargetDecision(allowed=True, address=str(address))
+
+    async def _evaluate(self, host: str, port: int | None) -> _Eval:
+        raw = (host or "").strip().strip("[]")
+        name = raw.rstrip(".").lower()
+        if not name:
+            return _refuse_eval("unparseable target")
+        if _is_scoped_literal(name):
+            return _refuse_eval("IPv6 zone/scope id is not allowed")
+        if _is_metadata_name(name):
+            return _refuse_eval("cloud metadata")
+
+        address = _as_ip(name)
+        if address is not None:
+            reason = self._address_refused(address, port)
+            if reason is not None:
+                return _refuse_eval(reason)
+            return _Eval(allowed=True, host=str(address), addresses=(address,))
+
+        # The same hostname rules as the cluster guard: a bare DNS name only, and
+        # no SRV-style labels or unicode that could resolve somewhere the checks
+        # below do not expect.
+        if any(label.startswith("_") for label in name.split(".")):
+            return _refuse_eval(f"{name} is an SRV-style name")
+        if not name.isascii() or not _VALID_HOSTNAME.fullmatch(name):
+            return _refuse_eval(f"{name} is not a valid hostname")
+
+        explicitly_allowed = self._name_allowed(name, port)
+        if explicitly_allowed and port is None:
+            # An endpoint or probe: the operator named this host, and there is
+            # no socket to dial here, so there is nothing to resolve.
+            return _Eval(allowed=True, host=name)
+        # A bare single-label name resolves through the host's own search path,
+        # which is a local concern; an endpoint or probe may use it and the
+        # transport resolves it again (a probe that does not resolve fails on
+        # its own). Firepuncher still resolves it below because it needs an
+        # address to dial.
+        if port is None and "." not in name and not explicitly_allowed and self._allowed:
+            return _Eval(allowed=True, host=name)
+
+        addresses = await self._resolve(name)
+        # A name the policy names outright is allowed as written: the operator
+        # chose it, and the transport presents that name to TLS. It is still
+        # resolved so firepuncher dials the address that was checked, and the
+        # metadata refusal still applies.
+        if explicitly_allowed:
+            for resolved in addresses:
+                if not self._allow_metadata and is_metadata_target(str(resolved)):
+                    return _refuse_eval(f"cloud metadata address {resolved} (via {name})")
+            return _Eval(allowed=True, host=name, addresses=tuple(addresses))
+
+        if not addresses:
+            # Nothing resolved to check now. An endpoint may still be valid
+            # (the transport resolves again at request time, and a probe would
+            # fail on its own); firepuncher refuses below because it needs an
+            # address to dial.
+            return _Eval(allowed=True, host=name)
+        for resolved in addresses:
+            reason = self._address_refused(resolved, port, name)
+            if reason is not None:
+                return _refuse_eval(reason)
+        return _Eval(allowed=True, host=name, addresses=tuple(addresses))
+
+    def _name_allowed(self, name: str, port: int | None) -> bool:
+        for rule in self._allowed:
+            if not _host_only_match(rule, name):
+                continue
+            if port is None or rule.port is None or rule.port == port:
+                return True
+        return False
+
+    def _address_refused(
+        self, address: _IpAddress, port: int | None, via: str | None = None
+    ) -> str | None:
+        if getattr(address, "scope_id", None) is not None:
+            return f"IPv6 zone/scope id not allowed for {address}"
+        if not self._allow_metadata and is_metadata_target(str(address)):
+            return f"cloud metadata address {address}"
+        if not self._address_allowed(address, port):
+            detail = f"address {address} is outside the local policy"
+            return f"{detail} (via {via})" if via else detail
+        return None
+
+    def _address_allowed(self, address: _IpAddress, port: int | None) -> bool:
+        text = str(address)
+        for rule in self._allowed:
+            if rule.host == LOCAL_NETWORKS:
+                if not is_local(text):
+                    continue
+            elif not _host_only_match(rule, text):
+                continue
+            if port is None or rule.port is None or rule.port == port:
+                return True
+        return False
+
+    async def _resolve(self, name: str) -> list[_IpAddress]:
+        try:
+            answers = await asyncio.wait_for(self._resolver(name), timeout=RESOLVE_TIMEOUT)
+        except Exception:  # noqa: BLE001 — a resolution failure must not start the tunnel
+            return []
+        return [ip for ip in (_as_ip(a) for a in answers) if ip is not None]
+
+
+def _refuse_local(detail: str) -> TargetDecision:
+    return TargetDecision(allowed=False, reason=f"{NOT_ALLOWED_LOCAL}: {detail}")
+
+
+def _host_only_match(rule: ForwardRule, host: str) -> bool:
+    """Whether *host* is inside *rule*, ignoring the rule's port.
+
+    ``ForwardRule.matches`` couples host and port; passing the rule's own port
+    (or 0 when it has none) makes the port check a no-op, which is what an
+    endpoint policy wants — the host is the ceiling.
+    """
+    return rule.matches(host, rule.port if rule.port is not None else 0)
+
+
+def intersect_rules(
+    server_rules: Sequence[ForwardRule],
+    policy_rules: Sequence[ForwardRule],
+) -> list[ForwardRule]:
+    """The relay's rules, kept only where the local policy already allows them.
+
+    The relay must never broaden the agent's reach: a rule is kept only if every
+    host and port it covers is inside some local-policy rule. A ``0.0.0.0/0``
+    from the relay therefore disappears unless the operator allowed it locally.
+    """
+    if not policy_rules:
+        return []
+    kept: list[ForwardRule] = []
+    for rule in server_rules:
+        if any(_rule_within(rule, policy) for policy in policy_rules):
+            kept.append(rule)
+    return kept
+
+
+def _rule_within(rule: ForwardRule, policy: ForwardRule) -> bool:
+    if not _port_within(rule, policy):
+        return False
+    return _host_within(rule.host, policy.host)
+
+
+def _port_within(server: ForwardRule, policy: ForwardRule) -> bool:
+    """Whether every port *server* allows is allowed by *policy*."""
+    if server.port is None:
+        return policy.port is None
+    return policy.port is None or policy.port == server.port
+
+
+def _host_within(server_host: str, policy_host: str) -> bool:
+    if server_host == LOCAL_NETWORKS:
+        return policy_host == LOCAL_NETWORKS
+    if policy_host == LOCAL_NETWORKS:
+        # ``@local`` stands for loopback and every attached network.
+        if _is_loopback_host(server_host):
+            return True
+        network = _as_network(server_host)
+        if network is None:
+            return False
+        return any(
+            network.version == net.version and network.subnet_of(net) for net in local_networks()
+        )
+    if _normalise_hostname(server_host) == _normalise_hostname(policy_host):
+        return True
+    server_net = _as_network(server_host)
+    policy_net = _as_network(policy_host)
+    if server_net is not None and policy_net is not None:
+        return server_net.version == policy_net.version and server_net.subnet_of(policy_net)
+    return _is_loopback_host(server_host) and _is_loopback_host(policy_host)
+
+
+def _as_network(value: str | None) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    if not value:
+        return None
+    try:
+        return ipaddress.ip_network(value.strip().strip("[]"), strict=False)
+    except ValueError:
+        return None
+
+
+_LOOPBACK_ALIASES = frozenset({"localhost", "127.0.0.1", "::1", "ip6-localhost"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    address = _as_ip(host)
+    if address is not None:
+        return address.is_loopback
+    return _normalise_hostname(host) in _LOOPBACK_ALIASES
