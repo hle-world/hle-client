@@ -40,7 +40,7 @@ from hle_client.proxy import (
     sni_hostname_for,
     upstream_verify,
 )
-from hle_client.server import server_host, server_port, server_url
+from hle_client.server import relay_ws_scheme, server_host, server_port, server_url
 from hle_common import close_codes
 from hle_common.fragmentation import (
     CAPABILITY_FRAGMENTATION,
@@ -891,8 +891,10 @@ class Tunnel:
                 )
                 return discovery.relay_url
 
-        # Fallback: build URL from config defaults (always wss)
-        return f"wss://{self.config.relay_host}:{self.config.relay_port}/_hle/tunnel"
+        # Fallback: build URL from config defaults. Always wss, except an
+        # http:// loopback server (local development, benchmarks), which uses ws.
+        scheme = relay_ws_scheme(self.config.relay_host)
+        return f"{scheme}://{self.config.relay_host}:{self.config.relay_port}/_hle/tunnel"
 
     async def _connect_once(self) -> None:
         """Single connection attempt: discover relay, register, then enter the receive loop."""
