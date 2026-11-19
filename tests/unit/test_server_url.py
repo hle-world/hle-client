@@ -17,8 +17,8 @@ import pytest
 from hle_client import config
 from hle_client.api import ApiClient, ApiClientConfig
 from hle_client.cli import main
-from hle_client.server import server_host, server_port, server_url
-from hle_client.tunnel import TunnelConfig
+from hle_client.server import relay_ws_scheme, server_host, server_port, server_url
+from hle_client.tunnel import Tunnel, TunnelConfig
 
 
 def _write_config(path, server_url_value=None):
@@ -107,6 +107,32 @@ class TestApiClientUsesServerUrl:
             await client.list_tunnels()
         assert get.await_args.args[0] == "https://stg.example.test:8443/api/tunnels"
         await client.aclose()
+
+
+class TestRelayWsScheme:
+    def test_http_loopback_server_uses_ws(self, monkeypatch):
+        monkeypatch.setenv("HLE_SERVER_URL", "http://127.0.0.1:8000")
+        assert relay_ws_scheme("127.0.0.1") == "ws"
+
+    def test_https_loopback_server_stays_wss(self, monkeypatch):
+        monkeypatch.setenv("HLE_SERVER_URL", "https://localhost:8443")
+        assert relay_ws_scheme("localhost") == "wss"
+
+    def test_non_loopback_host_is_always_wss(self, monkeypatch):
+        monkeypatch.setenv("HLE_SERVER_URL", "http://127.0.0.1:8000")
+        assert relay_ws_scheme("hle.world") == "wss"
+        assert relay_ws_scheme("localhost.attacker.example") == "wss"
+
+    def test_loopback_relay_host_with_a_remote_server_is_wss(self, monkeypatch):
+        monkeypatch.setenv("HLE_SERVER_URL", "https://hle.world")
+        assert relay_ws_scheme("127.0.0.1") == "wss"
+
+    async def test_tunnel_fallback_url_uses_ws_on_http_loopback(self, monkeypatch):
+        monkeypatch.setenv("HLE_SERVER_URL", "http://127.0.0.1:8000")
+        tunnel = Tunnel(TunnelConfig(service_url="http://localhost:3000"))
+        with patch("hle_client.api.ApiClient.discover_relay", AsyncMock(return_value=None)):
+            url = await tunnel._discover_relay_uri("hle_" + "0" * 32)
+        assert url == "ws://127.0.0.1:8000/_hle/tunnel"
 
 
 class TestRelayDefaults:

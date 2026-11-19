@@ -87,6 +87,25 @@ def server_host() -> str:
     return urlparse(server_url()).hostname or ""
 
 
+def relay_ws_scheme(relay_host: str) -> str:
+    """``ws`` only when the configured server is http:// on this loopback host.
+
+    ``server_url`` already refuses http:// anywhere but loopback, so a cleartext
+    tunnel can only ever be a local development or benchmark relay. Every other
+    case, including a loopback host reached through an https:// server URL,
+    stays on ``wss``.
+    """
+    if relay_host not in _LOOPBACK_HOSTS:
+        return "wss"
+    try:
+        parsed = urlparse(server_url())
+    except click.UsageError:
+        return "wss"
+    if parsed.scheme == "http" and parsed.hostname == relay_host:
+        return "ws"
+    return "wss"
+
+
 def server_port() -> int:
     """The relay port for the configured server: explicit, else 443 / 80."""
     parsed = urlparse(server_url())
