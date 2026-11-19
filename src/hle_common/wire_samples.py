@@ -61,7 +61,9 @@ from hle_common.models import (
     ProxiedHttpResponse,
     SpeedTestData,
     SpeedTestResult,
+    StreamTuning,
     StreamWindowUpdate,
+    TuningUpdate,
     TunnelRegistration,
     TunnelRegistrationResponse,
     WsStreamAccept,
@@ -142,6 +144,19 @@ SAMPLES: dict[str, object] = {
         server_capabilities=["chunked_response"],
         zone="example.com",
     ),
+    # 1.8 relay-controlled tuning: the ack may carry a snapshot, and the relay
+    # may push one live as TuningUpdate.
+    "TunnelRegistrationResponse.tuning": TunnelRegistrationResponse(
+        tunnel_id="tun-1",
+        subdomain="ha-x7k",
+        public_url="https://ha-x7k.hle.world",
+        websocket_enabled=True,
+        user_code="x7k",
+        service_label="ha",
+        server_capabilities=["tuning"],
+        zone="example.com",
+        tuning=StreamTuning(read_size=262144, flush_ms=5, budget_bytes=8388608),
+    ),
     "ProxiedHttpRequest": ProxiedHttpRequest(
         request_id="req-1",
         method="POST",
@@ -172,13 +187,35 @@ SAMPLES: dict[str, object] = {
     "HttpResponseChunk": HttpResponseChunk(request_id="req-1", chunk_index=3, data="Ymxh"),
     "HttpResponseEnd.ok": HttpResponseEnd(request_id="req-1"),
     "HttpResponseEnd.err": HttpResponseEnd(request_id="req-1", error="upstream died"),
+    # 1.8 per-stream stats, carried only when the relay echoed "tuning".
+    "HttpResponseEnd.stats": HttpResponseEnd(
+        request_id="req-1",
+        stats={
+            "bytes": 1000,
+            "frames": 3,
+            "ms": 42,
+            "budget_wait_ms": 7,
+            "read_size": 262144,
+        },
+    ),
     # 1.7 request body streaming (relay -> client) and credit updates (client -> relay).
     "HttpRequestBodyChunk": HttpRequestBodyChunk(request_id="req-1", chunk_index=3, data="Ymxh"),
     "HttpRequestBodyEnd.ok": HttpRequestBodyEnd(request_id="req-1", total_bytes=1000),
     "HttpRequestBodyEnd.aborted": HttpRequestBodyEnd(
         request_id="req-1", total_bytes=1000, aborted=True
     ),
+    # 1.8 relay-controlled tuning snapshots.
+    "StreamTuning": StreamTuning(
+        read_size=262144,
+        flush_ms=5,
+        budget_bytes=8388608,
+        endpoint_share_bytes=4194304,
+        frame_max=1048576,
+        ws_window=4194304,
+    ),
+    "StreamTuning.minimal": StreamTuning(read_size=131072),
     "StreamWindowUpdate": StreamWindowUpdate(request_id="req-1", bytes=1048576),
+    "TuningUpdate": TuningUpdate(tuning=StreamTuning(read_size=131072, flush_ms=5)),
     "WsStreamOpen": WsStreamOpen(stream_id="s1", path="/ws", headers={"origin": "x"}),
     "WsStreamAccept": WsStreamAccept(stream_id="s1", subprotocol="tty"),
     "WsStreamFrame": WsStreamFrame(stream_id="s1", data="Ymxh", is_binary=True),

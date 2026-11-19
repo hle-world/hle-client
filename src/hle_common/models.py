@@ -14,6 +14,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+# Re-exported here so it sits with the other capability tokens; the constant is
+# defined in hle_common.protocol, which owns the version and message types.
+from hle_common.protocol import CAPABILITY_TUNING as CAPABILITY_TUNING
 from hle_common.wire import WireModel
 
 # ---------------------------------------------------------------------------
@@ -167,6 +170,68 @@ class TunnelRegistrationResponse(WireModel):
     service_label: str
     server_capabilities: list[str] = field(default_factory=list)  # e.g. ["chunked_response"]
     zone: str | None = None  # custom zone domain if tunnel uses one
+    # Relay-controlled stream tuning (protocol 1.8). Only meaningful when the
+    # relay echoed CAPABILITY_TUNING; None means "keep the compiled defaults".
+    tuning: StreamTuning | None = None
+
+
+# ---------------------------------------------------------------------------
+# Relay-controlled stream tuning (protocol 1.8, capability "tuning")
+# ---------------------------------------------------------------------------
+
+
+@dataclass(kw_only=True)
+class StreamTuning(WireModel):
+    """A relay's stream tuning snapshot.
+
+    Every field is optional: ``None`` means "use the compiled default". The
+    relay sends one at registration (in the ack) and whenever it changes
+    (:class:`TuningUpdate`). Values are clamped with :func:`clamp_tuning`
+    before use. Fields a newer relay adds are ignored on parse.
+    """
+
+    read_size: int | None = None  # coalescer target bytes per data frame
+    flush_ms: int | None = None  # emit a partial frame after this idle
+    budget_bytes: int | None = None  # process-wide in-flight body budget
+    endpoint_share_bytes: int | None = None  # per-endpoint share of that budget
+    frame_max: int | None = None  # reserved, not applied yet
+    ws_window: int | None = None  # reserved, not applied yet
+
+
+TUNING_LIMITS: dict[str, tuple[int, int]] = {
+    "read_size": (16 * 1024, 1024 * 1024),
+    "flush_ms": (0, 50),
+    "budget_bytes": (2 * 1024 * 1024, 64 * 1024 * 1024),
+    "endpoint_share_bytes": (1024 * 1024, 64 * 1024 * 1024),
+    "frame_max": (16 * 1024, 1024 * 1024),
+    "ws_window": (256 * 1024, 16 * 1024 * 1024),
+}
+
+
+def _clamp_tuning_value(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    low, high = TUNING_LIMITS[name]
+    return min(max(value, low), high)
+
+
+def clamp_tuning(t: StreamTuning) -> StreamTuning:
+    """Return a copy of *t* with every set field clamped into ``TUNING_LIMITS``."""
+    return StreamTuning(
+        read_size=_clamp_tuning_value("read_size", t.read_size),
+        flush_ms=_clamp_tuning_value("flush_ms", t.flush_ms),
+        budget_bytes=_clamp_tuning_value("budget_bytes", t.budget_bytes),
+        endpoint_share_bytes=_clamp_tuning_value("endpoint_share_bytes", t.endpoint_share_bytes),
+        frame_max=_clamp_tuning_value("frame_max", t.frame_max),
+        ws_window=_clamp_tuning_value("ws_window", t.ws_window),
+    )
+
+
+@dataclass(kw_only=True)
+class TuningUpdate(WireModel):
+    """Relay → client: a full tuning snapshot that replaces the previous one."""
+
+    tuning: StreamTuning
 
 
 @dataclass(kw_only=True)
@@ -240,6 +305,9 @@ class HttpResponseEnd(WireModel):
 
     request_id: str
     error: str | None = None
+    # Per-stream stats (protocol 1.8), present only when the relay echoed the
+    # "tuning" capability: bytes, frames, ms, budget_wait_ms, read_size.
+    stats: dict[str, int] | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,16 @@ from hle_common.wire import WireModel
 # per-request credit flow control (STREAM_WINDOW_UPDATE). A request declared
 # with ProxiedHttpRequest.body_streamed follows as HTTP_REQUEST_BODY_CHUNK*
 # then exactly one HTTP_REQUEST_BODY_END. See hle_common.models.
+#
+# 1.8 (in progress) adds relay-controlled stream tuning (capability "tuning"):
+# the relay sends StreamTuning snapshots in the ack and via TUNING_UPDATE.
+# PROTOCOL_VERSION stays 1.7 until the rest of 1.8 lands — the feature is gated
+# only by the capability, so a relay that does not echo it changes nothing.
 PROTOCOL_VERSION = "1.7"
+
+# Capability token: the client can apply relay-controlled stream tuning. Sent
+# by the client at registration; a relay that echoes it may send StreamTuning.
+CAPABILITY_TUNING = "tuning"
 
 
 class MessageType(StrEnum):
@@ -96,6 +105,11 @@ class MessageType(StrEnum):
     # serialized envelope; only sent to a peer that advertised the
     # "fragmentation" capability. See hle_common.fragmentation.
     FRAGMENT = "fragment"
+
+    # Relay → client: a full stream-tuning snapshot that replaces the previous
+    # one (protocol 1.8, capability "tuning"). Only sent to a client that
+    # advertised the capability; see hle_common.models.StreamTuning.
+    TUNING_UPDATE = "tuning_update"
 
 
 @dataclass(kw_only=True)
