@@ -8,6 +8,7 @@ import contextlib
 import logging
 import os
 import ssl
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
@@ -714,6 +715,9 @@ class LocalProxy:
         body: bytes | AsyncIterator[bytes] | None = None,
         query_string: str = "",
         budget: ChunkBudget | LayeredBudget | None = None,
+        read_size: int | None = None,
+        flush_ms: int | None = None,
+        stats: dict[str, float] | None = None,
     ) -> AsyncGenerator[tuple[int | None, dict[str, str | list[str]] | None, bytes | None], None]:
         """Stream an HTTP response from the local service in chunks.
 
@@ -729,6 +733,12 @@ class LocalProxy:
         (i.e. after it has sent the current one). That bounds how much is in
         flight across every stream in the process and applies backpressure to
         the read; idle streams hold nothing.
+
+        ``read_size`` and ``flush_ms`` override the environment/default coalescer
+        settings for this stream; they are read once, at stream start, so a
+        relay tuning change applies to new streams and not ones already running.
+        When ``stats`` is given it accumulates the time spent waiting on the
+        budget under ``"budget_wait_ms"``.
         """
         if not self._http_client:
             raise RuntimeError("Proxy not started — call start() first")
@@ -757,7 +767,8 @@ class LocalProxy:
         tls_extensions = self._tls_extensions()
         extra: dict[str, Any] = {"extensions": tls_extensions} if tls_extensions else {}
 
-        chunk_size = upstream_chunk_size()
+        chunk_size = read_size if read_size is not None else upstream_chunk_size()
+        flush_s = flush_ms / 1000.0 if flush_ms is not None else upstream_flush_seconds()
         held = 0
         # Once the status has been yielded the relay holds an
         # HTTP_RESPONSE_START, so an upstream failure from then on must not
@@ -810,7 +821,7 @@ class LocalProxy:
             # Read with no chunk_size so each socket read is yielded at once,
             # then coalesce here: a slow body (SSE, long poll) is forwarded
             # after the idle flush instead of waiting for 256 KiB.
-            body_iter = _coalesce(response.aiter_bytes(), chunk_size, upstream_flush_seconds())
+            body_iter = _coalesce(response.aiter_bytes(), chunk_size, flush_s)
             while True:
                 try:
                     if is_sse:
@@ -834,7 +845,12 @@ class LocalProxy:
                 # bounded per connection (one chunk plus the socket layer's
                 # read buffer, a few hundred KiB).
                 if budget is not None:
+                    wait_started = time.monotonic() if stats is not None else 0.0
                     held = await budget.acquire(len(chunk))
+                    if stats is not None:
+                        stats["budget_wait_ms"] = stats.get("budget_wait_ms", 0.0) + (
+                            time.monotonic() - wait_started
+                        ) * 1000.0
                 yield (None, None, chunk)
                 # Drop this frame's raw copy before the consumer asks for
                 # the next one, so it is not held alongside the new chunk.

@@ -57,7 +57,7 @@ class ChunkBudget:
     @property
     def available(self) -> int:
         """Bytes that may still be reserved right now."""
-        return self._available
+        return max(0, self._available)
 
     @property
     def peak(self) -> int:
@@ -66,6 +66,23 @@ class ChunkBudget:
 
     def reset_peak(self) -> None:
         self._peak = 0
+
+    def resize(self, capacity: int) -> None:
+        """Change the budget's capacity in place.
+
+        Growing the capacity wakes any queued waiters. Shrinking never revokes
+        bytes already granted: in-flight may exceed the new capacity until
+        those streams release, and only then are new acquisitions admitted
+        under the smaller cap.
+        """
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        if capacity == self.capacity:
+            return
+        in_flight = self.capacity - self._available
+        self.capacity = capacity
+        self._available = capacity - in_flight
+        self._grant_waiters()
 
     async def acquire(self, amount: int) -> int:
         """Reserve up to ``amount`` bytes, waiting until they are free.
@@ -158,12 +175,24 @@ class LayeredBudget:
         self.endpoint.release(amount)
 
 
-def endpoint_budget(shared: ChunkBudget) -> LayeredBudget:
-    """A per-endpoint view of ``shared`` capped at half of it."""
-    return LayeredBudget(ChunkBudget(max(1, shared.capacity // 2)), shared)
+def endpoint_budget(shared: ChunkBudget, capacity: int | None = None) -> LayeredBudget:
+    """A per-endpoint view of ``shared``.
+
+    ``capacity`` is the endpoint's own share of the shared budget; ``None``
+    keeps the default of half of it, so a busy endpoint cannot starve another
+    tunnel in the process.
+    """
+    if capacity is None:
+        capacity = max(1, shared.capacity // 2)
+    return LayeredBudget(ChunkBudget(capacity), shared)
 
 
 _budget: ChunkBudget | None = None
+
+# Live tunnels' requested process budget, keyed by ``id(tunnel)``. A process may
+# run several tunnels, so the shared budget is the max of these requests,
+# falling back to the environment/default when none asks for one.
+_budget_requests: dict[int, int] = {}
 
 
 def chunk_budget_capacity() -> int:
@@ -193,6 +222,32 @@ def get_chunk_budget() -> ChunkBudget:
     return _budget
 
 
+def set_tunnel_budget(owner: object, capacity: int | None) -> None:
+    """Record a live tunnel's requested process budget and resize to the max.
+
+    ``capacity`` of ``None`` means the tunnel does not ask for one (the relay
+    sent none, or the user set the environment variable) and withdraws any
+    previous request.
+    """
+    key = id(owner)
+    if capacity is None:
+        _budget_requests.pop(key, None)
+    else:
+        _budget_requests[key] = capacity
+    _resize_shared_budget()
+
+
+def clear_tunnel_budget(owner: object) -> None:
+    """Withdraw a tunnel's budget request (on disconnect) and recompute the max."""
+    if _budget_requests.pop(id(owner), None) is not None:
+        _resize_shared_budget()
+
+
+def _resize_shared_budget() -> None:
+    target = max(_budget_requests.values()) if _budget_requests else chunk_budget_capacity()
+    get_chunk_budget().resize(target)
+
+
 def reset_chunk_budget() -> None:
     """Forget the shared budget so the next use re-reads the environment.
 
@@ -201,3 +256,4 @@ def reset_chunk_budget() -> None:
     """
     global _budget
     _budget = None
+    _budget_requests.clear()

@@ -25,11 +25,20 @@ import websockets.exceptions
 
 from hle_client import __version__, agent_logs
 from hle_client import config as hle_config
-from hle_client.chunk_budget import LayeredBudget, endpoint_budget, get_chunk_budget
+from hle_client.chunk_budget import (
+    CHUNK_BUDGET_ENV,
+    LayeredBudget,
+    clear_tunnel_budget,
+    endpoint_budget,
+    get_chunk_budget,
+    set_tunnel_budget,
+)
 from hle_client.fragmenting import FragmentingConnection
 from hle_client.identity import hostname, instance_id
 from hle_client.notices import emit_event, render_notice
 from hle_client.proxy import (
+    HTTP_CHUNK_SIZE_ENV,
+    HTTP_FLUSH_MS_ENV,
     UPSTREAM_ERROR_HEADER,
     LocalProxy,
     ProxyConfig,
@@ -38,6 +47,7 @@ from hle_client.proxy import (
     has_parent_segment,
     safe_proxied_path,
     sni_hostname_for,
+    upstream_chunk_size,
     upstream_verify,
 )
 from hle_client.server import server_host, server_port, server_url
@@ -63,15 +73,19 @@ from hle_common.models import (
     ProxiedHttpResponse,
     SpeedTestData,
     SpeedTestResult,
+    StreamTuning,
     StreamWindowUpdate,
+    TuningUpdate,
     TunnelRegistration,
     TunnelRegistrationResponse,
     WsStreamAccept,
     WsStreamClose,
     WsStreamFrame,
     WsStreamOpen,
+    clamp_tuning,
 )
 from hle_common.protocol import (
+    CAPABILITY_TUNING,
     PROTOCOL_VERSION,
     MessageType,
     NoticePayload,
@@ -238,6 +252,15 @@ WS_MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB — control-plane WebSocket messag
 MAX_WS_STREAMS = 100
 # RFC 6455: close reason is encoded in UTF-8 and limited to 123 bytes.
 _WS_CLOSE_REASON_MAX = 123
+
+# User-set environment knobs win over a relay tuning snapshot. Each maps a
+# StreamTuning field to the variable that overrides it. The per-endpoint share
+# has no environment variable yet.
+_TUNING_ENV: dict[str, str] = {
+    "read_size": HTTP_CHUNK_SIZE_ENV,
+    "flush_ms": HTTP_FLUSH_MS_ENV,
+    "budget_bytes": CHUNK_BUDGET_ENV,
+}
 
 
 def _sanitize_ws_url(url: str) -> str:
@@ -612,6 +635,11 @@ class Tunnel:
     # This endpoint's byte share of the process-wide chunk budget (created on
     # first chunked response, so it binds to the running loop's budget).
     _chunk_budget: LayeredBudget | None = field(default=None, init=False, repr=False)
+    # The relay's current tuning snapshot (empty = compiled defaults). Applied
+    # only when the relay echoed the "tuning" capability.
+    _tuning: StreamTuning = field(default_factory=StreamTuning, init=False, repr=False)
+    # This endpoint's tuned share of the process budget, if the relay set one.
+    _endpoint_share_bytes: int | None = field(default=None, init=False, repr=False)
     _log_handler: _DiagnosticLogHandler | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -933,6 +961,7 @@ class Tunnel:
                     CAPABILITY_CHUNKED_RESPONSE,
                     CAPABILITY_FRAGMENTATION,
                     CAPABILITY_REQUEST_STREAMING,
+                    CAPABILITY_TUNING,
                 ],
                 managed_by=self.config.managed_by,
                 webhook_path=self.config.webhook_path,
@@ -977,6 +1006,9 @@ class Tunnel:
                 ws, FragmentingConnection
             ):
                 ws.enable_fragmentation()
+            # Relay-controlled tuning (protocol 1.8): applied only when the
+            # relay echoed the capability. A relay that did not changes nothing.
+            self._apply_server_tuning(ack_data)
             # This session worked, whatever ends it. The timestamp is what
             # lets connect() tell a healthy session from a flap: the backoff
             # only starts over once this session has outlived the flap window.
@@ -1044,6 +1076,8 @@ class Tunnel:
                     self._handle_notice(msg)
                 case MessageType.LOG_CONFIG:
                     self._handle_log_config(msg)
+                case MessageType.TUNING_UPDATE:
+                    self._handle_tuning_update(msg)
                 case _:
                     logger.debug("Unhandled message type: %s", msg.type)
 
@@ -1097,6 +1131,70 @@ class Tunnel:
         # the operator immediately sees whether the local service is reachable.
         if cfg.diagnostics and not was_enabled:
             self._spawn(self._probe_service_check())
+
+    # ------------------------------------------------------------------
+    # Relay-controlled stream tuning (protocol 1.8)
+    # ------------------------------------------------------------------
+
+    def _apply_server_tuning(self, ack: TunnelRegistrationResponse) -> None:
+        """Apply the registration ack's tuning, only when the capability echoed."""
+        if CAPABILITY_TUNING not in self._server_caps:
+            return
+        self._apply_tuning(ack.tuning)
+
+    def _handle_tuning_update(self, msg: ProtocolMessage) -> None:
+        """Apply a live tuning snapshot from the relay.
+
+        Ignored unless the relay echoed the capability at registration, so a
+        relay that never opted in cannot change the client's behaviour.
+        """
+        if CAPABILITY_TUNING not in self._server_caps:
+            logger.debug("Ignoring TUNING_UPDATE: relay never echoed the tuning capability")
+            return
+        try:
+            update = TuningUpdate.model_validate(msg.payload or {})
+        except Exception:
+            logger.exception("Malformed TUNING_UPDATE payload: %s", msg.payload)
+            return
+        self._apply_tuning(update.tuning)
+
+    def _apply_tuning(self, tuning: StreamTuning | None) -> None:
+        """Apply one relay tuning snapshot.
+
+        A snapshot replaces the previous one; a field left ``None`` means the
+        compiled default. A knob the user set in the environment wins over the
+        relay, logged once at DEBUG. The process budget request is recomputed
+        here and released on disconnect.
+        """
+        applied = clamp_tuning(tuning) if tuning is not None else StreamTuning()
+        overridden: list[str] = []
+        for name, env in _TUNING_ENV.items():
+            if getattr(applied, name) is None:
+                continue
+            if os.environ.get(env):
+                overridden.append(name)
+                setattr(applied, name, None)
+        self._tuning = applied
+        if overridden:
+            logger.debug(
+                "Relay tuning ignored for %s (set in the environment): %s",
+                self.config.service_label or self._tunnel_id,
+                ", ".join(sorted(overridden)),
+            )
+        set_tunnel_budget(self, applied.budget_bytes)
+        self._endpoint_share_bytes = applied.endpoint_share_bytes
+        if self._chunk_budget is not None:
+            self._resize_endpoint_budget()
+
+    def _resize_endpoint_budget(self) -> None:
+        """Apply the current endpoint share to this tunnel's budget view."""
+        layered = self._chunk_budget
+        if layered is None:
+            return
+        share = self._endpoint_share_bytes
+        if share is None:
+            share = max(1, layered.shared.capacity // 2)
+        layered.endpoint.resize(share)
 
     async def _probe_service_check(self) -> None:
         """Probe the local service once and emit a ``service.check`` diagnostic.
@@ -1407,9 +1505,39 @@ class Tunnel:
             body = base64.b64decode(req.body) if req.body is not None else None
 
         chunk_index = 0
+        total_bytes = 0
+        # Stats are only carried when the relay echoed the tuning capability;
+        # otherwise the END frame is byte-for-byte what it always was.
+        tuning_active = CAPABILITY_TUNING in self._server_caps
+        budget_stats: dict[str, float] | None = (
+            {"budget_wait_ms": 0.0} if tuning_active else None
+        )
+        # Resolve the coalescer read size once, at stream start: a relay tuning
+        # change applies to new streams, and streams already running keep theirs.
+        stream_read_size = (
+            self._tuning.read_size
+            if self._tuning.read_size is not None
+            else upstream_chunk_size()
+        )
+        started = time.monotonic()
+
+        def _end_stats() -> dict[str, int] | None:
+            if not tuning_active:
+                return None
+            budget_wait_ms = 0
+            if budget_stats is not None:
+                budget_wait_ms = int(budget_stats["budget_wait_ms"])
+            return {
+                "bytes": total_bytes,
+                "frames": chunk_index,
+                "ms": int((time.monotonic() - started) * 1000),
+                "budget_wait_ms": budget_wait_ms,
+                "read_size": stream_read_size,
+            }
+
         shared = get_chunk_budget()
         if self._chunk_budget is None or self._chunk_budget.shared is not shared:
-            self._chunk_budget = endpoint_budget(shared)
+            self._chunk_budget = endpoint_budget(shared, self._endpoint_share_bytes)
         budget = self._chunk_budget
 
         try:
@@ -1424,6 +1552,9 @@ class Tunnel:
                 body=body,
                 query_string=req.query_string,
                 budget=budget,
+                read_size=stream_read_size,
+                flush_ms=self._tuning.flush_ms,
+                stats=budget_stats,
             )
             try:
                 while True:
@@ -1467,6 +1598,7 @@ class Tunnel:
                             payload=ch.model_dump(),
                         )
                         frame = chunk_msg.model_dump_json()
+                        total_bytes += len(chunk)
                         del encoded, ch, chunk_msg, chunk
                         await ws.send(frame)
                         chunk_index += 1
@@ -1478,7 +1610,7 @@ class Tunnel:
                     await stream.aclose()
 
             # Send END
-            end = HttpResponseEnd(request_id=req.request_id)
+            end = HttpResponseEnd(request_id=req.request_id, stats=_end_stats())
             end_msg = ProtocolMessage(
                 type=MessageType.HTTP_RESPONSE_END,
                 tunnel_id=self._tunnel_id,
@@ -1492,6 +1624,7 @@ class Tunnel:
                 end = HttpResponseEnd(
                     request_id=req.request_id,
                     error="cancelled",
+                    stats=_end_stats(),
                 )
                 end_msg = ProtocolMessage(
                     type=MessageType.HTTP_RESPONSE_END,
@@ -1530,6 +1663,7 @@ class Tunnel:
                 end = HttpResponseEnd(
                     request_id=req.request_id,
                     error=exc.reason,
+                    stats=_end_stats(),
                 )
                 end_msg = ProtocolMessage(
                     type=MessageType.HTTP_RESPONSE_END,
@@ -1545,6 +1679,7 @@ class Tunnel:
                 end = HttpResponseEnd(
                     request_id=req.request_id,
                     error="client_error",
+                    stats=_end_stats(),
                 )
                 end_msg = ProtocolMessage(
                     type=MessageType.HTTP_RESPONSE_END,
@@ -2132,6 +2267,9 @@ class Tunnel:
 
     async def _cleanup(self) -> None:
         """Close all local WS streams, cancel background tasks, and stop the proxy."""
+        # Withdraw this tunnel's process budget request so the shared budget
+        # shrinks back to the max of whatever tunnels are still live.
+        clear_tunnel_budget(self)
         async with self._ws_streams_lock:
             for _stream_id, target in list(self._ws_streams.items()):
                 # Skip placeholder queues — there is no upstream socket yet;

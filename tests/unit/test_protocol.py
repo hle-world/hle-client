@@ -54,6 +54,7 @@ class TestMessageType:
             "log_config",
             "diagnostic",
             "fragment",
+            "tuning_update",
         }
         actual = {member.value for member in MessageType}
         assert actual == expected
