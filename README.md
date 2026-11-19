@@ -466,9 +466,10 @@ an operator-owned policy on the host, in the environment or in
   for arbitrary addresses.
 - `remote_update` (`HLE_REMOTE_UPDATE=on|off`) — the self-update switch above.
 
-Names are resolved once and every answer is checked before a target is used;
-firepuncher then dials the exact address that was checked, so a name cannot
-resolve differently between the check and the dial.
+A name is resolved once and every answer is checked before the target is used,
+and firepuncher then dials the exact address that was checked, so a name cannot
+resolve differently between the check and the dial. A host the operator names
+outright is allowed as written (only the metadata refusal still applies).
 
 ### Kubernetes agents
 
