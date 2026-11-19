@@ -27,13 +27,13 @@ from hle_client.chunk_budget import (
 from hle_client.proxy import HTTP_CHUNK_SIZE_ENV, HTTP_FLUSH_MS_ENV, upstream_chunk_size
 from hle_client.tunnel import Tunnel, TunnelConfig
 from hle_common.models import (
+    TUNING_LIMITS,
     HttpResponseChunk,
     HttpResponseEnd,
     ProxiedHttpRequest,
     StreamTuning,
-    TUNING_LIMITS,
-    TunnelRegistrationResponse,
     TuningUpdate,
+    TunnelRegistrationResponse,
     clamp_tuning,
 )
 from hle_common.protocol import CAPABILITY_TUNING, MessageType, ProtocolMessage
@@ -206,6 +206,22 @@ class TestCapabilityGating:
         tunnel._apply_server_tuning(ack)
         assert tunnel._tuning.read_size == 131072
 
+    def test_reconnect_to_a_relay_without_tuning_drops_the_old_snapshot(self):
+        tunnel = _tunnel()
+        tunnel._server_caps = [CAPABILITY_TUNING]
+        tunnel._apply_server_tuning(
+            _ack(
+                server_capabilities=[CAPABILITY_TUNING],
+                tuning=StreamTuning(read_size=131072, budget_bytes=32 * 1024 * 1024),
+            )
+        )
+        assert tunnel._tuning.read_size == 131072
+        # The next session's relay does not echo the capability.
+        tunnel._server_caps = []
+        tunnel._apply_server_tuning(_ack(server_capabilities=[]))
+        assert tunnel._tuning.read_size is None
+        assert get_chunk_budget().capacity == chunk_budget.chunk_budget_capacity()
+
     def test_live_update_ignored_without_the_capability(self):
         tunnel = _tunnel()
         tunnel._server_caps = []
@@ -286,6 +302,17 @@ class TestResize:
         # A later acquisition respects the new capacity.
         assert await budget.acquire(500) == 400
         assert budget.in_flight == 400
+
+    async def test_waiter_queued_before_a_shrink_is_granted_once_free(self):
+        budget = ChunkBudget(1000)
+        await budget.acquire(600)
+        waiter = asyncio.create_task(budget.acquire(800))  # queued, 800 > 400 free
+        await asyncio.sleep(0)
+        budget.resize(500)  # now asks for more than the whole budget
+        budget.release(600)
+        assert await asyncio.wait_for(waiter, timeout=1) == 800
+        budget.release(800)
+        assert budget.in_flight == 0
 
     def test_non_positive_resize_rejected(self):
         budget = ChunkBudget(1000)

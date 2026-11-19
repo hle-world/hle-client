@@ -848,9 +848,10 @@ class LocalProxy:
                     wait_started = time.monotonic() if stats is not None else 0.0
                     held = await budget.acquire(len(chunk))
                     if stats is not None:
-                        stats["budget_wait_ms"] = stats.get("budget_wait_ms", 0.0) + (
-                            time.monotonic() - wait_started
-                        ) * 1000.0
+                        stats["budget_wait_ms"] = (
+                            stats.get("budget_wait_ms", 0.0)
+                            + (time.monotonic() - wait_started) * 1000.0
+                        )
                 yield (None, None, chunk)
                 # Drop this frame's raw copy before the consumer asks for
                 # the next one, so it is not held alongside the new chunk.

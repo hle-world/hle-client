@@ -135,7 +135,11 @@ class ChunkBudget:
             if waiter.done():
                 self._waiters.popleft()
                 continue
-            if amount > self._available:
+            # A waiter queued before a shrink may ask for more than the new
+            # capacity; grant it once the budget is fully free, or it would
+            # wait forever (the overshoot is returned on release).
+            oversized_and_free = amount > self.capacity and self._available >= self.capacity
+            if amount > self._available and not oversized_and_free:
                 break
             self._waiters.popleft()
             self._available -= amount

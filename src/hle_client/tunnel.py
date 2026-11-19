@@ -1139,6 +1139,9 @@ class Tunnel:
     def _apply_server_tuning(self, ack: TunnelRegistrationResponse) -> None:
         """Apply the registration ack's tuning, only when the capability echoed."""
         if CAPABILITY_TUNING not in self._server_caps:
+            # A reconnect to a relay without tuning must not keep the previous
+            # session's snapshot: fall back to the compiled defaults.
+            self._apply_tuning(None)
             return
         self._apply_tuning(ack.tuning)
 
@@ -1509,15 +1512,11 @@ class Tunnel:
         # Stats are only carried when the relay echoed the tuning capability;
         # otherwise the END frame is byte-for-byte what it always was.
         tuning_active = CAPABILITY_TUNING in self._server_caps
-        budget_stats: dict[str, float] | None = (
-            {"budget_wait_ms": 0.0} if tuning_active else None
-        )
+        budget_stats: dict[str, float] | None = {"budget_wait_ms": 0.0} if tuning_active else None
         # Resolve the coalescer read size once, at stream start: a relay tuning
         # change applies to new streams, and streams already running keep theirs.
         stream_read_size = (
-            self._tuning.read_size
-            if self._tuning.read_size is not None
-            else upstream_chunk_size()
+            self._tuning.read_size if self._tuning.read_size is not None else upstream_chunk_size()
         )
         started = time.monotonic()
 
