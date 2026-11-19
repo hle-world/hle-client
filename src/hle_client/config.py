@@ -452,9 +452,9 @@ class AgentPolicy:
     ``allowed_targets`` is the local ceiling that the relay's endpoints,
     preflight requests and ``forward_rules`` are checked against and intersected
     with. ``firepuncher`` and ``preflight`` are local on/off switches;
-    ``firepuncher`` of ``None`` means "unset", which is off outside a cluster
-    and the existing ``HLE_FIREPUNCHER_ENABLED`` opt-in inside one. Remote
-    updates keep their own switch (:func:`load_remote_update`).
+    ``firepuncher`` of ``None`` means "unset", which is on outside a cluster
+    (bounded by ``allowed_targets``) and the existing ``HLE_FIREPUNCHER_ENABLED``
+    opt-in inside one. Remote updates keep their own switch (:func:`load_remote_update`).
     """
 
     allowed_targets: list[ForwardRule]

@@ -71,9 +71,7 @@ def make_client(policy_obj: config.AgentPolicy | None = None):
         created.append(tunnel)
         return tunnel
 
-    client = AgentClient(
-        "hlea_test", tunnel_factory=factory, policy=policy_obj or policy()
-    )
+    client = AgentClient("hlea_test", tunnel_factory=factory, policy=policy_obj or policy())
     return client, created
 
 
@@ -131,9 +129,7 @@ class TestLoadPolicy:
 
 class TestIntersectRules:
     def test_default_route_is_dropped(self):
-        kept = k8s_targets.intersect_rules(
-            [ForwardRule(host="0.0.0.0/0")], default_rules()
-        )
+        kept = k8s_targets.intersect_rules([ForwardRule(host="0.0.0.0/0")], default_rules())
         assert kept == []
 
     def test_a_rule_kept_only_where_the_policy_covers_it(self):
@@ -158,9 +154,7 @@ class TestIntersectRules:
         assert kept == []
 
     def test_named_hosts_must_be_named_locally(self):
-        kept = k8s_targets.intersect_rules(
-            [ForwardRule(host="nas.lan")], default_rules()
-        )
+        kept = k8s_targets.intersect_rules([ForwardRule(host="nas.lan")], default_rules())
         assert kept == []
         kept = k8s_targets.intersect_rules(
             [ForwardRule(host="nas.lan")], [ForwardRule(host="nas.lan")]
@@ -168,13 +162,10 @@ class TestIntersectRules:
         assert kept == [ForwardRule(host="nas.lan")]
 
     def test_ports_narrow_correctly(self):
-        assert (
-            k8s_targets.intersect_rules(
-                [ForwardRule(host="10.0.0.5", port=22)],
-                [ForwardRule(host="10.0.0.0/8")],
-            )
-            == [ForwardRule(host="10.0.0.5", port=22)]
-        )
+        assert k8s_targets.intersect_rules(
+            [ForwardRule(host="10.0.0.5", port=22)],
+            [ForwardRule(host="10.0.0.0/8")],
+        ) == [ForwardRule(host="10.0.0.5", port=22)]
         assert (
             k8s_targets.intersect_rules(
                 [ForwardRule(host="10.0.0.5")],
@@ -190,9 +181,7 @@ class TestIntersectRules:
 class TestStateSyncKeepsThePolicy:
     async def test_default_route_rules_do_not_broaden_the_allowlist(self):
         client, _ = make_client()
-        sync = AgentStateSync(
-            endpoints=[], forward_rules=[ForwardRule(host="0.0.0.0/0")]
-        )
+        sync = AgentStateSync(endpoints=[], forward_rules=[ForwardRule(host="0.0.0.0/0")])
         await client._handle_message(sync.model_dump_json())
         assert client._forward_rules == []
 
@@ -327,10 +316,12 @@ class TestPreflightPolicy:
 
 
 class TestFirepuncherPolicy:
-    def test_firepuncher_is_off_by_default(self, monkeypatch):
+    def test_firepuncher_unset_keeps_the_existing_default_on(self, monkeypatch):
+        # Unset keeps the behaviour agents shipped with, so an upgrade does not
+        # cut existing forwards; allowed_targets still bounds every forward.
         monkeypatch.delenv("HLE_FIREPUNCHER", raising=False)
         client, _ = make_client(policy(firepuncher=None))
-        assert client._firepuncher_enabled is False
+        assert client._firepuncher_enabled is True
 
     def test_firepuncher_on_when_the_operator_allows_it(self, monkeypatch):
         monkeypatch.setenv("HLE_FIREPUNCHER", "on")
@@ -397,9 +388,7 @@ class TestLocalGuardResolveThenDial:
         assert not decision.allowed, decision.reason
 
     async def test_an_unresolvable_name_is_refused_for_a_dial(self):
-        guard = k8s_targets.LocalTargetGuard(
-            allowed=default_rules(), resolver=_resolver({})
-        )
+        guard = k8s_targets.LocalTargetGuard(allowed=default_rules(), resolver=_resolver({}))
         decision = await guard.check_host("nowhere.invalid", 22)
         assert not decision.allowed, decision.reason
 

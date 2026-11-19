@@ -341,12 +341,10 @@ class AgentClient:
         # The operator's local policy (env / agent.toml). The relay proposes;
         # this is the ceiling it cannot broaden. Injected by tests.
         self._policy = policy if policy is not None else config.load_agent_policy()
-        # Whether this agent offers firepuncher at all. Off outside a cluster
-        # unless the operator turned it on; inside one it keeps the existing
+        # Whether this agent offers firepuncher at all. On outside a cluster
+        # unless the operator turned it off; inside one it keeps the existing
         # HLE_FIREPUNCHER_ENABLED opt-in.
-        self._firepuncher_enabled = k8s_targets.firepuncher_policy_enabled(
-            self._policy.firepuncher
-        )
+        self._firepuncher_enabled = k8s_targets.firepuncher_policy_enabled(self._policy.firepuncher)
         self._preflight_enabled = self._policy.preflight
         # Until the server tells us otherwise, only targets the local policy
         # already allows are forwardable (cloud metadata is still refused by
@@ -593,8 +591,8 @@ class AgentClient:
         ) as ws:
             emit_event("connected", source="agent", message=f"Connected to {self.control_uri}")
             # Advertise what this agent can do so the dashboard only offers
-            # features the agent actually supports. Firepuncher is off by
-            # default outside a cluster (the operator opts in) and, inside one,
+            # features the agent actually supports. Firepuncher is on by
+            # default outside a cluster (the operator can turn it off) and, inside one,
             # keeps its explicit HLE_FIREPUNCHER_ENABLED opt-in. Discovery
             # depends on what's detectable.
             capabilities: list[str] = []

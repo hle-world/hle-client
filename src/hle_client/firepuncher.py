@@ -88,8 +88,8 @@ class FpAgentSide:
     agent's control connection). ``rules`` is the allowlist; an empty list means
     nothing is forwardable, which is the safe reading of "not configured".
 
-    ``enabled`` and ``target_guard`` carry the local policy. Firepuncher is off
-    by default outside a cluster (the operator opts in) and, inside one, off
+    ``enabled`` and ``target_guard`` carry the local policy. Outside a cluster
+    firepuncher is on unless the operator turns it off and, inside one, off
     unless ``HLE_FIREPUNCHER_ENABLED``. The rules are the relay's, already
     intersected with the local policy, and ``target_guard`` is the endpoint
     guard (Kubernetes or local) so a forward cannot reach the API server, the
@@ -204,9 +204,10 @@ class FpAgentSide:
         return rendered
 
     async def _on_open(self, msg: FpOpen) -> None:
-        # Firepuncher is off unless the operator turned it on: inside a cluster
+        # Firepuncher can be switched off locally; inside a cluster it is off
+        # unless the operator turned it on:
         # the relay's default rules include the pod's own networks (the API
-        # server), and outside one the local policy defaults it off too.
+        # server); outside one the operator can switch it off locally.
         if not self.enabled:
             logger.warning(
                 "Firepuncher refused %s:%s — disabled on this agent",

@@ -258,9 +258,9 @@ policy, never widen it. By default the agent's own networks are allowed, but the
 cloud metadata service (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) is
 always refused, even when a rule covers it, so a forward cannot hand over the
 instance's IAM credentials. An operator on the agent host can opt back in with
-`HLE_FIREPUNCHER_ALLOW_METADATA=true`. Firepuncher itself is off unless the
-operator turns it on; inside a cluster that is `HLE_FIREPUNCHER_ENABLED=true`,
-outside one it is `HLE_FIREPUNCHER=on`.
+`HLE_FIREPUNCHER_ALLOW_METADATA=true`. Outside a cluster firepuncher stays on unless the operator sets
+`HLE_FIREPUNCHER=off`; inside a cluster it is off unless
+`HLE_FIREPUNCHER_ENABLED=true`.
 
 On iPad/iOS (a-Shell) the shell cannot start a second Python process, so a
 trailing Python command is refused with exit 126: run the forward in one window
@@ -457,8 +457,9 @@ an operator-owned policy on the host, in the environment or in
   `forward_rules` are intersected with this list rather than replacing it, so a
   relay pushing `0.0.0.0/0` changes nothing.
 - `firepuncher` (`HLE_FIREPUNCHER=on|off`) — whether this agent offers raw TCP
-  forwards at all. Off by default outside a cluster; an `fp_open` is refused
-  with `not_allowed` while it is off. Inside a cluster the existing
+  forwards at all. On by default outside a cluster (as before), always
+  bounded by `allowed_targets`; set it `off` and an `fp_open` is refused with
+  `not_allowed`. Inside a cluster the existing
   `HLE_FIREPUNCHER_ENABLED=true` opt-in still applies.
 - `preflight` (`HLE_PREFLIGHT=on|off`) — whether the dashboard may ask this
   host to probe URLs. On by default, but every probe is still checked against

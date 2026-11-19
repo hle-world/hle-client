@@ -229,8 +229,8 @@ def firepuncher_enabled(env: Mapping[str, str] | None = None) -> bool:
     """The cluster gate on firepuncher: allowed outside, opt-in inside.
 
     The agent then ANDs this with its local policy (see
-    :func:`firepuncher_policy_enabled`), so outside a cluster firepuncher is off
-    unless the operator turned it on. Inside Kubernetes it is off unless
+    :func:`firepuncher_policy_enabled`), so outside a cluster firepuncher is on
+    unless the operator turned it off. Inside Kubernetes it is off unless
     ``HLE_FIREPUNCHER_ENABLED`` is truthy: the relay's forward rules allow
     loopback and the private networks the pod sits on, which include the API
     server, and a relay must not be able to open raw TCP to it through that
@@ -248,14 +248,16 @@ def firepuncher_policy_enabled(
 ) -> bool:
     """Whether the local policy permits firepuncher on this host.
 
-    ``None`` means the operator did not set it: off outside a cluster, the
-    existing ``HLE_FIREPUNCHER_ENABLED`` opt-in inside one. A bool is the
-    operator's explicit answer, but even then the cluster opt-in still gates it,
-    so a stray ``HLE_FIREPUNCHER=on`` cannot re-open firepuncher inside a
-    cluster whose operator left it off.
+    ``None`` means the operator did not set it: on outside a cluster (the
+    behaviour agents already shipped with, so an upgrade does not silently cut
+    existing forwards; every forward is still bounded by ``allowed_targets`` and
+    the metadata refusal), the existing ``HLE_FIREPUNCHER_ENABLED`` opt-in inside
+    one. A bool is the operator's explicit answer, but even then the cluster
+    opt-in still gates it, so a stray ``HLE_FIREPUNCHER=on`` cannot re-open
+    firepuncher inside a cluster whose operator left it off.
     """
     if not in_kubernetes(env):
-        return bool(policy_value)
+        return policy_value is not False
     return firepuncher_enabled(env) if policy_value is not False else False
 
 
@@ -1041,8 +1043,7 @@ def _host_within(server_host: str, policy_host: str) -> bool:
         if network is None:
             return False
         return any(
-            network.version == net.version and network.subnet_of(net)
-            for net in local_networks()
+            network.version == net.version and network.subnet_of(net) for net in local_networks()
         )
     if _normalise_hostname(server_host) == _normalise_hostname(policy_host):
         return True
