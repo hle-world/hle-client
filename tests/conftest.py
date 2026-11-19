@@ -27,6 +27,10 @@ _CLUSTER_ENV = (
     "HLE_REMOTE_UPDATE",
     "HLE_ALLOW_DOWNGRADE",
     "HLE_UPDATE_MANIFEST",
+    # Local agent policy (endpoints, preflight, firepuncher).
+    "HLE_ALLOWED_TARGETS",
+    "HLE_FIREPUNCHER",
+    "HLE_PREFLIGHT",
 )
 
 

@@ -43,7 +43,9 @@ from hle_common.fp_protocol import (
 )
 
 if TYPE_CHECKING:
-    from hle_client.k8s_targets import KubernetesTargetGuard
+    from hle_client.k8s_targets import KubernetesTargetGuard, LocalTargetGuard
+
+    TargetGuard = KubernetesTargetGuard | LocalTargetGuard
 
 logger = logging.getLogger(__name__)
 
@@ -86,18 +88,19 @@ class FpAgentSide:
     agent's control connection). ``rules`` is the allowlist; an empty list means
     nothing is forwardable, which is the safe reading of "not configured".
 
-    ``enabled`` and ``target_guard`` carry the Kubernetes policy. Outside a
-    cluster ``enabled`` is True and ``target_guard`` is None, so the relay rules
-    are the only check, exactly as before. In a cluster the agent sets
-    ``enabled`` from ``HLE_FIREPUNCHER_ENABLED`` (off by default) and passes its
-    endpoint guard so a forward cannot reach the API server, metadata or a node
-    that the relay's own rules would otherwise allow.
+    ``enabled`` and ``target_guard`` carry the local policy. Firepuncher is off
+    by default outside a cluster (the operator opts in) and, inside one, off
+    unless ``HLE_FIREPUNCHER_ENABLED``. The rules are the relay's, already
+    intersected with the local policy, and ``target_guard`` is the endpoint
+    guard (Kubernetes or local) so a forward cannot reach the API server, the
+    metadata service or a public address the relay's own rules would otherwise
+    allow.
     """
 
     send: Sender
     rules: list[ForwardRule] = field(default_factory=list)
     enabled: bool = True
-    target_guard: KubernetesTargetGuard | None = None
+    target_guard: TargetGuard | None = None
     # Cloud metadata endpoints are refused on top of ``rules`` unless the
     # operator opted in, so a rule that covers link-local (or ``@local`` on a
     # VM with a link-local interface) cannot expose the instance's credentials.
@@ -201,19 +204,19 @@ class FpAgentSide:
         return rendered
 
     async def _on_open(self, msg: FpOpen) -> None:
-        # In a cluster firepuncher is off unless the operator turned it on: the
-        # relay's default rules include the pod's own networks, which inside a
-        # pod include the API server.
+        # Firepuncher is off unless the operator turned it on: inside a cluster
+        # the relay's default rules include the pod's own networks (the API
+        # server), and outside one the local policy defaults it off too.
         if not self.enabled:
             logger.warning(
-                "Firepuncher refused %s:%s — disabled on kubernetes agents",
+                "Firepuncher refused %s:%s — disabled on this agent",
                 msg.target_host,
                 msg.target_port,
             )
             await self._fail(
                 msg.stream_id,
                 FpErrorCode.NOT_ALLOWED,
-                "firepuncher is disabled on kubernetes agents",
+                "firepuncher is disabled on this agent",
             )
             return
 

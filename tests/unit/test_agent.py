@@ -632,7 +632,8 @@ class TestHelloContent:
         hello = await self._hello_sent(monkeypatch, supported=True, home=tmp_path)
         assert hello["type"] == "hello"
         assert "update:venv" in hello["capabilities"]
-        assert "firepuncher" in hello["capabilities"]
+        # Firepuncher is off by default off a cluster; the local policy opts in.
+        assert "firepuncher" not in hello["capabilities"]
         assert hello["install_method"] == "venv"
         assert hello["service_manager"] == "systemd"
         assert hello["platform"] in ("linux", "darwin", "freebsd", "windows")
@@ -688,6 +689,16 @@ class TestHelloContent:
     async def test_firepuncher_is_advertised_when_enabled_in_kubernetes(self, monkeypatch):
         monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
         monkeypatch.setenv("HLE_FIREPUNCHER_ENABLED", "true")
+        hello = await self._hello_sent(monkeypatch)
+        assert "firepuncher" in hello["capabilities"]
+
+    async def test_firepuncher_is_off_by_default_outside_kubernetes(self, monkeypatch):
+        monkeypatch.delenv("HLE_FIREPUNCHER", raising=False)
+        hello = await self._hello_sent(monkeypatch)
+        assert "firepuncher" not in hello["capabilities"]
+
+    async def test_firepuncher_is_advertised_when_the_local_policy_allows_it(self, monkeypatch):
+        monkeypatch.setenv("HLE_FIREPUNCHER", "on")
         hello = await self._hello_sent(monkeypatch)
         assert "firepuncher" in hello["capabilities"]
 

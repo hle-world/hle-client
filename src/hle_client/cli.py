@@ -906,15 +906,41 @@ def agent_status(ctx: click.Context, ready: bool) -> None:
         return
     if creds.agent_token_source == config.SOURCE_AGENT_TOKEN_ENV:
         console.print("Agent token source: [cyan]HLE_AGENT_TOKEN environment variable[/cyan]")
-        return
-    token = creds.agent_token
-    if token:
-        masked = f"{token[:9]}...{token[-4:]}" if len(token) > 13 else token
-        where = config.display_path(config.agent_config_path())
-        console.print(f"Agent token source: [cyan]{where}[/cyan]")
-        console.print(f"Token: [dim]{masked}[/dim]")
     else:
-        console.print("[dim]No agent token configured. Run 'hle auth login --agent-token'.[/dim]")
+        token = creds.agent_token
+        if token:
+            masked = f"{token[:9]}...{token[-4:]}" if len(token) > 13 else token
+            where = config.display_path(config.agent_config_path())
+            console.print(f"Agent token source: [cyan]{where}[/cyan]")
+            console.print(f"Token: [dim]{masked}[/dim]")
+        else:
+            console.print(
+                "[dim]No agent token configured. Run 'hle auth login --agent-token'.[/dim]"
+            )
+    _print_agent_policy()
+
+
+def _print_agent_policy() -> None:
+    """Show the local policy the running agent will enforce on this host.
+
+    The relay proposes endpoints, preflight probes and forward rules; this is
+    the ceiling it cannot broaden, read from the environment and agent.toml.
+    """
+    from hle_client import k8s_targets
+
+    policy = config.load_agent_policy()
+
+    def on_off(value: bool) -> str:
+        return "[green]on[/green]" if value else "[yellow]off[/yellow]"
+
+    effective_firepuncher = k8s_targets.firepuncher_policy_enabled(policy.firepuncher)
+    console.print("")
+    console.print("[bold]Local policy[/bold]")
+    targets = ", ".join(str(rule) for rule in policy.allowed_targets) or "none"
+    console.print(f"  Allowed targets  [cyan]{targets}[/cyan]")
+    console.print(f"  Firepuncher      {on_off(effective_firepuncher)}")
+    console.print(f"  Preflight        {on_off(policy.preflight)}")
+    console.print(f"  Remote update    {on_off(policy.remote_update)}")
 
 
 @agent.command("list")
