@@ -11,6 +11,7 @@ from hle_client import agent_logs, agent_update
 from hle_client.agent import AgentClient
 from hle_client.discovery.kubernetes import KubernetesProvider
 from hle_common.agent_protocol import (
+    DECLARED_OVERRIDE_CAPABILITY,
     MAX_LOG_LINE_CHARS,
     MAX_LOG_LINES,
     DeclaredAck,
@@ -173,6 +174,15 @@ class TestCapabilities:
     async def test_declared_only_when_opted_in(self, monkeypatch):
         caps = (await self._hello(monkeypatch, declares_endpoints=True))["capabilities"]
         assert "k8s:declared" in caps
+
+    async def test_extra_capabilities_are_appended_once(self, monkeypatch):
+        caps = (
+            await self._hello(
+                monkeypatch,
+                extra_capabilities=[DECLARED_OVERRIDE_CAPABILITY, DECLARED_OVERRIDE_CAPABILITY],
+            )
+        )["capabilities"]
+        assert caps.count(DECLARED_OVERRIDE_CAPABILITY) == 1
 
 
 def _decl(label: str = "web") -> DeclaredEndpoint:

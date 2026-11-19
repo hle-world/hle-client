@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `AgentClient` accepts `extra_capabilities` so an embedder can advertise
+  additional hello capabilities without replacing hle-client's internal
+  classes (hle-client#292).
+
 ## v2611.4 — 2026-11-18
 
 ### Fixed
