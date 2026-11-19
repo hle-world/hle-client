@@ -21,7 +21,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
 import websockets.exceptions
@@ -59,6 +59,9 @@ from hle_common.discovery import DiscoveryReport
 from hle_common.fp_protocol import ForwardRule, FpMsgType, default_rules
 from hle_common.fragmentation import CAPABILITY_FRAGMENTATION
 from hle_common.preflight import PreflightReport, PreflightRequest
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +245,7 @@ class AgentClient:
         declares_endpoints: bool = False,
         on_declared_ack: Callable[[DeclaredAck], Any] | None = None,
         spec_resolver: Callable[[EndpointSpec], EndpointSpec] | None = None,
+        extra_capabilities: Sequence[str] = (),
     ) -> None:
         self._token = token
         # Resolve local references the server must never see (e.g. a credential
@@ -254,6 +258,10 @@ class AgentClient:
         # advertised only once a caller opts in, never by default.
         self._declares_endpoints = declares_endpoints
         self._on_declared_ack = on_declared_ack
+        # Extra hello capabilities an embedder wants to advertise (e.g. a
+        # capability the relay grants the operator), appended without
+        # duplicates so a caller cannot accidentally repeat a built-in one.
+        self._extra_capabilities = tuple(extra_capabilities)
         self._declared: DeclaredEndpoints | None = None
         self._relay_host = relay_host
         self._relay_port = relay_port
@@ -601,6 +609,11 @@ class AgentClient:
             if update_cap is not None or self._handover_group is not None:
                 capabilities.append(HANDOVER_CAPABILITY)
             capabilities.append(CAPABILITY_FRAGMENTATION)
+            # Last, so an embedder's capabilities follow the built-ins. Skip any
+            # the agent already advertises and any repeated within the extras.
+            for capability in self._extra_capabilities:
+                if capability not in capabilities:
+                    capabilities.append(capability)
             hello = AgentHello(
                 token=self._token,
                 agent_version=__version__,
