@@ -918,7 +918,7 @@ class LocalTargetGuard:
         # transport resolves it again (a probe that does not resolve fails on
         # its own). Firepuncher still resolves it below because it needs an
         # address to dial.
-        if port is None and "." not in name and not explicitly_allowed:
+        if port is None and "." not in name and not explicitly_allowed and self._allowed:
             return _Eval(allowed=True, host=name)
 
         addresses = await self._resolve(name)
